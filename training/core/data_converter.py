@@ -317,19 +317,16 @@ class TinkerDataConverter:
         loss_fn_outputs = []
 
         for result in results:
-            # Extract loss and logprobs from Slime result
-            loss_value = result.get("loss", 0.0)
-            logprobs = result.get("logprobs", [])
-
-            # Convert to Tinker tensor format
+            loss_value = TinkerDataConverter._extract_scalar_loss(result.get("loss", 0.0))
+            logprobs = TinkerDataConverter._extract_logprob_list(result.get("logprobs", []))
             loss_fn_outputs.append({
                 "loss": {
-                    "data": [float(loss_value)],
+                    "data": [loss_value],
                     "shape": [1],
                     "dtype": "float32"
                 },
                 "logprobs": {
-                    "data": [float(lp) for lp in logprobs],
+                    "data": logprobs,
                     "shape": [len(logprobs)],
                     "dtype": "float32"
                 } if logprobs else None
@@ -426,7 +423,7 @@ class TinkerDataConverter:
 
         # Build per-sample loss_fn_outputs
         loss_fn_outputs = []
-        total_loss = float(loss_dict.get("loss", 0.0))
+        total_loss = TinkerDataConverter._extract_scalar_loss(loss_dict.get("loss", 0.0))
 
         for i in range(batch_size):
             output_entry = {
@@ -500,22 +497,22 @@ class TinkerDataConverter:
 
         # Build metrics dict matching original API format
         metrics_dict = {
-            "total_loss:sum": float(loss_dict.get("loss", 0.0)),
-            "pg_loss:sum": float(loss_dict.get("pg_loss", 0.0)),
-            "entropy_loss:sum": float(loss_dict.get("entropy_loss", 0.0)),
-            "pg_clipfrac:mean": float(loss_dict.get("pg_clipfrac", 0.0)),
-            "ppo_kl:sum": float(loss_dict.get("ppo_kl", 0.0)),
-            "grad_norm:mean": float(grad_norm),
+            "total_loss:sum": TinkerDataConverter._extract_scalar_loss(loss_dict.get("loss", 0.0)),
+            "pg_loss:sum": TinkerDataConverter._extract_scalar_loss(loss_dict.get("pg_loss", 0.0)),
+            "entropy_loss:sum": TinkerDataConverter._extract_scalar_loss(loss_dict.get("entropy_loss", 0.0)),
+            "pg_clipfrac:mean": TinkerDataConverter._extract_scalar_loss(loss_dict.get("pg_clipfrac", 0.0)),
+            "ppo_kl:sum": TinkerDataConverter._extract_scalar_loss(loss_dict.get("ppo_kl", 0.0)),
+            "grad_norm:mean": TinkerDataConverter._extract_scalar_loss(grad_norm),
             "num_tokens:sum": float(total_num_tokens),
         }
 
         # Add optional metrics if present
         if "kl_loss" in loss_dict:
-            metrics_dict["kl_loss:sum"] = float(loss_dict.get("kl_loss", 0.0))
+            metrics_dict["kl_loss:sum"] = TinkerDataConverter._extract_scalar_loss(loss_dict.get("kl_loss", 0.0))
         if "value_loss" in loss_dict:
-            metrics_dict["value_loss:sum"] = float(loss_dict.get("value_loss", 0.0))
+            metrics_dict["value_loss:sum"] = TinkerDataConverter._extract_scalar_loss(loss_dict.get("value_loss", 0.0))
         if "value_clipfrac" in loss_dict:
-            metrics_dict["value_clipfrac:mean"] = float(loss_dict.get("value_clipfrac", 0.0))
+            metrics_dict["value_clipfrac:mean"] = TinkerDataConverter._extract_scalar_loss(loss_dict.get("value_clipfrac", 0.0))
 
         # Build top-level logprobs (flattened across all samples)
         # Required by Tinker client for RL training
@@ -541,3 +538,46 @@ class TinkerDataConverter:
                 "dtype": "float32"
             }
         }
+
+    @staticmethod
+    def _extract_scalar_loss(loss_entry: Any) -> float:
+        if isinstance(loss_entry, (int, float)):
+            return float(loss_entry)
+        if hasattr(loss_entry, "item"):
+            try:
+                return float(loss_entry.item())
+            except Exception:
+                return 0.0
+        if isinstance(loss_entry, dict):
+            for key in ("loss", "pg_loss", "value_loss", "kl_loss", "entropy_loss"):
+                val = loss_entry.get(key)
+                if val is not None:
+                    return TinkerDataConverter._extract_scalar_loss(val)
+        return 0.0
+
+    @staticmethod
+    def _extract_logprob_list(logprobs_entry: Any) -> List[float]:
+        if not logprobs_entry:
+            return []
+        normalized: List[float] = []
+        for item in logprobs_entry:
+            value = None
+            if isinstance(item, (int, float)):
+                value = float(item)
+            elif hasattr(item, "item"):
+                try:
+                    value = float(item.item())
+                except Exception:
+                    value = None
+            elif isinstance(item, (list, tuple)) and item:
+                head = item[0]
+                if isinstance(head, (int, float)):
+                    value = float(head)
+                elif hasattr(head, "item"):
+                    try:
+                        value = float(head.item())
+                    except Exception:
+                        value = None
+            if value is not None:
+                normalized.append(value)
+        return normalized
