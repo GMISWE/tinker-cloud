@@ -1,6 +1,6 @@
 # OpenTinker Miles Training API
 
-Standalone extraction of kgateway's training service wired to the Miles backend. This repository focuses on the FastAPI application under `training/` and includes a Dockerfile for building a runnable image.
+Tinker -> tinke-miles -> miles for e2e training
 
 ## Development
 
