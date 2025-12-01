@@ -1,19 +1,123 @@
 # OpenTinker Miles Training API
 
-Tinker -> tinke-miles -> miles for e2e training
+Exposes the Tinker training surface while delegating RL training jobs to Miles/Slime Ray actors.
 
-## Development
+## Overview
+
+This repo was originally built within the kgateway training module so it can run independently for local iteration, CI, and custom deployments. The `training/` package bundles:
+
+- **HTTP Surface** – Modular FastAPI routers (`routers/`) that stay thin and forward work to services.
+- **Business Logic** – Services (`services/`) that orchestrate data conversion, validation, and async task handling before talking to Miles.
+- **Core Utilities** – Validators, converters, and task managers (`core/`) that keep the HTTP layer stateless.
+- **Storage** – Filesystem + SQLite helpers (`storage/`) for futures and metadata tracking.
+
+```
+Tinker Client ─▶ FastAPI (training/api.py) ─▶ Ray TrainGroup ─▶ Miles / Megatron actors
+```
+
+## Features
+
+- Drop-in compatibility with the Tinker training API (forward, forward-backward, optimizer, sampling, checkpointing).
+- Configurable runtime via `TrainingConfig` (env vars, `.env`, or explicit objects).
+- Async background task tracking and polling (`/api/v1/retrieve_future`).
+- Optional API key auth for parity with production kgateway deployments.
+- Docker image for parity testing in cluster environments.
+
+## Requirements
+
+- Python 3.11+
+- Ray cluster (or local Ray runtime) reachable via `RAY_ADDRESS`
+- Access to Miles/Slime codebase on the same filesystem or Python path (see `requirements.txt`)
+
+## Quickstart
 
 ```bash
+git clone <repo>/opentinker-miles
+cd opentinker-miles
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn training.api:app --reload --port 8000
+
+# Start the API with live reload on :8000
+uvicorn training.api:app --reload --host 0.0.0.0 --port 8000
+```
+
+Once running, hit `http://localhost:8000/docs` for interactive OpenAPI docs, or call endpoints with the Tinker client by pointing `TINKER_BASE_URL` at your local server.
+
+## Configuration
+
+`training.config.TrainingConfig` reads environment variables at startup. Important knobs:
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `TRAINING_HOST` / `TRAINING_PORT` | ASGI bind address | `0.0.0.0` / `8000` |
+| `TINKER_API_KEY` | Shared secret for routers | `slime-dev-key` |
+| `RAY_ADDRESS` / `RAY_NAMESPACE` | Connection info for Ray cluster | `auto` / `kgateway` |
+| `METADATA_DIR` / `FUTURES_DB_NAME` | Local persistence for training metadata | `./data/metadata` / `futures.db` |
+| `SUPPORTED_MODELS` | JSON array surfaced by `/api/v1/get_server_capabilities` | `[]` |
+
+To supply a custom config object (useful for tests), import `create_app`:
+
+```python
+from training.api import create_app
+from training.config import TrainingConfig
+
+config = TrainingConfig.from_file("config/training.yaml")
+app = create_app(config)
+```
+
+## Common Workflows
+
+### Development Server
+
+```bash
+uvicorn training.api:app --reload --host 0.0.0.0 --port 8000
+```
+
+### Formatting & Linting
+
+```bash
+ruff check training
+black training
+```
+
+### Running Tests
+
+Unit tests live alongside modules; integration tests can be run via Tinker:
+
+```bash
+export TINKER_BASE_URL=http://localhost:8000
+export TINKER_API_KEY=slime-dev-key
+pytest tests  # or run tinker client flows
 ```
 
 ## Docker
 
+Build a reproducible image that bundles the FastAPI app and dependencies:
+
 ```bash
 cd docker
 docker build -t opentinker/miles-training:latest .
+docker run -p 8000:8000 \
+  -e RAY_ADDRESS=ray://miles-ray:10001 \
+  -e TINKER_API_KEY=slime-dev-key \
+  opentinker/miles-training:latest
 ```
+
+## API Surface
+
+- `POST /api/v1/forward_backward` – Execute forward/backward pass (DPO/SFT/RL)
+- `POST /api/v1/forward` – Forward-only reference run (logprobs)
+- `POST /api/v1/optim_step` – Apply optimizer step once gradients are accumulated
+- `POST /api/v1/retrieve_future` – Poll background tasks
+- `POST /api/v1/sample` – Generate sequences with the latest weights
+- `POST /api/v1/save_weights` / `save_weights_for_sampler` – Persist checkpoints
+- `GET /api/v1/health` – Lightweight readiness probe
+
+See `training/routers` for the full list of endpoints.
+
+## Troubleshooting
+
+- **Cannot reach Ray** – verify `RAY_ADDRESS` and that Ray head is running (`ray status`). Local dev can use `ray start --head`.
+- **Authentication failures** – set `TINKER_API_KEY` on both the server and client. Disable auth via config if needed.
+- **Reference logprob mismatches** – ensure dataset weights include the prompt mask; the converter trims/pads according to incoming `loss_fn_inputs["weights"]`.
