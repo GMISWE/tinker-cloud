@@ -1,0 +1,142 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: kgateway-training
+  name: kgateway-training
+  namespace: miles-gmi-tinker
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: kgateway-training
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: kgateway-training
+    spec:
+      containers:
+      - env:
+        - name: RUN_MODE
+          value: both
+        - name: TRAINING_PORT
+          value: "8000"
+        - name: LOG_LEVEL
+          value: INFO
+        - name: TINKER_API_KEY
+          value: slime-dev-key
+        - name: RAY_ADDRESS
+          value: ray://miles-headless.miles-gmi-tinker:10001
+        - name: CUDA_DEVICE_MAX_CONNECTIONS
+          value: "1"
+        - name: HF_HUB_OFFLINE
+          value: "0"
+        - name: TRANSFORMERS_OFFLINE
+          value: "0"
+        image: us-west1-docker.pkg.dev/devv-404803/gmi-test-repo/kgateway-ai-training:latest
+        imagePullPolicy: Always
+        livenessProbe:
+          failureThreshold: 15
+          httpGet:
+            path: /health
+            port: 8000
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          successThreshold: 1
+          timeoutSeconds: 30
+        name: kgateway-ai-training
+        ports:
+        - containerPort: 8000
+          name: training-api
+          protocol: TCP
+        - containerPort: 9092
+          name: metrics
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /health
+            port: 8000
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 30
+        resources:
+          limits:
+            cpu: "2"
+            memory: 4Gi
+          requests:
+            cpu: "1"
+            memory: 2Gi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /data
+          name: miles-storage
+        - mountPath: /dev/shm
+          name: shm
+      dnsPolicy: ClusterFirst
+      imagePullSecrets:
+      - name: gcp-secret
+      initContainers:
+      - command:
+        - sh
+        - -c
+        - mkdir -p /data/metadata /data/models /data/checkpoints /data/datasets /data/trajectories
+          && chmod -R 777 /data
+        image: busybox:1.35
+        imagePullPolicy: IfNotPresent
+        name: init-storage
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /data
+          name: miles-storage
+      nodeSelector:
+        kubernetes.io/hostname: hgxcn24
+      tolerations:
+      - key: "node.kubernetes.io/unschedulable"
+        operator: "Exists"
+        effect: "NoSchedule"
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - hostPath:
+          path: /mnt/miles-data-tinker
+          type: DirectoryOrCreate
+        name: miles-storage
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 16Gi
+        name: shm
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kgateway-training
+  namespace: miles-gmi-tinker
+  labels:
+    app: kgateway-training
+spec:
+  type: ClusterIP
+  selector:
+    app: kgateway-training
+  ports:
+  - name: training-api
+    port: 8000
+    targetPort: 8000
+  - name: metrics
+    port: 9092
+    targetPort: 9092
