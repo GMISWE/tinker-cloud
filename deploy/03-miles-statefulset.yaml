@@ -1,0 +1,216 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  labels:
+    app: miles-training
+  name: miles-training
+  namespace: miles-gmi-tinker
+spec:
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  podManagementPolicy: OrderedReady
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: miles-training
+  serviceName: miles-headless
+  template:
+    metadata:
+      labels:
+        app: miles-training
+    spec:
+      initContainers:
+      - name: init-model-weights
+        image: us-west1-docker.pkg.dev/devv-404803/gmi-test-repo/miles_dev-202511120a-dev:latest
+        imagePullPolicy: Always
+        command:
+        - /bin/bash
+        - -c
+        args:
+        - |
+          set -ex
+
+          mkdir -p /data/models /data/datasets
+
+          if [ ! -d "/data/models/Qwen2.5-0.5B-Instruct" ]; then
+              echo "Downloading Qwen2.5-0.5B-Instruct from Hugging Face..."
+              python -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen2.5-0.5B-Instruct', local_dir='/data/models/Qwen2.5-0.5B-Instruct')"
+          else
+              echo "Model directory already present, skipping HF download."
+          fi
+
+          if [ ! -d "/data/datasets/gsm8k" ]; then
+              echo "Downloading GSM8K dataset..."
+              python -c "from huggingface_hub import snapshot_download; snapshot_download('zhuzilin/gsm8k', repo_type='dataset', local_dir='/data/datasets/gsm8k')"
+          else
+              echo "Dataset already present, skipping download."
+          fi
+
+          if [ ! -d "/data/models/Qwen2.5-0.5B-Instruct_torch_dist" ]; then
+              echo "Converting HF checkpoint to Megatron format..."
+              cd /root/miles
+              source scripts/models/qwen2.5-0.5B.sh
+              PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
+                  ${MODEL_ARGS[@]} \
+                  --hf-checkpoint /data/models/Qwen2.5-0.5B-Instruct \
+                  --save /data/models/Qwen2.5-0.5B-Instruct_torch_dist
+          else
+              echo "Megatron checkpoint already present, skipping conversion."
+          fi
+        env:
+        - name: HF_HUB_OFFLINE
+          value: "0"
+        - name: TRANSFORMERS_OFFLINE
+          value: "0"
+        volumeMounts:
+        - mountPath: /data
+          name: miles-storage
+      containers:
+      - args:
+        - |
+          set -ex
+
+          # Create directory structure
+          mkdir -p /data/models /data/checkpoints /data/datasets /data/trajectories
+
+          # Miles is pre-installed in the image
+          echo "Using pre-installed Miles"
+          python -c "import miles; print('Miles imported successfully')" || echo "Miles import check"
+
+          # Disable NVLS - container cannot access host Fabric Manager
+          export NCCL_NVLS_ENABLE=0
+          echo "NCCL_NVLS_ENABLE=$NCCL_NVLS_ENABLE (disabled - using regular NVLink)"
+
+          # Start Ray head node with Ray Client Server enabled
+          echo "Starting Ray head node at ${MASTER_ADDR}..."
+          ray start --head \
+            --node-ip-address ${MASTER_ADDR} \
+            --num-gpus 4 \
+            --disable-usage-stats \
+            --dashboard-host=0.0.0.0 \
+            --dashboard-port=8265 \
+            --ray-client-server-port=10001
+
+          # Check Ray status
+          ray status
+
+          echo "========================================"
+          echo "Miles environment ready!"
+          echo "Ray Dashboard: http://${MASTER_ADDR}:8265"
+          echo "========================================"
+          echo ""
+          echo "To run miles training:"
+          echo "  kubectl exec -it miles-training-0 -n miles-gmi-tinker -- /bin/bash"
+          echo "  cd /root/miles"
+          echo "  python train.py --help"
+          echo ""
+
+          # Keep container running
+          tail -f /dev/null
+        command:
+        - /bin/bash
+        - -c
+        env:
+        - name: MASTER_ADDR
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: status.podIP
+        - name: PYTHONPATH
+          value: /root/Megatron-LM/
+        - name: CUDA_DEVICE_MAX_CONNECTIONS
+          value: "1"
+        - name: NCCL_DEBUG
+          value: INFO
+        - name: NCCL_IB_DISABLE
+          value: "0"
+        - name: NCCL_SOCKET_IFNAME
+          value: eth0
+        - name: PYTHONBUFFERED
+          value: "16"
+        - name: HF_HUB_OFFLINE
+          value: "0"
+        - name: TRANSFORMERS_OFFLINE
+          value: "0"
+        image: us-west1-docker.pkg.dev/devv-404803/gmi-test-repo/miles_dev-202511120a-dev:latest
+        imagePullPolicy: Always
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /
+            port: 8265
+            scheme: HTTP
+          initialDelaySeconds: 120
+          periodSeconds: 30
+          successThreshold: 1
+          timeoutSeconds: 10
+        name: miles
+        ports:
+        - containerPort: 8265
+          name: ray-dashboard
+          protocol: TCP
+        - containerPort: 6379
+          name: ray-client
+          protocol: TCP
+        - containerPort: 30000
+          name: sglang
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /
+            port: 8265
+            scheme: HTTP
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 5
+        resources:
+          limits:
+            memory: 256Gi
+            nvidia.com/gpu: "4"
+          requests:
+            memory: 128Gi
+            nvidia.com/gpu: "4"
+        securityContext:
+          capabilities:
+            add:
+            - IPC_LOCK
+            - SYS_PTRACE
+          privileged: false
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /data
+          name: miles-storage
+        - mountPath: /dev/shm
+          name: shm
+      dnsPolicy: ClusterFirst
+      hostIPC: true
+      imagePullSecrets:
+      - name: gcp-secret
+      nodeSelector:
+        kubernetes.io/hostname: hgxcn24
+      tolerations:
+      - key: "node.kubernetes.io/unschedulable"
+        operator: "Exists"
+        effect: "NoSchedule"
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - hostPath:
+          path: /mnt/miles-data-tinker
+          type: DirectoryOrCreate
+        name: miles-storage
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 32Gi
+        name: shm
+  updateStrategy:
+    rollingUpdate:
+      partition: 0
+    type: RollingUpdate
