@@ -200,9 +200,14 @@ class TinkerDataConverter:
 
             if is_rl:
                 # RL mode: Extract advantages, logprobs, mask
+                # Note: DPO doesn't use advantages - it's optional for preference methods
                 advantages = cls._get_field(loss_fn_inputs, "advantages")
-                advantages_data = cls.extract_tensor_data(advantages)
-                advantages_list.append(torch.tensor(advantages_data, dtype=torch.float32))
+                if advantages is not None:
+                    advantages_data = cls.extract_tensor_data(advantages)
+                    advantages_list.append(torch.tensor(advantages_data, dtype=torch.float32))
+                else:
+                    # DPO and other preference methods don't use advantages
+                    advantages_list.append(torch.zeros(len(tokens), dtype=torch.float32))
 
                 logprobs = cls._get_field(loss_fn_inputs, "logprobs")
                 logprobs_data = cls.extract_tensor_data(logprobs)
@@ -300,9 +305,47 @@ class TinkerDataConverter:
         return rollout_data
 
     @staticmethod
+    def _extract_response_lengths_from_original(original_data: Optional[List[Any]]) -> List[int]:
+        """Extract response lengths (mask lengths) from original Tinker payload."""
+        response_lengths_list: List[int] = []
+        if not original_data:
+            return response_lengths_list
+
+        for idx, datum in enumerate(original_data):
+            loss_fn_inputs = (
+                datum.get("loss_fn_inputs")
+                if isinstance(datum, dict)
+                else getattr(datum, "loss_fn_inputs", None)
+            )
+            if not loss_fn_inputs:
+                response_lengths_list.append(0)
+                continue
+
+            weights_data = None
+            if isinstance(loss_fn_inputs, dict):
+                weights_data = loss_fn_inputs.get("weights") or loss_fn_inputs.get("weight") or loss_fn_inputs.get("mask")
+            else:
+                weights_data = (
+                    getattr(loss_fn_inputs, "weights", None)
+                    or getattr(loss_fn_inputs, "weight", None)
+                    or getattr(loss_fn_inputs, "mask", None)
+                )
+
+            if weights_data is not None:
+                weights = TinkerDataConverter.extract_tensor_data(weights_data)
+                response_lengths_list.append(len(weights))
+                print(f"[CONVERTER DEBUG] Original weights[{idx}] length = {len(weights)}", flush=True)
+            else:
+                response_lengths_list.append(0)
+
+        return response_lengths_list
+
+    @staticmethod
     def rollout_to_forward_result(
         results: List[Dict[str, Any]],
-        loss_fn: str = "cross_entropy"
+        loss_fn: str = "cross_entropy",
+        rollout_data: Optional[Dict[str, Any]] = None,
+        original_data: Optional[List[Any]] = None
     ) -> Dict[str, Any]:
         """
         Convert Slime forward_only results to Tinker forward result format.
@@ -314,28 +357,103 @@ class TinkerDataConverter:
         Returns:
             Tinker forward result dict
         """
-        loss_fn_outputs = []
+        loss_fn_outputs: List[Dict[str, Any]] = []
+        all_logprobs: List[float] = []
+        total_loss = 0.0
+        response_lengths_list: List[int] = TinkerDataConverter._extract_response_lengths_from_original(original_data)
+        if not response_lengths_list and rollout_data and rollout_data.get("response_lengths"):
+            response_lengths_list = [int(length) for length in rollout_data.get("response_lengths", [])]
+
+        # Miles returns one result per (data-parallel, pipeline) shard.
+        # Only the pipeline-last shard includes log_probs, and it nests them
+        # under result["loss"]["log_probs"] as a list of per-sample tensors.
+        sample_index = 0
 
         for result in results:
-            loss_value = TinkerDataConverter._extract_scalar_loss(result.get("loss", 0.0))
-            logprobs = TinkerDataConverter._extract_logprob_list(result.get("logprobs", []))
-            loss_fn_outputs.append({
-                "loss": {
-                    "data": [loss_value],
-                    "shape": [1],
-                    "dtype": "float32"
-                },
-                "logprobs": {
-                    "data": logprobs,
-                    "shape": [len(logprobs)],
-                    "dtype": "float32"
-                } if logprobs else None
-            })
+            loss_dict = result.get("loss") or {}
+            raw_logprobs = []
+            loss_value = 0.0
+
+            if isinstance(loss_dict, dict):
+                raw_logprobs = loss_dict.get("log_probs") or []
+                loss_value = TinkerDataConverter._extract_scalar_loss(loss_dict.get("loss", 0.0))
+
+            # Fallback for legacy payloads where logprobs sit at the top level
+            if not raw_logprobs:
+                raw_logprobs = result.get("logprobs") or result.get("log_probs") or []
+
+            if not isinstance(raw_logprobs, list):
+                raw_logprobs = []
+
+            for tensor in raw_logprobs:
+                if hasattr(tensor, "cpu"):
+                    logprob_list = tensor.cpu().tolist()
+                elif isinstance(tensor, (list, tuple)):
+                    logprob_list = list(tensor)
+                else:
+                    logprob_list = [float(tensor)]
+
+                original_logprobs_length = len(logprob_list)
+
+                # Trim/pad to match response mask length if available
+                if sample_index < len(response_lengths_list):
+                    response_length = response_lengths_list[sample_index]
+                    if response_length > 0:
+                        logprobs_length = len(logprob_list)
+                        if logprobs_length > response_length:
+                            logprob_list = logprob_list[-response_length:]
+                            print(f"[CONVERTER DEBUG] Sample {sample_index}: trimmed logprobs from {original_logprobs_length} to {response_length}", flush=True)
+                        elif logprobs_length < response_length:
+                            padding = [0.0] * (response_length - logprobs_length)
+                            logprob_list = padding + logprob_list
+                            print(f"[CONVERTER DEBUG] Sample {sample_index}: padded logprobs from {original_logprobs_length} to {response_length}", flush=True)
+                        else:
+                            print(f"[CONVERTER DEBUG] Sample {sample_index}: logprobs {original_logprobs_length} matches response_length {response_length}", flush=True)
+                else:
+                    print(f"[CONVERTER DEBUG] Sample {sample_index}: no response_length, using raw logprobs length {original_logprobs_length}", flush=True)
+
+                # Use logprobs as-is - no [0.0] prepend needed here
+                # The [0.0] prepend for DPO [1:] slice compensation is done in sglang_client.py
+                # for the compute_logprobs_async path (reference model), not here
+                payload_logprobs = logprob_list
+                print(f"[CONVERTER DEBUG] Sample {sample_index}: final payload_logprobs length = {len(payload_logprobs)}", flush=True)
+
+                loss_fn_outputs.append({
+                    "loss": {
+                        "data": [loss_value],
+                        "shape": [1],
+                        "dtype": "float32"
+                    },
+                    "logprobs": {
+                        "data": payload_logprobs,
+                        "shape": [len(payload_logprobs)],
+                        "dtype": "float32"
+                    }
+                })
+                all_logprobs.extend(logprob_list)
+
+                total_loss += loss_value
+                sample_index += 1
+
+        if not loss_fn_outputs:
+            logger.warning("forward_only returned no log_probs; loss_fn_outputs will be empty")
+
+        metrics_dict = {
+            "total_loss:sum": float(total_loss),
+            "grad_norm:mean": 0.0,
+            "num_tokens:sum": float(len(all_logprobs)),
+        }
 
         return {
             "type": "forward",
             "loss_fn_output_type": loss_fn,
-            "loss_fn_outputs": loss_fn_outputs
+            "loss_fn_outputs": loss_fn_outputs,
+            "metrics": metrics_dict,
+            "logprobs": {
+                "data": all_logprobs,
+                "shape": [len(all_logprobs)],
+                "dtype": "float32"
+            }
         }
 
     @staticmethod
@@ -399,25 +517,11 @@ class TinkerDataConverter:
         tokens_list = rollout_data.get("tokens", []) if rollout_data else []
 
         # Extract response_lengths from ORIGINAL Tinker data (before Slime padding)
-        response_lengths_list = []
-        if original_data:
-            for idx, datum in enumerate(original_data):
-                # Extract weights from original Tinker request
-                loss_fn_inputs = datum.get("loss_fn_inputs") if isinstance(datum, dict) else getattr(datum, "loss_fn_inputs", None)
-                if loss_fn_inputs:
-                    weights_data = loss_fn_inputs.get("weights") if isinstance(loss_fn_inputs, dict) else getattr(loss_fn_inputs, "weights", None)
-                    if weights_data:
-                        # Extract tensor data - handle TensorData Pydantic model
-                        weights = TinkerDataConverter.extract_tensor_data(weights_data)
-                        response_length = len(weights)
-                        response_lengths_list.append(response_length)
-                        print(f"[CONVERTER DEBUG] Original weights[{idx}] length = {response_length}", flush=True)
-                    else:
-                        response_lengths_list.append(0)
-                else:
-                    response_lengths_list.append(0)
-        else:
-            print(f"[CONVERTER DEBUG] No original_data provided, using empty response_lengths", flush=True)
+        response_lengths_list = TinkerDataConverter._extract_response_lengths_from_original(original_data)
+        if not response_lengths_list and rollout_data and rollout_data.get("response_lengths"):
+            response_lengths_list = [int(length) for length in rollout_data.get("response_lengths", [])]
+        if not response_lengths_list:
+            print(f"[CONVERTER DEBUG] No mask lengths available; using zero-length defaults", flush=True)
 
         print(f"[CONVERTER DEBUG] response_lengths_list: {response_lengths_list}", flush=True)
 
@@ -541,6 +645,7 @@ class TinkerDataConverter:
 
     @staticmethod
     def _extract_scalar_loss(loss_entry: Any) -> float:
+        """Extract a scalar float from various Miles/Slime loss formats."""
         if isinstance(loss_entry, (int, float)):
             return float(loss_entry)
         if hasattr(loss_entry, "item"):
@@ -551,14 +656,29 @@ class TinkerDataConverter:
         if isinstance(loss_entry, dict):
             for key in ("loss", "pg_loss", "value_loss", "kl_loss", "entropy_loss"):
                 val = loss_entry.get(key)
-                if val is not None:
-                    return TinkerDataConverter._extract_scalar_loss(val)
+                if isinstance(val, (int, float)):
+                    return float(val)
+                if hasattr(val, "item"):
+                    try:
+                        return float(val.item())
+                    except Exception:
+                        continue
+            for val in loss_entry.values():
+                if isinstance(val, (int, float)):
+                    return float(val)
+                if hasattr(val, "item"):
+                    try:
+                        return float(val.item())
+                    except Exception:
+                        continue
         return 0.0
 
     @staticmethod
     def _extract_logprob_list(logprobs_entry: Any) -> List[float]:
+        """Normalize logprob outputs into a flat list of floats."""
         if not logprobs_entry:
             return []
+
         normalized: List[float] = []
         for item in logprobs_entry:
             value = None
@@ -570,12 +690,12 @@ class TinkerDataConverter:
                 except Exception:
                     value = None
             elif isinstance(item, (list, tuple)) and item:
-                head = item[0]
-                if isinstance(head, (int, float)):
-                    value = float(head)
-                elif hasattr(head, "item"):
+                first = item[0]
+                if isinstance(first, (int, float)):
+                    value = float(first)
+                elif hasattr(first, "item"):
                     try:
-                        value = float(head.item())
+                        value = float(first.item())
                     except Exception:
                         value = None
             if value is not None:

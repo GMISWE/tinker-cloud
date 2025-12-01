@@ -81,7 +81,9 @@ class TrainingService:
         # Convert results back to Tinker format
         result = self.converter.rollout_to_forward_result(
             results,
-            loss_fn=loss_fn
+            loss_fn=loss_fn,
+            rollout_data=rollout_data,
+            original_data=data
         )
 
         logger.info(f"Forward pass completed for {model_id}")

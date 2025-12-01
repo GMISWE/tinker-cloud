@@ -245,6 +245,7 @@ class ForwardResult(BaseModel):
     type: str = Field(default="forward", description="Operation type")
     loss_fn_output_type: str = Field(..., description="Loss function type")
     loss_fn_outputs: List[LossFnOutput] = Field(..., description="Per-sample outputs")
+    metrics: Dict[str, float] = Field(default_factory=dict, description="Training metrics")
 
 
 # ============= Sampling Responses =============
