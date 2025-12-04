@@ -3,8 +3,8 @@
 # This image combines:
 # - Miles RL training backend (Ray head + Megatron)
 # - OpenTinker training API (Tinker-compatible endpoints)
-#
-# Replaces the separate miles-statefulset + kgateway-deployment with a single pod.
+# - Pre-downloaded model (Qwen2.5-0.5B-Instruct) + Megatron conversion
+# - Pre-downloaded dataset (GSM8K)
 #
 # Usage:
 #   cd /tmp/tmux-tmp/opentinker-miles
@@ -32,13 +32,45 @@ COPY training ./training
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-# Environment
+# Create data directories
+RUN mkdir -p /data/models /data/datasets /data/checkpoints /data/trajectories /data/metadata
+
+# Download Qwen2.5-0.5B-Instruct model from HuggingFace
+RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen2.5-0.5B-Instruct', local_dir='/data/models/Qwen2.5-0.5B-Instruct')"
+
+# Download GSM8K dataset
+RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('zhuzilin/gsm8k', repo_type='dataset', local_dir='/data/datasets/gsm8k')"
+
+# Convert HF checkpoint to Megatron torch_dist format
+RUN cd /root/miles && \
+    source scripts/models/qwen2.5-0.5B.sh && \
+    PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
+        ${MODEL_ARGS[@]} \
+        --hf-checkpoint /data/models/Qwen2.5-0.5B-Instruct \
+        --save /data/models/Qwen2.5-0.5B-Instruct_torch_dist
+
+# Environment - Training API
 ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH="/app:/root/miles:/root/Megatron-LM" \
     TRAINING_HOST="0.0.0.0" \
     TRAINING_PORT="8000" \
-    CUDA_DEVICE_MAX_CONNECTIONS="1" \
-    NCCL_NVLS_ENABLE="0"
+    TINKER_API_KEY="slime-dev-key" \
+    LOG_LEVEL="INFO"
+
+# Environment - GPU/NCCL
+ENV CUDA_DEVICE_MAX_CONNECTIONS="1" \
+    NCCL_NVLS_ENABLE="0" \
+    NCCL_DEBUG="INFO" \
+    NCCL_IB_DISABLE="0" \
+    NCCL_SOCKET_IFNAME="eth0"
+
+# Environment - Ray
+ENV NUM_GPUS="4"
+
+# Environment - HuggingFace
+ENV HF_HOME="/data" \
+    HF_HUB_OFFLINE="0" \
+    TRANSFORMERS_OFFLINE="0"
 
 # Ports: 8000 (API), 8265 (Ray dashboard), 10001 (Ray client), 30000 (SGLang)
 EXPOSE 8000 8265 10001 30000
