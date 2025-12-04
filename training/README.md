@@ -59,6 +59,7 @@ Common env vars:
 - `SUPPORTED_MODELS` — JSON list consumed by `/api/v1/get_server_capabilities`
 - `METADATA_DIR`, `FUTURES_DB_NAME` — storage overrides
 - `RAY_ADDRESS`, `RAY_NAMESPACE` — Ray connection info
+- `ALLOW_PARTIAL_BATCHES` — set to `true` to let forward_backward accept batches not divisible by the data-parallel size (Miles scales gradients dynamically)
 
 ## Running
 

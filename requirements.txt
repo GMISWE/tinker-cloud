@@ -1,28 +1,25 @@
-grpcio
-grpcio-tools
-grpcio-health-checking
-protobuf>=5.26.1,<6.0.0
-prometheus-client
-openai
-tiktoken
+# OpenTinker-Miles Training API Dependencies
+#
+# NOTE: This is for layering on top of Miles base image which already has:
+# - torch, transformers, numpy, httpx (DO NOT override these)
+# - tinker_gmi, tinker-cookbook (at /tmp/)
+#
+# Only add packages NOT in the base image:
+
+# Ray - pinned version for compatibility
+ray==2.52.0
+
+# FastAPI server
 fastapi[standard]
 uvicorn[standard]
 python-multipart
-# There is an issue: https://github.com/explosion/cython-blis/issues/117 that causes mac and arm linux
-# build to fail. Temp workaround is to limit spacy to < 3.8.0. Switch over to pyproject.toml and use
-# platform specific deps if needed
-spacy<3.8.0
-numpy~=1.26.4
-presidio_analyzer
-presidio_anonymizer
-opentelemetry-distro~=0.56b0
-opentelemetry-instrumentation-grpc~=0.56b0
-opentelemetry-exporter-otlp~=1.35.0
-httpx
-pytest-httpx
 
-# Training API dependencies (Tinker API / Slime backend)
-# IMPORTANT: Ray version MUST match Slime cluster exactly (2.51.1)
-ray==2.52.0
-torch>=2.0.0
-transformers>=4.30.0
+# API utilities
+openai
+tiktoken
+pydantic>=2.0.0
+
+# Observability (optional, for production)
+prometheus-client
+opentelemetry-distro
+opentelemetry-exporter-otlp
