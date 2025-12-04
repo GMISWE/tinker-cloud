@@ -17,7 +17,7 @@ class RequestValidator:
     Primary purpose: Catch user misconfigurations early with actionable error messages.
     """
 
-    def __init__(self, slime_args: Namespace):
+    def __init__(self, slime_args: Namespace, allow_partial_batches: bool = False):
         """
         Initialize validator with Slime configuration.
 
@@ -32,6 +32,7 @@ class RequestValidator:
         self.global_batch_size = slime_args.global_batch_size
         self.balance_data = getattr(slime_args, 'balance_data', False)
         self.n_samples_per_prompt = getattr(slime_args, 'n_samples_per_prompt', 1)
+        self.allow_partial_batches = allow_partial_batches
 
     def validate_sample_count(
         self,
@@ -59,14 +60,22 @@ class RequestValidator:
 
         # Check 2: DP divisibility (samples must distribute evenly across DP workers)
         if num_samples % self.dp_size != 0:
-            next_valid = ((num_samples // self.dp_size) + 1) * self.dp_size
-            prev_valid = (num_samples // self.dp_size) * self.dp_size
-            return (
-                f"Invalid sample count: Received {num_samples} samples but "
-                f"data parallel size is {self.dp_size}.\n"
-                f"Required: Sample count must be divisible by {self.dp_size}.\n"
-                f"Suggestion: Use {prev_valid} or {next_valid} samples instead."
-            )
+            if self.allow_partial_batches:
+                logger.warning(
+                    "ALLOW_PARTIAL_BATCHES enabled: proceeding with %s samples (dp=%s). "
+                    "Miles will rely on dynamic global batch scaling.",
+                    num_samples,
+                    self.dp_size,
+                )
+            else:
+                next_valid = ((num_samples // self.dp_size) + 1) * self.dp_size
+                prev_valid = (num_samples // self.dp_size) * self.dp_size
+                return (
+                    f"Invalid sample count: Received {num_samples} samples but "
+                    f"data parallel size is {self.dp_size}.\n"
+                    f"Required: Sample count must be divisible by {self.dp_size}.\n"
+                    f"Suggestion: Use {prev_valid} or {next_valid} samples instead."
+                )
 
         # Check 3: Global batch size divisibility
         if num_samples % self.global_batch_size != 0:
@@ -80,7 +89,12 @@ class RequestValidator:
             )
 
         # Check 4: RL group alignment (if using balanced data with grouped samples)
-        if is_rl and self.balance_data and self.n_samples_per_prompt > 1:
+        if (
+            is_rl
+            and self.balance_data
+            and self.n_samples_per_prompt > 1
+            and not self.allow_partial_batches
+        ):
             required_multiple = self.n_samples_per_prompt * self.dp_size
             if num_samples % required_multiple != 0:
                 next_valid = ((num_samples // required_multiple) + 1) * required_multiple

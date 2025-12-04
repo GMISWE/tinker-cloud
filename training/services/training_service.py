@@ -16,6 +16,7 @@ from miles.utils.ray_utils import Box
 from ..core.data_converter import TinkerDataConverter
 from ..core.validators import RequestValidator
 from ..utils.helpers import extract_learning_rates
+from ..config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,8 @@ class TrainingService:
     def __init__(self):
         """Initialize training service with converter"""
         self.converter = TinkerDataConverter()
+        config = get_config()
+        self.allow_partial_batches = getattr(config, "allow_partial_batches", False)
 
     async def forward(
         self,
@@ -179,7 +182,10 @@ class TrainingService:
             }
         else:
             # Normal path: validate and convert data
-            validator = RequestValidator(args)
+            validator = RequestValidator(
+                args,
+                allow_partial_batches=self.allow_partial_batches
+            )
             validation_error = validator.validate_forward_backward_request(
                 data,
                 is_rl=is_rl
