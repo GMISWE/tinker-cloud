@@ -24,6 +24,15 @@ echo "Creating data directories..."
 mkdir -p /data/models /data/checkpoints /data/datasets /data/trajectories /data/metadata
 chmod -R 777 /data 2>/dev/null || true
 
+# Convert model to Megatron format if needed (requires GPU)
+if [ -f /convert_model.sh ]; then
+    echo "Checking if model conversion is needed..."
+    /convert_model.sh || {
+        echo "WARNING: Model conversion failed. This might be expected if no GPU is available."
+        echo "The conversion will need to be done manually when GPU is available."
+    }
+fi
+
 # Verify Miles is available
 echo "Checking Miles installation..."
 python -c "import miles; print(f'Miles version: {getattr(miles, \"__version__\", \"installed\")}')" || {

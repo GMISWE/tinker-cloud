@@ -41,13 +41,9 @@ RUN python -c "from huggingface_hub import snapshot_download; snapshot_download(
 # Download GSM8K dataset
 RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('zhuzilin/gsm8k', repo_type='dataset', local_dir='/data/datasets/gsm8k')"
 
-# Convert HF checkpoint to Megatron torch_dist format
-RUN cd /root/miles && \
-    source scripts/models/qwen2.5-0.5B.sh && \
-    PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
-        ${MODEL_ARGS[@]} \
-        --hf-checkpoint /data/models/Qwen2.5-0.5B-Instruct \
-        --save /data/models/Qwen2.5-0.5B-Instruct_torch_dist
+# Copy model conversion script (to be run at runtime when GPU is available)
+COPY docker/convert_model.sh /convert_model.sh
+RUN chmod +x /convert_model.sh
 
 # Environment - Training API
 ENV PYTHONUNBUFFERED=1 \
