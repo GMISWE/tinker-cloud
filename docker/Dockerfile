@@ -32,18 +32,16 @@ COPY training ./training
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-# Create data directories
+# Create data directories (will be overridden if /data is mounted)
 RUN mkdir -p /data/models /data/datasets /data/checkpoints /data/trajectories /data/metadata
 
-# Download Qwen2.5-0.5B-Instruct model from HuggingFace
-RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen2.5-0.5B-Instruct', local_dir='/data/models/Qwen2.5-0.5B-Instruct')"
-
-# Download GSM8K dataset
-RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('zhuzilin/gsm8k', repo_type='dataset', local_dir='/data/datasets/gsm8k')"
-
-# Copy model conversion script (to be run at runtime when GPU is available)
+# Copy data preparation and model conversion scripts
+COPY docker/prepare_data.sh /prepare_data.sh
 COPY docker/convert_model.sh /convert_model.sh
-RUN chmod +x /convert_model.sh
+RUN chmod +x /prepare_data.sh /convert_model.sh
+
+# Note: Data download/conversion is handled at runtime by entrypoint.sh
+# This allows mounting existing data at /data to skip downloads
 
 # Environment - Training API
 ENV PYTHONUNBUFFERED=1 \

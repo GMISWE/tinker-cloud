@@ -24,6 +24,14 @@ echo "Creating data directories..."
 mkdir -p /data/models /data/checkpoints /data/datasets /data/trajectories /data/metadata
 chmod -R 777 /data 2>/dev/null || true
 
+# Prepare data: download models and datasets if not already present
+if [ -f /prepare_data.sh ]; then
+    echo "Preparing data..."
+    /prepare_data.sh || {
+        echo "WARNING: Data preparation failed."
+    }
+fi
+
 # Convert model to Megatron format if needed (requires GPU)
 if [ -f /convert_model.sh ]; then
     echo "Checking if model conversion is needed..."
