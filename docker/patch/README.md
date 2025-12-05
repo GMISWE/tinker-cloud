@@ -1,32 +1,29 @@
 # Tinker GMI Patches
 
-This directory contains patches for tinker_gmi to add integration testing infrastructure.
+This directory contains patches for tinker to support GMI/Slime checkpoint and training features.
 
 ## Patch Versions
 
 ### latest/
 - **Base commit**: `9ba155a` (Sync contents)
 - **Target commit**: `e7a43affeb3cc037acd0b5bd969e4d5c0f50f852`
-- **Description**: Integration testing infrastructure for the Tinker GMI Wrapper (#1)
 - **Repository**: https://github.com/thinking-machines-lab/tinker.git
 
 ## Patch Contents
 
-The `tinker_gmi.patch` includes:
-- Mock server test scaffold (`mock_server.py`)
-- Integration tests for GMI HTTP endpoints (`tests_integration/gmi_http/`)
-- End-to-end Tinker API tests (`tests_integration/e2e_tinker_api/`)
-- Checkpoint resume functionality
-- RL rollout pattern tests
-- Deployment verification script (`verify_deployment.sh`)
+The `tinker_gmi.patch` modifies `src/tinker/lib/public_interfaces/service_client.py`:
+
+- Adds `debug_train_only`, `checkpoint_path`, `user_metadata` parameters to `_create_model_submit()`
+- Adds same parameters to `create_lora_training_client()` and `create_lora_training_client_async()`
+- Updates `resume_training_run()` and `resume_training_run_async()` to load checkpoints during model creation (Slime/Megatron pattern) instead of separate `load_state()` call
 
 ## Generating a New Patch
 
-To generate a patch from tinker_gmi repository changes:
+To generate a patch for specific files only:
 
 ```bash
 cd /path/to/tinker_gmi
-git diff <base_commit>..<target_commit> > ../opentinker-miles/docker/patch/latest/tinker_gmi.patch
+git diff <base_commit>..<target_commit> -- src/tinker/lib/public_interfaces/service_client.py > ../opentinker-miles/docker/patch/latest/tinker_gmi.patch
 ```
 
 ## Applying Patches
