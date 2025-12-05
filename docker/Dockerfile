@@ -14,6 +14,10 @@
 ARG BASE_IMAGE=us-west1-docker.pkg.dev/devv-404803/gmi-test-repo/miles_dev-202511120a-dev:latest
 FROM ${BASE_IMAGE}
 
+# ======================================== Arguments =============================================
+ARG PATCH_VERSION=latest
+ARG TINKER_GMI_COMMIT=9ba155a
+
 LABEL maintainer="OpenTinker Team"
 LABEL description="All-in-One Tinker API + Miles RL Training"
 LABEL version="1.0"
@@ -42,6 +46,22 @@ RUN chmod +x /prepare_data.sh /convert_model.sh
 
 # Note: Data download/conversion is handled at runtime by entrypoint.sh
 # This allows mounting existing data at /data to skip downloads
+
+# ====================================== Tinker GMI Patches ============================================
+# Clone tinker at base commit and apply patches
+RUN git clone https://github.com/thinking-machines-lab/tinker.git /workspace/tinker_gmi && \
+    cd /workspace/tinker_gmi && \
+    git checkout ${TINKER_GMI_COMMIT}
+
+COPY docker/patch/${PATCH_VERSION}/tinker_gmi.patch /workspace/tinker_gmi/
+RUN cd /workspace/tinker_gmi && \
+    git apply tinker_gmi.patch && \
+    if grep -R -n '^<<<<<<< ' .; then \
+      echo "Patch failed to apply cleanly. Please resolve conflicts." && \
+      exit 1; \
+    fi && \
+    rm tinker_gmi.patch && \
+    pip install -e .
 
 # Environment - Training API
 ENV PYTHONUNBUFFERED=1 \
