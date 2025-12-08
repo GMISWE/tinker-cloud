@@ -154,6 +154,27 @@ class TinkerDataConverter:
         Returns:
             Slime rollout_data dict with torch tensors
         """
+        # Auto-detect data format based on fields present
+        # DPO's forward_backward_custom sends SFT-like data (target_tokens + weights)
+        # even when the model was created for RL training
+        if data and len(data) > 0:
+            first_datum = data[0]
+            loss_fn_inputs = cls._get_field(first_datum, "loss_fn_inputs")
+            if loss_fn_inputs:
+                has_advantages = cls._get_field(loss_fn_inputs, "advantages") is not None
+                has_logprobs = cls._get_field(loss_fn_inputs, "logprobs") is not None
+                has_weights = cls._get_field(loss_fn_inputs, "weights") is not None or cls._get_field(loss_fn_inputs, "weight") is not None
+                has_target = cls._get_field(loss_fn_inputs, "target_tokens") is not None or cls._get_field(loss_fn_inputs, "target") is not None
+
+                # If we have advantages or logprobs, it's RL data
+                # If we have weights+target but no logprobs, it's SFT data (including DPO backward pass)
+                detected_is_rl = has_advantages or has_logprobs
+                if detected_is_rl != is_rl:
+                    print(f"[CONVERTER] Auto-detected data format: is_rl={detected_is_rl} (was {is_rl}), "
+                          f"has_advantages={has_advantages}, has_logprobs={has_logprobs}, "
+                          f"has_weights={has_weights}, has_target={has_target}", flush=True)
+                    is_rl = detected_is_rl
+
         print(f"[CONVERTER DEBUG SFT] forward_backward_to_rollout called with {len(data)} samples, is_rl={is_rl}", flush=True)
         tokens_list = []
         loss_masks_list = []
@@ -199,49 +220,78 @@ class TinkerDataConverter:
             loss_fn_inputs = cls._get_field(datum, "loss_fn_inputs")
 
             if is_rl:
-                # RL mode: Extract advantages, logprobs, mask
+                # RL mode: Extract logprobs, mask, advantages, values, returns
+                # CRITICAL: response_length must match the lengths of loss_mask and all RL fields.
+                # Miles splits entropy/logprob tensors using response_lengths, so mismatches cause
+                # RuntimeError in get_sum_of_sample_mean(): split_with_sizes expects sum to match tensor size.
+
+                # Step 1: Determine response_length from mask or logprobs
+                # For RL, the mask determines which tokens to compute loss on (the response portion).
+                # If mask is not provided (tinker-cookbook removes mask via remove_mask()), we infer
+                # the response length from logprobs, which represents per-response-token values.
+                logprobs = cls._get_field(loss_fn_inputs, "logprobs")
+                logprobs_data = cls.extract_tensor_data(logprobs) if logprobs is not None else None
+
+                mask = cls._get_field(loss_fn_inputs, "mask")
+                if mask is not None:
+                    mask_data = cls.extract_tensor_data(mask)
+                    loss_mask = torch.tensor(mask_data, dtype=torch.float32)
+                    response_len = len(mask_data)
+                elif logprobs_data is not None:
+                    # No mask provided but logprobs available - use logprobs length as response length
+                    # This is the correct interpretation: logprobs covers only the response tokens
+                    response_len = len(logprobs_data)
+                    loss_mask = torch.ones(response_len, dtype=torch.float32)
+                    print(f"[CONVERTER RL] Sample {idx}: No mask, using logprobs length={response_len} for response_length (tokens={len(tokens)})", flush=True)
+                else:
+                    # Fallback: no mask and no logprobs - use full token length
+                    response_len = len(tokens)
+                    loss_mask = torch.ones(response_len, dtype=torch.float32)
+                    print(f"[CONVERTER RL] Sample {idx}: No mask and no logprobs, using full token length={response_len} for response_length", flush=True)
+
+                # Step 2: Process logprobs - must match response_len
+                # Handle None values in logprobs (SGLang returns None for first token)
+                if logprobs_data is None:
+                    logprobs_data_clean = [0.0] * response_len
+                else:
+                    logprobs_data_clean = [
+                        0.0 if lp is None else float(lp) for lp in logprobs_data
+                    ]
+                log_probs_list.append(torch.tensor(logprobs_data_clean, dtype=torch.float32))
+
+                # Step 3: Process advantages - must match response_len
                 # Note: DPO doesn't use advantages - it's optional for preference methods
                 advantages = cls._get_field(loss_fn_inputs, "advantages")
                 if advantages is not None:
                     advantages_data = cls.extract_tensor_data(advantages)
                     advantages_list.append(torch.tensor(advantages_data, dtype=torch.float32))
                 else:
-                    # DPO and other preference methods don't use advantages
-                    advantages_list.append(torch.zeros(len(tokens), dtype=torch.float32))
+                    # Create zeros with matching response_len (not len(tokens))
+                    advantages_list.append(torch.zeros(response_len, dtype=torch.float32))
 
-                logprobs = cls._get_field(loss_fn_inputs, "logprobs")
-                logprobs_data = cls.extract_tensor_data(logprobs)
-                log_probs_list.append(torch.tensor(logprobs_data, dtype=torch.float32))
-
-                # Optional: ref_log_probs, values, returns
+                # Step 4: Process ref_log_probs - must match response_len
                 ref_logprobs = cls._get_field(loss_fn_inputs, "ref_logprobs")
                 if ref_logprobs is not None:
                     ref_logprobs_data = cls.extract_tensor_data(ref_logprobs)
                     ref_log_probs_list.append(torch.tensor(ref_logprobs_data, dtype=torch.float32))
                 else:
-                    ref_log_probs_list.append(torch.zeros(len(tokens), dtype=torch.float32))
+                    ref_log_probs_list.append(torch.zeros(response_len, dtype=torch.float32))
 
+                # Step 5: Process values - must match response_len
                 values = cls._get_field(loss_fn_inputs, "values")
                 if values is not None:
                     values_data = cls.extract_tensor_data(values)
                     values_list.append(torch.tensor(values_data, dtype=torch.float32))
                 else:
-                    values_list.append(torch.zeros(len(tokens), dtype=torch.float32))
+                    values_list.append(torch.zeros(response_len, dtype=torch.float32))
 
+                # Step 6: Process returns - must match response_len
                 returns = cls._get_field(loss_fn_inputs, "returns")
                 if returns is not None:
                     returns_data = cls.extract_tensor_data(returns)
                     returns_list.append(torch.tensor(returns_data, dtype=torch.float32))
                 else:
-                    returns_list.append(torch.zeros(len(tokens), dtype=torch.float32))
-
-                # Mask
-                mask = cls._get_field(loss_fn_inputs, "mask")
-                if mask is not None:
-                    mask_data = cls.extract_tensor_data(mask)
-                    loss_mask = torch.tensor(mask_data, dtype=torch.float32)
-                else:
-                    loss_mask = torch.ones(len(tokens), dtype=torch.float32)
+                    returns_list.append(torch.zeros(response_len, dtype=torch.float32))
 
             else:
                 # SFT mode: Extract target and weights
@@ -284,7 +334,44 @@ class TinkerDataConverter:
                 log_probs_list.append(torch.zeros(len(loss_mask), dtype=torch.float32))
 
             loss_masks_list.append(loss_mask)
-            response_length = int(loss_mask.sum().item())
+            # For standard SFT: response_length = count of non-zero mask elements
+            # For DPO weighted loss: weights can be negative, so use mask LENGTH not sum
+            # Miles uses response_length to slice log_probs, so it must equal mask length
+            response_length = len(loss_mask)
+
+            # CRITICAL FIX: Handle causal LM shift when response_length == total_length
+            #
+            # When the entire sequence is treated as "response" (no separate prompt),
+            # Miles' get_responses() in loss.py returns N-1 elements because:
+            #   - logits[i] predicts tokens[i+1] (causal LM)
+            #   - First token has no logit predicting it
+            #   - So entropy/log_probs tensors have N-1 elements
+            #
+            # If we pass response_length=N, sum_of_sample_mean() will try to split
+            # an (N-1) tensor using response_lengths that sum to N, causing:
+            #   RuntimeError: split_with_sizes expects split_sizes to sum exactly to X
+            #
+            # Fix: When response_length == token_length, adjust to N-1 and trim all
+            # per-token tensors to match.
+            # See: miles/backends/megatron_utils/loss.py lines 100-108
+            token_length = len(tokens_list[-1])
+            if is_rl and response_length == token_length and token_length > 1:
+                response_length = token_length - 1
+                # Trim loss_mask to match (skip first token)
+                loss_masks_list[-1] = loss_mask[1:]
+                # Trim all RL per-token tensors to match
+                if advantages_list:
+                    advantages_list[-1] = advantages_list[-1][1:]
+                if log_probs_list:
+                    log_probs_list[-1] = log_probs_list[-1][1:]
+                if ref_log_probs_list:
+                    ref_log_probs_list[-1] = ref_log_probs_list[-1][1:]
+                if values_list:
+                    values_list[-1] = values_list[-1][1:]
+                if returns_list:
+                    returns_list[-1] = returns_list[-1][1:]
+                print(f"[CONVERTER RL] Sample {idx}: Adjusted response_length from {token_length} to {response_length} (N-1 for causal LM shift)", flush=True)
+
             response_lengths_list.append(response_length)
 
         # Build rollout_data
@@ -300,13 +387,27 @@ class TinkerDataConverter:
             rollout_data["ref_log_probs"] = ref_log_probs_list
             rollout_data["values"] = values_list
             rollout_data["returns"] = returns_list
+        else:
+            # SFT-like data detected (including DPO backward pass)
+            # Override loss type to use sft_loss instead of policy_loss
+            # NOTE: Stored as scalar metadata (like _actual_global_batch_size),
+            # accessed directly from rollout_data in Miles get_batch()
+            rollout_data["_loss_type_override"] = "sft_loss"
 
         logger.info(f"Converted {len(data)} {'RL' if is_rl else 'SFT'} samples to rollout_data with {len(tokens_list)} token sequences")
+        logger.info(f"rollout_data keys: {list(rollout_data.keys())}")
+        if "_loss_type_override" in rollout_data:
+            logger.info(f"_loss_type_override set to: {rollout_data['_loss_type_override']}")
         return rollout_data
 
     @staticmethod
     def _extract_response_lengths_from_original(original_data: Optional[List[Any]]) -> List[int]:
-        """Extract response lengths (mask lengths) from original Tinker payload."""
+        """Extract response lengths (mask lengths) from original Tinker payload.
+
+        For RL training, tinker-cookbook removes the 'mask' field before sending to the API
+        (see remove_mask() in train.py). In this case, we use the 'logprobs' field length
+        as the response length since both mask and logprobs have the same length (per-response-token).
+        """
         response_lengths_list: List[int] = []
         if not original_data:
             return response_lengths_list
@@ -321,6 +422,7 @@ class TinkerDataConverter:
                 response_lengths_list.append(0)
                 continue
 
+            # Try to get response length from weights/weight/mask first (SFT path)
             weights_data = None
             if isinstance(loss_fn_inputs, dict):
                 weights_data = loss_fn_inputs.get("weights") or loss_fn_inputs.get("weight") or loss_fn_inputs.get("mask")
@@ -335,8 +437,25 @@ class TinkerDataConverter:
                 weights = TinkerDataConverter.extract_tensor_data(weights_data)
                 response_lengths_list.append(len(weights))
                 print(f"[CONVERTER DEBUG] Original weights[{idx}] length = {len(weights)}", flush=True)
+                continue
+
+            # RL path: mask is removed by tinker-cookbook's remove_mask()
+            # Use logprobs field length instead (same length as mask - per-response-token)
+            logprobs_data = None
+            if isinstance(loss_fn_inputs, dict):
+                logprobs_data = loss_fn_inputs.get("logprobs")
             else:
-                response_lengths_list.append(0)
+                logprobs_data = getattr(loss_fn_inputs, "logprobs", None)
+
+            if logprobs_data is not None:
+                logprobs = TinkerDataConverter.extract_tensor_data(logprobs_data)
+                response_lengths_list.append(len(logprobs))
+                print(f"[CONVERTER DEBUG] Original logprobs[{idx}] length = {len(logprobs)} (using as response_length)", flush=True)
+                continue
+
+            # No length info available
+            response_lengths_list.append(0)
+            print(f"[CONVERTER DEBUG] Sample[{idx}] no weights/mask/logprobs found, using 0", flush=True)
 
         return response_lengths_list
 
