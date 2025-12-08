@@ -334,26 +334,7 @@ class TinkerDataConverter:
                 log_probs_list.append(torch.zeros(len(loss_mask), dtype=torch.float32))
 
             loss_masks_list.append(loss_mask)
-            # For standard SFT: response_length = count of non-zero mask elements
-            # For DPO weighted loss: weights can be negative, so use mask LENGTH not sum
-            # Miles uses response_length to slice log_probs, so it must equal mask length
             response_length = len(loss_mask)
-
-            # CRITICAL FIX: Handle causal LM shift when response_length == total_length
-            #
-            # When the entire sequence is treated as "response" (no separate prompt),
-            # Miles' get_responses() in loss.py returns N-1 elements because:
-            #   - logits[i] predicts tokens[i+1] (causal LM)
-            #   - First token has no logit predicting it
-            #   - So entropy/log_probs tensors have N-1 elements
-            #
-            # If we pass response_length=N, sum_of_sample_mean() will try to split
-            # an (N-1) tensor using response_lengths that sum to N, causing:
-            #   RuntimeError: split_with_sizes expects split_sizes to sum exactly to X
-            #
-            # Fix: When response_length == token_length, adjust to N-1 and trim all
-            # per-token tensors to match.
-            # See: miles/backends/megatron_utils/loss.py lines 100-108
             token_length = len(tokens_list[-1])
             if is_rl and response_length == token_length and token_length > 1:
                 response_length = token_length - 1
