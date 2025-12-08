@@ -221,81 +221,88 @@ class TinkerDataConverter:
 
             if is_rl:
                 # RL mode: Extract logprobs, mask, advantages, values, returns
-                # CRITICAL: response_length must match the lengths of loss_mask and all RL fields.
-                # Miles splits entropy/logprob tensors using response_lengths, so mismatches cause
-                # RuntimeError in get_sum_of_sample_mean(): split_with_sizes expects sum to match tensor size.
+                #
+                # Key invariant: response_length must match the size of per-token tensors
+                # (loss_mask, log_probs, advantages, etc.) that Miles uses in loss computation.
 
-                # Step 1: Determine response_length from mask or logprobs
-                # For RL, the mask determines which tokens to compute loss on (the response portion).
-                # If mask is not provided (tinker-cookbook removes mask via remove_mask()), we infer
-                # the response length from logprobs, which represents per-response-token values.
+                # Step 1: Extract raw data from loss_fn_inputs
                 logprobs = cls._get_field(loss_fn_inputs, "logprobs")
                 logprobs_data = cls.extract_tensor_data(logprobs) if logprobs is not None else None
-
                 mask = cls._get_field(loss_fn_inputs, "mask")
-                if mask is not None:
-                    mask_data = cls.extract_tensor_data(mask)
-                    loss_mask = torch.tensor(mask_data, dtype=torch.float32)
+                mask_data = cls.extract_tensor_data(mask) if mask is not None else None
+
+                # Step 2: Determine response_len from mask or logprobs
+                if mask_data is not None:
                     response_len = len(mask_data)
                 elif logprobs_data is not None:
-                    # No mask provided but logprobs available - use logprobs length as response length
-                    # This is the correct interpretation: logprobs covers only the response tokens
                     response_len = len(logprobs_data)
-                    loss_mask = torch.ones(response_len, dtype=torch.float32)
-                    print(f"[CONVERTER RL] Sample {idx}: No mask, using logprobs length={response_len} for response_length (tokens={len(tokens)})", flush=True)
+                    print(f"[CONVERTER RL] Sample {idx}: No mask, using logprobs length={response_len} (tokens={len(tokens)})", flush=True)
                 else:
-                    # Fallback: no mask and no logprobs - use full token length
                     response_len = len(tokens)
-                    loss_mask = torch.ones(response_len, dtype=torch.float32)
-                    print(f"[CONVERTER RL] Sample {idx}: No mask and no logprobs, using full token length={response_len} for response_length", flush=True)
+                    print(f"[CONVERTER RL] Sample {idx}: No mask/logprobs, using token length={response_len}", flush=True)
 
-                # Step 2: Process logprobs - must match response_len
-                # Handle None values in logprobs (SGLang returns None for first token)
-                if logprobs_data is None:
-                    logprobs_data_clean = [0.0] * response_len
+                # Step 3: Handle causal LM shift (N-1 adjustment)
+                #
+                # When response_len == token_length (entire sequence is "response"),
+                # Miles computes N-1 logits because logits[i] predicts tokens[i+1].
+                # We must trim all per-token data to N-1 to match.
+                # See: miles/backends/megatron_utils/loss.py:100-108
+                token_length = len(tokens)
+                needs_causal_trim = (response_len == token_length and token_length > 1)
+                if needs_causal_trim:
+                    print(f"[CONVERTER RL] Sample {idx}: Applying N-1 causal trim ({response_len} -> {response_len - 1})", flush=True)
+                    response_len = token_length - 1
+
+                # Helper to trim tensor data for causal LM shift (skip first element)
+                def maybe_trim(data: list) -> list:
+                    return data[1:] if needs_causal_trim and data else data
+
+                # Step 4: Build per-token tensors (all must have length = response_len)
+                if mask_data is not None:
+                    loss_mask = torch.tensor(maybe_trim(mask_data), dtype=torch.float32)
                 else:
-                    logprobs_data_clean = [
-                        0.0 if lp is None else float(lp) for lp in logprobs_data
-                    ]
-                log_probs_list.append(torch.tensor(logprobs_data_clean, dtype=torch.float32))
+                    loss_mask = torch.ones(response_len, dtype=torch.float32)
 
-                # Step 3: Process advantages - must match response_len
-                # Note: DPO doesn't use advantages - it's optional for preference methods
+                if logprobs_data is not None:
+                    logprobs_clean = [0.0 if lp is None else float(lp) for lp in logprobs_data]
+                    log_probs_list.append(torch.tensor(maybe_trim(logprobs_clean), dtype=torch.float32))
+                else:
+                    log_probs_list.append(torch.zeros(response_len, dtype=torch.float32))
+
                 advantages = cls._get_field(loss_fn_inputs, "advantages")
                 if advantages is not None:
-                    advantages_data = cls.extract_tensor_data(advantages)
-                    advantages_list.append(torch.tensor(advantages_data, dtype=torch.float32))
+                    adv_data = cls.extract_tensor_data(advantages)
+                    advantages_list.append(torch.tensor(maybe_trim(adv_data), dtype=torch.float32))
                 else:
-                    # Create zeros with matching response_len (not len(tokens))
                     advantages_list.append(torch.zeros(response_len, dtype=torch.float32))
 
-                # Step 4: Process ref_log_probs - must match response_len
                 ref_logprobs = cls._get_field(loss_fn_inputs, "ref_logprobs")
                 if ref_logprobs is not None:
-                    ref_logprobs_data = cls.extract_tensor_data(ref_logprobs)
-                    ref_log_probs_list.append(torch.tensor(ref_logprobs_data, dtype=torch.float32))
+                    ref_data = cls.extract_tensor_data(ref_logprobs)
+                    ref_log_probs_list.append(torch.tensor(maybe_trim(ref_data), dtype=torch.float32))
                 else:
                     ref_log_probs_list.append(torch.zeros(response_len, dtype=torch.float32))
 
-                # Step 5: Process values - must match response_len
                 values = cls._get_field(loss_fn_inputs, "values")
                 if values is not None:
-                    values_data = cls.extract_tensor_data(values)
-                    values_list.append(torch.tensor(values_data, dtype=torch.float32))
+                    val_data = cls.extract_tensor_data(values)
+                    values_list.append(torch.tensor(maybe_trim(val_data), dtype=torch.float32))
                 else:
                     values_list.append(torch.zeros(response_len, dtype=torch.float32))
 
-                # Step 6: Process returns - must match response_len
                 returns = cls._get_field(loss_fn_inputs, "returns")
                 if returns is not None:
-                    returns_data = cls.extract_tensor_data(returns)
-                    returns_list.append(torch.tensor(returns_data, dtype=torch.float32))
+                    ret_data = cls.extract_tensor_data(returns)
+                    returns_list.append(torch.tensor(maybe_trim(ret_data), dtype=torch.float32))
                 else:
                     returns_list.append(torch.zeros(response_len, dtype=torch.float32))
 
+                # Append to shared lists
+                loss_masks_list.append(loss_mask)
+                response_lengths_list.append(response_len)
+
             else:
                 # SFT mode: Extract target and weights
-                # Look for "target_tokens" or "target" field
                 target = cls._get_field(loss_fn_inputs, "target_tokens")
                 if target is None:
                     target = cls._get_field(loss_fn_inputs, "target")
@@ -307,53 +314,24 @@ class TinkerDataConverter:
                 if not weights or not target:
                     raise ValueError("SFT loss_fn_inputs must contain weights and target_tokens/target")
 
-                # Parse TensorData format
                 weights_data = cls.extract_tensor_data(weights)
                 target_data = cls.extract_tensor_data(target)
 
-                print(f"[CONVERTER DEBUG SFT] Sample {idx}: weights_data length = {len(weights_data)}, target_data length = {len(target_data)}", flush=True)
-
-                # Build full token sequence by appending last target token
-                # Input: [1,2,3,4,5], Target: [2,3,4,5,6]
-                # Full tokens: [1,2,3,4,5,6] (input + last_target)
+                # Build full token sequence: input + last target token
+                # Input: [1,2,3,4,5], Target: [2,3,4,5,6] -> Full: [1,2,3,4,5,6]
                 input_tokens_tensor = torch.tensor(tokens, dtype=torch.long)
                 target_tensor = torch.tensor(target_data, dtype=torch.long)
                 full_tokens = torch.cat([input_tokens_tensor, target_tensor[-1:]], dim=0)
-
-                print(f"[CONVERTER DEBUG SFT] Sample {idx}: full_tokens length = {len(full_tokens)}", flush=True)
-
-                # Update tokens list with full sequence
                 tokens_list[-1] = full_tokens  # Replace the one we added earlier
 
-                # Loss mask and response length
                 loss_mask = torch.tensor(weights_data, dtype=torch.float32)
-                print(f"[CONVERTER DEBUG SFT] Sample {idx}: loss_mask length = {len(loss_mask)}, sum = {loss_mask.sum().item()}", flush=True)
+                response_len = len(loss_mask)
 
-                # Dummy RL fields
-                advantages_list.append(torch.zeros(len(loss_mask), dtype=torch.float32))
-                log_probs_list.append(torch.zeros(len(loss_mask), dtype=torch.float32))
-
-            loss_masks_list.append(loss_mask)
-            response_length = len(loss_mask)
-            token_length = len(tokens_list[-1])
-            if is_rl and response_length == token_length and token_length > 1:
-                response_length = token_length - 1
-                # Trim loss_mask to match (skip first token)
-                loss_masks_list[-1] = loss_mask[1:]
-                # Trim all RL per-token tensors to match
-                if advantages_list:
-                    advantages_list[-1] = advantages_list[-1][1:]
-                if log_probs_list:
-                    log_probs_list[-1] = log_probs_list[-1][1:]
-                if ref_log_probs_list:
-                    ref_log_probs_list[-1] = ref_log_probs_list[-1][1:]
-                if values_list:
-                    values_list[-1] = values_list[-1][1:]
-                if returns_list:
-                    returns_list[-1] = returns_list[-1][1:]
-                print(f"[CONVERTER RL] Sample {idx}: Adjusted response_length from {token_length} to {response_length} (N-1 for causal LM shift)", flush=True)
-
-            response_lengths_list.append(response_length)
+                # Append to shared lists
+                loss_masks_list.append(loss_mask)
+                response_lengths_list.append(response_len)
+                advantages_list.append(torch.zeros(response_len, dtype=torch.float32))
+                log_probs_list.append(torch.zeros(response_len, dtype=torch.float32))
 
         # Build rollout_data
         rollout_data = {
