@@ -216,6 +216,16 @@ class DeleteModelResponse(BaseModel):
     resources_freed: List[str] = Field(default_factory=list, description="List of freed resources")
 
 
+class UnloadModelResponse(BaseModel):
+    """Unload model response (Tinker SDK compatible).
+
+    This is the Tinker-standard response for releasing model resources.
+    Simpler than DeleteModelResponse to match Tinker SDK expectations.
+    """
+    model_id: str = Field(..., description="Unloaded model ID")
+    type: Optional[str] = Field(default="unload_model", description="Response type")
+
+
 # ============= Training Run Responses =============
 
 class CheckpointMetadata(BaseModel):
@@ -259,10 +269,12 @@ class CreateSamplingClientResult(BaseModel):
 
 class SaveWeightsForSamplerResult(BaseModel):
     """Save weights for sampler result."""
-    path: str = Field(..., description="Tinker URI path")
-    checkpoint_path: str = Field(..., description="Filesystem path")
-    step_id: int = Field(..., description="Checkpoint step ID")
-    name: str = Field(..., description="Checkpoint name")
+    type: str = Field(default="save_weights_for_sampler", description="Response type")
+    path: Optional[str] = Field(default=None, description="Tinker URI path (for persistent saves)")
+    sampling_session_id: Optional[str] = Field(default=None, description="Sampling session ID (for ephemeral saves)")
+    checkpoint_path: Optional[str] = Field(default=None, description="Filesystem path")
+    step_id: Optional[int] = Field(default=None, description="Checkpoint step ID")
+    name: Optional[str] = Field(default=None, description="Checkpoint name")
     status: str = Field(default="completed", description="Operation status")
 
 
@@ -273,3 +285,52 @@ class DeprecatedEndpointError(BaseModel):
     error: str = Field(..., description="Error message")
     reason: str = Field(..., description="Why deprecated")
     solution: Dict[str, Any] = Field(..., description="How to achieve same result")
+
+
+# ============= Session Responses =============
+
+class CreateSessionResponse(BaseModel):
+    """Response from session creation."""
+    type: str = Field(default="create_session", description="Response type")
+    session_id: str = Field(..., description="Generated session ID")
+    info_message: Optional[str] = Field(default=None, description="Info message")
+    warning_message: Optional[str] = Field(default=None, description="Warning message")
+    error_message: Optional[str] = Field(default=None, description="Error message")
+
+
+class SessionHeartbeatResponse(BaseModel):
+    """Response from session heartbeat."""
+    type: str = Field(default="session_heartbeat", description="Response type")
+
+
+class CreateSamplingSessionResponse(BaseModel):
+    """Response from creating a sampling session."""
+    type: str = Field(default="create_sampling_session", description="Response type")
+    sampling_session_id: str = Field(..., description="Generated sampling session ID")
+
+
+class GetSessionResponse(BaseModel):
+    """Response for getting session details."""
+    training_run_ids: List[str] = Field(..., description="List of model IDs associated with this session")
+    sampler_ids: List[str] = Field(..., description="List of sampler IDs associated with this session")
+
+
+class ListSessionsResponse(BaseModel):
+    """Response for listing sessions."""
+    sessions: List[str] = Field(..., description="List of session IDs")
+
+
+class GetSamplerResponse(BaseModel):
+    """Response for getting sampler details."""
+    sampler_id: str = Field(..., description="The sampler ID (sampling_session_id)")
+    base_model: str = Field(..., description="The base model name")
+    model_path: Optional[str] = Field(default=None, description="Optional model path")
+
+
+# ============= Weights Info Responses =============
+
+class WeightsInfoResponse(BaseModel):
+    """Minimal information for loading checkpoints (matches Tinker API)."""
+    base_model: str = Field(..., description="Base model path")
+    is_lora: bool = Field(..., description="Whether LoRA is enabled")
+    lora_rank: Optional[int] = Field(default=None, description="LoRA rank if enabled")
