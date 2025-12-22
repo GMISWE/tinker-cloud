@@ -248,11 +248,47 @@ class TrainingService:
         # Apply optimizer step
         results = train_group.apply_optimizer_step()
 
-        # Sync weights to SGLang if RL training
-        if "rollout_manager" in client_info:
+        # Sync weights to SGLang and onload if RL training
+        # Follow Miles' train.py sequence (lines 89-96):
+        # 1. offload_train() - Offload Megatron model to CPU (free GPU for SGLang)
+        # 2. onload_rollout() - Onload SGLang weights
+        # 3. update_weights() - Sync new weights from Megatron to SGLang
+        # 4. Onload CUDA graphs
+        # 5. Onload KV cache
+        rollout_manager = client_info.get("rollout_manager")
+        if rollout_manager is not None:
+            from sglang.srt.constants import GPU_MEMORY_TYPE_KV_CACHE, GPU_MEMORY_TYPE_WEIGHTS
+            try:
+                from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH
+            except ImportError:
+                GPU_MEMORY_TYPE_CUDA_GRAPH = None
+
+            # Step 1: Offload Megatron model to free GPU memory for SGLang
+            # (equivalent to offload_train() in Miles' train.py line 89)
+            logger.info(f"Offloading Megatron model for {model_id}")
+            train_group.offload()
+
+            # Step 2: Onload SGLang weights (needed for update_weights)
+            # (equivalent to onload_rollout() in Miles' train.py line 90)
+            logger.info(f"Onloading SGLang weights for {model_id}")
+            ray.get(rollout_manager.onload.remote(tags=[GPU_MEMORY_TYPE_WEIGHTS]))
+
+            # Step 3: Sync updated weights from Megatron to SGLang
+            # (equivalent to actor_model.update_weights() in Miles' train.py line 91)
             logger.info(f"Pushing updated weights to SGLang for {model_id}")
             train_group.update_weights()
             logger.info(f"Weights synced to SGLang for {model_id}")
+
+            # Step 4: Onload CUDA graphs
+            # (equivalent to Miles' train.py lines 94-95)
+            if GPU_MEMORY_TYPE_CUDA_GRAPH is not None:
+                logger.info(f"Onloading SGLang CUDA graphs for {model_id}")
+                ray.get(rollout_manager.onload.remote(tags=[GPU_MEMORY_TYPE_CUDA_GRAPH]))
+
+            # Step 5: Onload KV cache
+            # (equivalent to Miles' train.py line 96)
+            logger.info(f"Onloading SGLang KV cache for {model_id}")
+            ray.get(rollout_manager.onload.remote(tags=[GPU_MEMORY_TYPE_KV_CACHE]))
 
         # Extract learning rates
         learning_rates = extract_learning_rates(client_info.get("optimizer"))

@@ -169,14 +169,29 @@ def get_parallelism_config(
 
 def detect_torch_dist_path(base_model: str) -> tuple[str, str]:
     """
-    Auto-detect torch_dist model path from HF path.
+    Auto-detect torch_dist model path from HF path or model name.
 
     Args:
-        base_model: Base model path (HF or torch_dist format)
+        base_model: Base model path, HuggingFace model name (e.g., "Qwen/Qwen2.5-7B-Instruct"),
+                   or torch_dist format path
 
     Returns:
         Tuple of (megatron_checkpoint_path, hf_model_path)
     """
+    # Get model directory from environment (default: /data/models)
+    model_dir = os.getenv("HF_HOME", "/data/models")
+
+    # If base_model looks like a HuggingFace model name (contains "/"), resolve to local path
+    # e.g., "Qwen/Qwen2.5-7B-Instruct" -> "/data/models/Qwen2.5-7B-Instruct"
+    if "/" in base_model and not base_model.startswith("/"):
+        model_name = base_model.split("/")[-1]  # Get "Qwen2.5-7B-Instruct" from "Qwen/Qwen2.5-7B-Instruct"
+        local_path = os.path.join(model_dir, model_name)
+        if os.path.exists(local_path):
+            logger.info(f"Resolved HF model name to local path: {base_model} → {local_path}")
+            base_model = local_path
+        else:
+            logger.warning(f"HF model {base_model} not found at {local_path}, will use as-is")
+
     if not base_model.endswith('_torch_dist'):
         torch_dist_path = f"{base_model}_torch_dist"
         if os.path.exists(torch_dist_path):

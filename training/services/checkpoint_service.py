@@ -9,8 +9,9 @@ Handles:
 import asyncio
 import logging
 import time
+import uuid
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from ..storage import MetadataStorage
 from ..utils.helpers import generate_step_id
@@ -99,9 +100,11 @@ class CheckpointService:
         self,
         model_id: str,
         request_id: str,
-        name: str,
+        name: Optional[str],
         training_clients: Dict[str, Dict[str, Any]],
-        metadata_storage: MetadataStorage
+        metadata_storage: MetadataStorage,
+        path: Optional[str] = None,
+        sampling_session_seq_id: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Save weights for SGLang sampler.
@@ -109,12 +112,16 @@ class CheckpointService:
         Args:
             model_id: Model identifier
             request_id: Request identifier for logging
-            name: Optional checkpoint name
+            name: Optional checkpoint name (deprecated, use path)
             training_clients: Global training clients dict
             metadata_storage: Metadata storage instance
+            path: Optional checkpoint path/name
+            sampling_session_seq_id: If provided, creates ephemeral save with sampling_session_id
 
         Returns:
-            Dict with path, checkpoint_path, step_id, name
+            Dict with either:
+            - path, checkpoint_path, step_id, name (persistent save)
+            - sampling_session_id (ephemeral save)
 
         Raises:
             KeyError: If model_id not found
@@ -126,41 +133,103 @@ class CheckpointService:
         train_group = client_info["train_group"]
         training_run_id = client_info.get("training_run_id", model_id)
 
-        logger.info(f"[{request_id}] Saving weights for sampler: {model_id}")
+        # Check if this is an ephemeral save (sampling_session_seq_id provided, no path/name)
+        is_ephemeral = sampling_session_seq_id is not None and path is None and name is None
+        logger.info(f"[{request_id}] save_weights_for_sampler: sampling_session_seq_id={sampling_session_seq_id}, path={path!r}, name={name!r}, is_ephemeral={is_ephemeral}")
 
-        # Generate checkpoint name and path
-        checkpoint_name = name or f"sampler_{int(time.time())}"
-        step_id = generate_step_id(checkpoint_name)
-        checkpoint_path = f"/data/checkpoints/tinker/iter_{step_id:07d}"
-        tinker_uri = f"tinker://{training_run_id}/weights/{checkpoint_name}"
+        # NOTE: Save must be called while process groups are active.
+        # In the training flow: train_step() -> save_weights_for_sampler() -> update_weights()
+        # Do NOT call save after update_weights has destroyed process groups.
+        # The NCCL library cannot reliably recreate process groups after destruction.
 
-        # Save weights using async Ray API (matching original api.py pattern)
-        object_refs = [
-            actor.save_model.remote(step_id)
-            for actor in train_group._actor_handlers
-        ]
+        if is_ephemeral:
+            # Ephemeral save - generate sampling_session_id, don't persist path
+            sampling_session_id = f"{model_id}_{sampling_session_seq_id}_{uuid.uuid4().hex[:8]}"
+            logger.info(f"[{request_id}] Ephemeral save for sampler: {model_id} -> {sampling_session_id}")
 
-        # Await all save operations
-        await asyncio.gather(*[asyncio.wrap_future(ref.future()) for ref in object_refs])
+            # Check if offload_train is enabled
+            args = client_info.get("args")
+            offload_train = args.offload_train if args else False
 
-        # Save checkpoint metadata
-        metadata_storage.save_checkpoint(
-            model_id=model_id,
-            checkpoint_name=f"sampler_{checkpoint_name}",
-            checkpoint_data={
-                "path": checkpoint_path,
-                "tinker_uri": tinker_uri,
-                "created_at": datetime.now().isoformat(),
-                "type": "sampler",
-                "step_id": step_id
+            if offload_train:
+                # With offload_train=True, process groups are destroyed after update_weights().
+                # But for ephemeral saves, we don't need to actually save to disk - the weights
+                # are already synced to SGLang via update_weights(). Just return the session ID.
+                logger.info(f"[{request_id}] Skipping save_model for ephemeral save (offload_train=True, weights already synced to SGLang)")
+            else:
+                # Generate step_id for the save
+                step_id = generate_step_id(f"ephemeral_{sampling_session_seq_id}")
+
+                # Save weights using async Ray API
+                object_refs = [
+                    actor.save_model.remote(step_id)
+                    for actor in train_group._actor_handlers
+                ]
+
+                # Await all save operations
+                await asyncio.gather(*[asyncio.wrap_future(ref.future()) for ref in object_refs])
+                logger.info(f"[{request_id}] Ephemeral weights saved to disk")
+
+            logger.info(f"[{request_id}] Ephemeral save completed, session_id={sampling_session_id}")
+
+            return {
+                "path": None,
+                "sampling_session_id": sampling_session_id,
+                "type": "save_weights_for_sampler"
             }
-        )
+        else:
+            # Persistent save - use path/name
+            logger.info(f"[{request_id}] Saving weights for sampler: {model_id}")
 
-        logger.info(f"[{request_id}] Weights saved to {tinker_uri}")
+            # Check if offload_train is enabled
+            args = client_info.get("args")
+            offload_train = args.offload_train if args else False
 
-        return {
-            "path": tinker_uri,
-            "checkpoint_path": checkpoint_path,
-            "step_id": step_id,
-            "name": checkpoint_name
-        }
+            if offload_train:
+                # With offload_train=True, process groups may be destroyed after update_weights().
+                # Persistent saves require PG for distributed checkpointing.
+                # Log a warning - the save may fail if PG are not active.
+                logger.warning(
+                    f"[{request_id}] Persistent save with offload_train=True - "
+                    "this may fail if process groups are destroyed. "
+                    "Consider saving before update_weights or using ephemeral saves."
+                )
+
+            # Generate checkpoint name and path
+            checkpoint_name = path or name or f"sampler_{int(time.time())}"
+            step_id = generate_step_id(checkpoint_name)
+            checkpoint_path = f"/data/checkpoints/tinker/iter_{step_id:07d}"
+            tinker_uri = f"tinker://{training_run_id}/weights/{checkpoint_name}"
+
+            # Save weights using async Ray API (matching original api.py pattern)
+            object_refs = [
+                actor.save_model.remote(step_id)
+                for actor in train_group._actor_handlers
+            ]
+
+            # Await all save operations
+            await asyncio.gather(*[asyncio.wrap_future(ref.future()) for ref in object_refs])
+
+            # Save checkpoint metadata
+            metadata_storage.save_checkpoint(
+                model_id=model_id,
+                checkpoint_name=f"sampler_{checkpoint_name}",
+                checkpoint_data={
+                    "path": checkpoint_path,
+                    "tinker_uri": tinker_uri,
+                    "created_at": datetime.now().isoformat(),
+                    "type": "sampler",
+                    "step_id": step_id
+                }
+            )
+
+            logger.info(f"[{request_id}] Weights saved to {tinker_uri}")
+
+            return {
+                "path": tinker_uri,
+                "sampling_session_id": None,
+                "checkpoint_path": checkpoint_path,
+                "step_id": step_id,
+                "name": checkpoint_name,
+                "type": "save_weights_for_sampler"
+            }
