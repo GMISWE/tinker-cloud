@@ -111,10 +111,12 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
         )
 
         # Set up logging based on config
+        # force=True ensures this takes effect even if uvicorn already configured logging
         logging.basicConfig(
             level=getattr(logging, config_obj.server.log_level, logging.INFO),
             format="[%(asctime)s] %(levelname)s %(filename)s:%(lineno)d: %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
+            force=True,
         )
 
         # Suppress noisy third-party loggers

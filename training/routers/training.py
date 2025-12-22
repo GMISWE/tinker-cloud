@@ -153,7 +153,8 @@ async def forward_backward(
             train_group=train_group,
             args=args,
             data=request.forward_backward_input.data,
-            loss_fn=request.forward_backward_input.loss_fn
+            loss_fn=request.forward_backward_input.loss_fn,
+            client_info=client_info
         )
 
     # Create background task

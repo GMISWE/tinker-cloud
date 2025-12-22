@@ -145,6 +145,10 @@ class SlimeArgumentBuilder:
             '--ref-load', megatron_checkpoint_path,
             '--save', self.default_save_dir,
             '--save-interval', '100',
+            # Memory management: colocate SGLang with Megatron, enable offload
+            # These MUST be set here because parse_args() sets defaults based on them
+            '--colocate',
+            '--offload',  # Equivalent to --offload-train + --offload-rollout
         ]
 
         # Add untie-embeddings flag if needed

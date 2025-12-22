@@ -8,9 +8,10 @@ Extracted from api_refactored.py to separate concerns:
 
 This service is pure Python with no FastAPI dependencies.
 """
+import asyncio
 import logging
 import ray
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from miles.utils.ray_utils import Box
 
 from ..core.data_converter import TinkerDataConverter
@@ -98,7 +99,8 @@ class TrainingService:
         train_group: Any,
         args: Any,
         data: List[Any],
-        loss_fn: str
+        loss_fn: str,
+        client_info: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Execute forward-backward pass (accumulate gradients, no optimizer step).
@@ -109,6 +111,7 @@ class TrainingService:
             args: Megatron args from Slime
             data: List of training data samples
             loss_fn: Loss function type
+            client_info: Client metadata (contains rollout_manager for offload)
 
         Returns:
             Dict with loss and gradient norm
@@ -117,7 +120,21 @@ class TrainingService:
             ValueError: If validation fails
             Exception: If training fails
         """
+        print(f"[DEBUG] Forward-backward pass for {model_id}", flush=True)
         logger.info(f"Forward-backward pass for {model_id}")
+
+        # Offload SGLang before training to free GPU memory
+        rollout_manager = client_info.get("rollout_manager") if client_info else None
+        print(f"[DEBUG] rollout_manager = {rollout_manager}", flush=True)
+        if rollout_manager is not None:
+            print(f"[DEBUG] Offloading SGLang for {model_id} before training...", flush=True)
+            logger.info(f"Offloading SGLang for {model_id} before training")
+            await asyncio.to_thread(lambda: ray.get(rollout_manager.offload.remote()))
+            print(f"[DEBUG] SGLang offloaded for {model_id}", flush=True)
+            logger.info(f"SGLang offloaded for {model_id}")
+        else:
+            print(f"[DEBUG] No rollout_manager found for {model_id}, skipping SGLang offload", flush=True)
+            logger.warning(f"No rollout_manager found for {model_id}, skipping SGLang offload")
 
         # Determine training mode (RL vs SFT)
         is_rl = not args.debug_train_only
@@ -249,7 +266,7 @@ class TrainingService:
         results = train_group.apply_optimizer_step()
 
         # Sync weights to SGLang and onload if RL training
-        # Follow Miles' train.py sequence (lines 89-96):
+        # Follow Miles' train.py sequence:
         # 1. offload_train() - Offload Megatron model to CPU (free GPU for SGLang)
         # 2. onload_rollout() - Onload SGLang weights
         # 3. update_weights() - Sync new weights from Megatron to SGLang
@@ -264,31 +281,28 @@ class TrainingService:
                 GPU_MEMORY_TYPE_CUDA_GRAPH = None
 
             # Step 1: Offload Megatron model to free GPU memory for SGLang
-            # (equivalent to offload_train() in Miles' train.py line 89)
             logger.info(f"Offloading Megatron model for {model_id}")
             train_group.offload()
 
             # Step 2: Onload SGLang weights (needed for update_weights)
-            # (equivalent to onload_rollout() in Miles' train.py line 90)
             logger.info(f"Onloading SGLang weights for {model_id}")
             ray.get(rollout_manager.onload.remote(tags=[GPU_MEMORY_TYPE_WEIGHTS]))
 
-            # Step 3: Sync updated weights from Megatron to SGLang
-            # (equivalent to actor_model.update_weights() in Miles' train.py line 91)
+            # Step 2: Sync updated weights from Megatron to SGLang
             logger.info(f"Pushing updated weights to SGLang for {model_id}")
             train_group.update_weights()
             logger.info(f"Weights synced to SGLang for {model_id}")
 
-            # Step 4: Onload CUDA graphs
-            # (equivalent to Miles' train.py lines 94-95)
+            # Step 3: Onload CUDA graphs
             if GPU_MEMORY_TYPE_CUDA_GRAPH is not None:
                 logger.info(f"Onloading SGLang CUDA graphs for {model_id}")
                 ray.get(rollout_manager.onload.remote(tags=[GPU_MEMORY_TYPE_CUDA_GRAPH]))
 
-            # Step 5: Onload KV cache
-            # (equivalent to Miles' train.py line 96)
+            # Step 4: Onload KV cache
             logger.info(f"Onloading SGLang KV cache for {model_id}")
             ray.get(rollout_manager.onload.remote(tags=[GPU_MEMORY_TYPE_KV_CACHE]))
+
+            logger.info(f"SGLang fully onloaded for {model_id}")
 
         # Extract learning rates
         learning_rates = extract_learning_rates(client_info.get("optimizer"))
