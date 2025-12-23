@@ -63,11 +63,13 @@ class ModelService:
             RuntimeError: If actor initialization fails
         """
         logger.info(f"[{request_id}] Creating model {model_id}")
+        print(f"[DEBUG model_service] Creating model {model_id}", flush=True)
 
         # Build Slime arguments using builder
         # CRITICAL: build_args() contains blocking operations (HF AutoConfig, Megatron arg parsing)
         # Must run in thread pool to avoid blocking the async event loop
         logger.debug(f"[{request_id}] About to call build_args() in thread pool")
+        print(f"[DEBUG model_service] About to call build_args()", flush=True)
         args, hf_path = await asyncio.to_thread(
             slime_builder.build_args,
             base_model=base_model,
@@ -76,9 +78,11 @@ class ModelService:
             checkpoint_path=checkpoint_path,
             parallelism_config=parallelism_config
         )
+        print(f"[DEBUG model_service] build_args() returned, hf_path={hf_path}", flush=True)
         logger.debug(f"[{request_id}] build_args() completed")
 
         # Log configuration
+        print(f"[DEBUG model_service] About to log Model config", flush=True)
         logger.info(f"[{request_id}] Model config: base={base_model}, hf_path={hf_path}")
         if lora_config:
             logger.info(f"[{request_id}] LoRA config: {lora_config}")
@@ -103,22 +107,28 @@ class ModelService:
         }
 
         # Save to storage
+        print(f"[DEBUG model_service] Saving metadata", flush=True)
         metadata_storage.save_training_run(model_id, metadata)
         training_runs_metadata[model_id] = metadata
         logger.info(f"[{request_id}] Metadata saved successfully")
+        print(f"[DEBUG model_service] Metadata saved", flush=True)
 
         # Get or create Ray actor
+        print(f"[DEBUG model_service] About to get or create Ray actor", flush=True)
         try:
             # Try to get existing actor first (with timeout to avoid blocking)
             try:
                 train_group = ray.get_actor(f"RayTrainGroup-{model_id}", namespace="training")
                 logger.info(f"[{request_id}] Found existing Ray actor for {model_id}")
+                print(f"[DEBUG model_service] Found existing actor", flush=True)
             except:
                 # Actor doesn't exist, create new one
                 raise
         except:
             # Create new actor
+            print(f"[DEBUG model_service] Creating new Ray actor", flush=True)
             logger.info(f"[{request_id}] Creating new Ray actor for {model_id}")
+            print(f"[DEBUG model_service] About to import RayTrainGroup", flush=True)
 
             # Import and create Miles actors
             from miles.ray.actor_group import RayTrainGroup
@@ -180,24 +190,66 @@ class ModelService:
             router_ip = None
             router_port = None
 
+            print(f"[DEBUG model_service] About to check debug_train_only={debug_train_only}", flush=True)
             if not debug_train_only:
                 # RL mode: Create RolloutManager and SGLang engines
+                print(f"[DEBUG model_service] RL mode - creating RolloutManager", flush=True)
                 logger.info(f"[{request_id}] Creating RolloutManager with SGLang (RL mode)")
 
                 from miles.ray.rollout import RolloutManager
 
                 # Share the same placement group with training (colocated mode)
+                print(f"[DEBUG model_service] About to create RolloutManager.remote()", flush=True)
                 rollout_manager = RolloutManager.options(
                     num_cpus=1,
                     num_gpus=0,
                 ).remote(args, (pg, reordered_indices))
+                print(f"[DEBUG model_service] RolloutManager.remote() created", flush=True)
 
                 # Connect training actors to rollout manager
+                print(f"[DEBUG model_service] Setting rollout_manager on train_group", flush=True)
                 train_group.set_rollout_manager(rollout_manager)
+                print(f"[DEBUG model_service] rollout_manager set on train_group", flush=True)
 
-                # Push initial weights to SGLang
+                # Initialize SGLang memory state (match Miles create_rollout_manager + train.py flow)
+                # Step 1: Offload immediately after creation to initialize memory_saver state
+                print(f"[DEBUG model_service] Starting SGLang init, offload_rollout={args.offload_rollout}", flush=True)
+                if args.offload_rollout:
+                    print(f"[DEBUG model_service] Step 1: Initial offload", flush=True)
+                    logger.info(f"[{request_id}] Initial offload to initialize memory_saver state")
+                    await asyncio.to_thread(lambda: ray.get(rollout_manager.offload.remote()))
+                    print(f"[DEBUG model_service] Step 1: Offload complete", flush=True)
+
+                # Step 2: Onload weights before update_weights
+                from sglang.srt.constants import GPU_MEMORY_TYPE_WEIGHTS, GPU_MEMORY_TYPE_KV_CACHE
+                try:
+                    from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH
+                except ImportError:
+                    GPU_MEMORY_TYPE_CUDA_GRAPH = None
+
+                if args.offload_rollout:
+                    print(f"[DEBUG model_service] Step 2: Onload weights", flush=True)
+                    logger.info(f"[{request_id}] Onloading weights for update_weights")
+                    await asyncio.to_thread(lambda: ray.get(rollout_manager.onload.remote(tags=[GPU_MEMORY_TYPE_WEIGHTS])))
+                    print(f"[DEBUG model_service] Step 2: Onload weights complete", flush=True)
+
+                # Step 3: Push initial weights to SGLang
+                print(f"[DEBUG model_service] Step 3: Push weights", flush=True)
                 logger.info(f"[{request_id}] Pushing initial weights to SGLang")
                 await asyncio.to_thread(train_group.update_weights)
+                print(f"[DEBUG model_service] Step 3: Push weights complete", flush=True)
+
+                # Step 4: Onload CUDA graphs and KV cache
+                if args.offload_rollout:
+                    if GPU_MEMORY_TYPE_CUDA_GRAPH is not None:
+                        print(f"[DEBUG model_service] Step 4a: Onload CUDA graphs", flush=True)
+                        logger.info(f"[{request_id}] Onloading CUDA graphs")
+                        await asyncio.to_thread(lambda: ray.get(rollout_manager.onload.remote(tags=[GPU_MEMORY_TYPE_CUDA_GRAPH])))
+                    print(f"[DEBUG model_service] Step 4b: Onload KV cache", flush=True)
+                    logger.info(f"[{request_id}] Onloading KV cache")
+                    await asyncio.to_thread(lambda: ray.get(rollout_manager.onload.remote(tags=[GPU_MEMORY_TYPE_KV_CACHE])))
+                    logger.info(f"[{request_id}] SGLang memory state initialized")
+                    print(f"[DEBUG model_service] SGLang init complete!", flush=True)
 
                 # Get router address from RolloutManager
                 try:

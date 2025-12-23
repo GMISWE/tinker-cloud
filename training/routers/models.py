@@ -4,6 +4,7 @@ Models Router - HTTP Layer for Model Management
 Endpoints:
 - POST /api/v1/create_model - Create training model with Ray actors
 - POST /api/v1/delete_model - Delete model and free GPU resources
+- POST /api/v1/unload_model - Unload model (Tinker SDK compatible alias for delete_model)
 - POST /api/v1/get_info - Get model metadata for tokenizer
 - GET /api/v1/get_tokenizer - Get tokenizer information
 - GET /api/v1/training_runs/{model_id} - Get training run metadata
@@ -14,6 +15,7 @@ from typing import Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ..services.model_service import ModelService
+from ..services.session_service import SessionService
 from ..core.task_manager import TaskManager
 from ..core.dependencies import verify_api_key_dep
 from ..core import SlimeArgumentBuilder
@@ -21,11 +23,13 @@ from ..storage import MetadataStorage, FuturesStorage
 from ..models.requests import (
     CreateModelRequest,
     DeleteModelRequest,
+    UnloadModelRequest,
     GetInfoRequest,
 )
 from ..models.responses import (
     AsyncOperationResponse,
     DeleteModelResponse,
+    UnloadModelResponse,
     GetInfoResponse,
     ModelData,
     TrainingRunResponse,
@@ -96,6 +100,14 @@ def get_task_manager(
     return TaskManager(futures_storage)
 
 
+def get_session_service(request: Request) -> SessionService:
+    """Dependency injection for SessionService."""
+    service = getattr(request.app.state, "session_service", None)
+    if service is None:
+        raise RuntimeError("SessionService not initialized on app state")
+    return service
+
+
 # ============================================================================
 # Model Management Endpoints
 # ============================================================================
@@ -109,7 +121,8 @@ async def create_model(
     slime_builder: SlimeArgumentBuilder = Depends(get_slime_builder),
     metadata_storage: MetadataStorage = Depends(get_metadata_storage),
     training_clients: Dict = Depends(get_training_clients),
-    training_runs_metadata: Dict = Depends(get_training_runs_metadata)
+    training_runs_metadata: Dict = Depends(get_training_runs_metadata),
+    session_service: SessionService = Depends(get_session_service)
 ):
     """
     Create a new training model with Ray actors and GPU resources.
@@ -117,6 +130,23 @@ async def create_model(
     """
     request_id = generate_request_id()
     model_id = generate_model_id()
+
+    # Validate session exists (fail fast)
+    if not session_service.session_exists(request.session_id):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session not found: {request.session_id}"
+        )
+
+    # Link model to session with seq_id and context for matching
+    session_service.add_model(
+        session_id=request.session_id,
+        model_id=model_id,
+        model_seq_id=request.model_seq_id,
+        base_model=request.base_model,
+        model_path=request.checkpoint_path  # May be None, that's OK
+    )
+    logger.info(f"Model {model_id} (seq={request.model_seq_id}) linked to session {request.session_id}")
 
     async def execute():
         return await service.create_model(
@@ -154,7 +184,8 @@ async def delete_model(
     _: None = Depends(verify_api_key_dep),
     service: ModelService = Depends(get_model_service),
     metadata_storage: MetadataStorage = Depends(get_metadata_storage),
-    training_clients: Dict = Depends(get_training_clients)
+    training_clients: Dict = Depends(get_training_clients),
+    session_service: SessionService = Depends(get_session_service)
 ):
     """Delete training client and release GPU resources."""
     try:
@@ -163,9 +194,58 @@ async def delete_model(
             training_clients=training_clients,
             metadata_storage=metadata_storage
         )
+
+        # Remove model from its session
+        session_service.remove_model(request.model_id)
+
         return DeleteModelResponse(**result)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/api/v1/unload_model", response_model=AsyncOperationResponse)
+async def unload_model(
+    request: UnloadModelRequest,
+    _: None = Depends(verify_api_key_dep),
+    service: ModelService = Depends(get_model_service),
+    task_manager: TaskManager = Depends(get_task_manager),
+    metadata_storage: MetadataStorage = Depends(get_metadata_storage),
+    training_clients: Dict = Depends(get_training_clients),
+    session_service: SessionService = Depends(get_session_service)
+):
+    """Unload model and release GPU resources (Tinker SDK compatible).
+
+    This endpoint is the Tinker-standard way to release model resources.
+    Returns an async operation that can be polled via retrieve_future.
+    The final result is an UnloadModelResponse with model_id and type fields.
+    """
+    request_id = generate_request_id()
+    model_id = request.model_id
+
+    async def execute():
+        await service.delete_model(
+            model_id=model_id,
+            training_clients=training_clients,
+            metadata_storage=metadata_storage
+        )
+        # Remove model from its session
+        session_service.remove_model(model_id)
+        # Return UnloadModelResponse format for retrieve_future
+        return UnloadModelResponse(model_id=model_id).dict()
+
+    # Create async task
+    task_manager.create_task(
+        request_id=request_id,
+        operation="unload_model",
+        model_id=model_id,
+        payload=request.dict(),
+        task_func=execute
+    )
+
+    return AsyncOperationResponse(
+        request_id=request_id,
+        model_id=model_id
+    )
 
 
 @router.post("/api/v1/get_info", response_model=GetInfoResponse)
