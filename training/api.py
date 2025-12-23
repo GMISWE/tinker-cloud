@@ -24,7 +24,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 # Import modules
-from .storage import FuturesStorage, MetadataStorage
+from .storage import FuturesStorage, MetadataStorage, SessionStorage
 from .config import get_config, TrainingConfig, StorageConfig
 from .core import SlimeArgumentBuilder
 from .utils import APIKeyAuth
@@ -86,6 +86,7 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
     from .routers import models as models_router_module
     from .routers import checkpoints as checkpoints_router_module
     from .routers import sampling as sampling_router_module
+    from .routers import session as session_router_module
 
     # Include all routers
     application.include_router(training_router_module.router)
@@ -94,7 +95,8 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
     application.include_router(models_router_module.router)
     application.include_router(checkpoints_router_module.router)
     application.include_router(sampling_router_module.router)
-    logger.info("✅ Modular routers integrated: training, health, futures, models, checkpoints, sampling")
+    application.include_router(session_router_module.router)
+    logger.info("✅ Modular routers integrated: training, health, futures, models, checkpoints, sampling, session")
 
     @application.on_event("startup")
     async def startup_event():
@@ -109,10 +111,12 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
         )
 
         # Set up logging based on config
+        # force=True ensures this takes effect even if uvicorn already configured logging
         logging.basicConfig(
             level=getattr(logging, config_obj.server.log_level, logging.INFO),
             format="[%(asctime)s] %(levelname)s %(filename)s:%(lineno)d: %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
+            force=True,
         )
 
         # Suppress noisy third-party loggers
@@ -124,11 +128,21 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
         # Initialize storage modules
         futures_storage = FuturesStorage(config_obj.storage.futures_db_path)
         metadata_storage = MetadataStorage(config_obj.storage.metadata_dir)
-        logger.info("Initialized storage modules - DB: %s", config_obj.storage.futures_db_path)
+
+        # Initialize session storage (separate DB file for sessions/samplers)
+        session_db_path = config_obj.storage.metadata_dir / "sessions.db"
+        session_storage = SessionStorage(session_db_path)
+        logger.info("Initialized storage modules - DB: %s, Sessions: %s",
+                    config_obj.storage.futures_db_path, session_db_path)
 
         # Clean up stale futures from previous runs (all async tasks are lost on restart)
         removed_count = futures_storage.cleanup_old_futures(max_age_hours=0)
         logger.info("Cleaned up %s stale futures from previous runs", removed_count)
+
+        # Clean up stale sessions BEFORE loading into SessionService
+        removed_sessions, removed_session_ids = session_storage.cleanup_stale_sessions(max_age_hours=24)
+        if removed_sessions > 0:
+            logger.info("Cleaned up %s stale sessions before loading", removed_sessions)
 
         # Also clean legacy futures store
         runtime.futures_store.clear()
@@ -143,6 +157,7 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
         # Store in app state for dependency injection
         application.state.futures_storage = futures_storage
         application.state.metadata_storage = metadata_storage
+        application.state.session_storage = session_storage
         application.state.slime_builder = slime_builder
         application.state.auth = auth
 
@@ -150,10 +165,13 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
         from .services.model_service import ModelService
         from .services.checkpoint_service import CheckpointService
         from .services.sampling_service import SamplingService
+        from .services.session_service import SessionService
 
         application.state.model_service = ModelService()
         application.state.checkpoint_service = CheckpointService()
         application.state.sampling_service = SamplingService()
+        # Initialize SessionService with storage for persistence
+        application.state.session_service = SessionService(storage=session_storage)
 
         logger.info("✅ Dependency providers registered on app state")
 

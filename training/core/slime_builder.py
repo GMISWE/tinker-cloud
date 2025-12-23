@@ -79,7 +79,7 @@ class SlimeArgumentBuilder:
 
         # Build minimal args for parse_args
         minimal_args = self._build_minimal_args(
-            hf_model_path, model_config, tp_size, pp_size
+            hf_model_path, model_config, tp_size, pp_size, megatron_checkpoint_path
         )
 
         # Parse args to get Slime defaults
@@ -104,7 +104,8 @@ class SlimeArgumentBuilder:
         hf_model_path: str,
         model_config: Dict[str, Any],
         tp_size: int,
-        pp_size: int
+        pp_size: int,
+        megatron_checkpoint_path: str
     ) -> list:
         """Build minimal CLI arguments for Slime's parse_args."""
         # Batch size configuration - satisfies Slime's assertion:
@@ -138,6 +139,16 @@ class SlimeArgumentBuilder:
             # Parallelism
             '--tensor-model-parallel-size', str(tp_size),
             '--pipeline-model-parallel-size', str(pp_size),
+            # Checkpoint paths - these are needed during parse_args() so that
+            # the fallback logic can set args.load = args.ref_load when no
+            # checkpoint resume is specified (see miles/utils/arguments.py:1452-1460)
+            '--ref-load', megatron_checkpoint_path,
+            '--save', self.default_save_dir,
+            '--save-interval', '100',
+            # Memory management: colocate SGLang with Megatron, enable offload
+            # These MUST be set here because parse_args() sets defaults based on them
+            '--colocate',
+            '--offload',  # Equivalent to --offload-train + --offload-rollout
         ]
 
         # Add untie-embeddings flag if needed
@@ -282,5 +293,17 @@ class SlimeArgumentBuilder:
             )
         args.use_wandb = enable_wandb
         args.use_tensorboard = False
+
+        # Environment variables to propagate to Ray workers
+        # Ray workers need PYTHONPATH to import megatron.training
+        # (megatron-core only installs megatron.core, not megatron.training)
+        args.train_env_vars = {
+            "PYTHONPATH": "/root/Megatron-LM:/root/miles",
+        }
+
+        # Enable offload_train and offload_rollout for memory management
+        # offload_train: Required when train_memory_margin_bytes > 0 (default is 1GB)
+        args.offload_train = True
+        args.offload_rollout = True
 
         return args

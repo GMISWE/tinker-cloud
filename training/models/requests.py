@@ -32,6 +32,12 @@ class ParallelismConfig(BaseModel):
 class CreateModelRequest(BaseModel):
     """Request to create a new training client."""
 
+    # Session tracking (required for session management)
+    session_id: str = Field(..., description="Session ID (required)")
+    model_seq_id: int = Field(..., description="Model sequence ID within session (required)")
+    user_metadata: Optional[Dict[str, Any]] = Field(default=None, description="User-provided metadata")
+
+    # Model configuration
     base_model: str = Field(..., description="Path to base model")
     lora_config: Optional[LoraConfig] = Field(default=None, description="LoRA configuration")
     debug_train_only: bool = Field(default=False, description="Debug mode (skip SGLang updates)")
@@ -43,6 +49,17 @@ class DeleteModelRequest(BaseModel):
     """Request to delete a training client."""
 
     model_id: str = Field(..., description="Model ID to delete")
+
+
+class UnloadModelRequest(BaseModel):
+    """Request to unload a model (Tinker SDK compatible).
+
+    This is the Tinker-standard way to release model resources.
+    Functionally equivalent to DeleteModelRequest.
+    """
+
+    model_id: str = Field(..., description="Model ID to unload")
+    type: str = Field(default="unload_model", description="Request type")
 
 
 class BatchData(BaseModel):
@@ -295,7 +312,10 @@ class PromptInput(BaseModel):
 class SaveWeightsForSamplerRequest(BaseModel):
     """Save weights for sampler request."""
     model_id: str = Field(..., description="Model ID")
-    name: Optional[str] = Field(default=None, description="Checkpoint name")
+    name: Optional[str] = Field(default=None, description="Checkpoint name (deprecated, use path)")
+    path: Optional[str] = Field(default=None, description="Checkpoint path/name")
+    seq_id: Optional[int] = Field(default=None, description="Sequence ID for ordering")
+    sampling_session_seq_id: Optional[int] = Field(default=None, description="Sampling session sequence ID for ephemeral saves")
 
 
 # ============= Updated Request Models (New Format) =============
@@ -362,15 +382,21 @@ class ASampleRequest(BaseModel):
     sampling_params: Optional[SamplingParams] = Field(default=None, description="Sampling parameters")
     base_model: Optional[str] = Field(default=None, description="Base model")
     model_path: Optional[str] = Field(default=None, description="Model path")
+    sampling_session_id: Optional[str] = Field(default=None, description="Sampling session ID (alternative to base_model/model_path)")
+    seq_id: Optional[int] = Field(default=None, description="Sequence ID within sampling session")
     prompt_logprobs: bool = Field(default=False, description="Return prompt logprobs")
+    topk_prompt_logprobs: int = Field(default=0, ge=0, description="Top-k prompt logprobs to return")
 
 
 class SampleRequest(BaseModel):
     """Sync sampling request (new format)."""
-    sampling_client_id: str = Field(..., description="Sampling client ID")
     prompts: List[List[int]] = Field(..., description="List of tokenized prompts")
     num_samples: int = Field(default=1, ge=1, le=100, description="Number of samples")
     sampling_params: Optional[SamplingParams] = Field(default=None, description="Sampling parameters")
+    base_model: Optional[str] = Field(default=None, description="Base model")
+    model_path: Optional[str] = Field(default=None, description="Model path")
+    sampling_session_id: Optional[str] = Field(default=None, description="Sampling session ID (alternative to base_model/model_path)")
+    seq_id: Optional[int] = Field(default=None, description="Sequence ID within sampling session")
 
 
 class CreateSamplingClientRequest(BaseModel):
@@ -378,3 +404,35 @@ class CreateSamplingClientRequest(BaseModel):
     model_path: Optional[str] = Field(default=None, description="Tinker URI path")
     base_model: Optional[str] = Field(default=None, description="HuggingFace model path")
     sampling_params: Optional[SamplingParams] = Field(default=None, description="Default sampling parameters")
+
+
+# ============= Session Models =============
+
+class CreateSessionRequest(BaseModel):
+    """Request to create a new client session."""
+    tags: List[str] = Field(default_factory=list, description="Session tags")
+    user_metadata: Optional[Dict[str, Any]] = Field(default=None, description="Custom metadata")
+    sdk_version: str = Field(default="unknown", description="SDK version")
+    type: str = Field(default="create_session", description="Request type")
+
+
+class SessionHeartbeatRequest(BaseModel):
+    """Request to send session heartbeat."""
+    session_id: str = Field(..., description="Session ID to heartbeat")
+    type: str = Field(default="session_heartbeat", description="Request type")
+
+
+class CreateSamplingSessionRequest(BaseModel):
+    """Request to create a sampling session."""
+    session_id: str = Field(..., description="Parent session ID")
+    sampling_session_seq_id: int = Field(..., description="Sequence ID within session")
+    base_model: Optional[str] = Field(default=None, description="Base model for sampling")
+    model_path: Optional[str] = Field(default=None, description="Tinker path to model weights")
+    type: str = Field(default="create_sampling_session", description="Request type")
+
+
+# ============= Weights Info Models =============
+
+class WeightsInfoRequest(BaseModel):
+    """Request to get weights/checkpoint info from tinker path."""
+    tinker_path: str = Field(..., description="Tinker URI path (e.g. tinker://model_xxx/weights/checkpoint_name)")

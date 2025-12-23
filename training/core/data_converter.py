@@ -696,29 +696,14 @@ class TinkerDataConverter:
         if "value_clipfrac" in loss_dict:
             metrics_dict["value_clipfrac:mean"] = TinkerDataConverter._extract_scalar_loss(loss_dict.get("value_clipfrac", 0.0))
 
-        # Build top-level logprobs (flattened across all samples)
-        # Required by Tinker client for RL training
-        all_logprobs = []
-        for idx, output in enumerate(loss_fn_outputs):
-            if output.get("logprobs") and output["logprobs"].get("data"):
-                print(f"[CONVERTER DEBUG] loss_fn_outputs[{idx}] logprobs data length: {len(output['logprobs']['data'])}", flush=True)
-                all_logprobs.extend(output["logprobs"]["data"])
-
-        print(f"[CONVERTER DEBUG] Returning {len(loss_fn_outputs)} loss_fn_outputs, total logprobs: {len(all_logprobs)}", flush=True)
+        # Note: Top-level logprobs removed - client uses loss_fn_outputs[i].logprobs instead
+        # This reduces response size by ~50% for large batches
+        print(f"[CONVERTER DEBUG] Returning {len(loss_fn_outputs)} loss_fn_outputs", flush=True)
 
         return {
             "loss_fn_output_type": loss_fn,
             "loss_fn_outputs": loss_fn_outputs,
             "metrics": metrics_dict,
-            "logprobs": {
-                "data": all_logprobs,
-                "shape": [len(all_logprobs)],
-                "dtype": "float32"
-            } if all_logprobs else {
-                "data": [],
-                "shape": [0],
-                "dtype": "float32"
-            }
         }
 
     @staticmethod
