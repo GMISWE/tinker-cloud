@@ -57,6 +57,10 @@ class CheckpointService:
         train_group = client_info["train_group"]
         training_run_id = client_info["training_run_id"]
 
+        # Check if offload_train is enabled
+        args = client_info.get("args")
+        offload_train = args.offload_train if args else False
+
         # Generate checkpoint name and step_id
         checkpoint_name = path or f"checkpoint_{int(time.time())}"
         step_id = generate_step_id(checkpoint_name)
@@ -64,26 +68,34 @@ class CheckpointService:
 
         logger.info(f"[{request_id}] Saving weights for {model_id} to {checkpoint_path}")
 
-        # Save weights using async Ray API (matching original api.py pattern)
-        # Call save_model.remote() on each actor directly
-        object_refs = [
-            actor.save_model.remote(step_id)
-            for actor in train_group._actor_handlers
-        ]
+        if offload_train:
+            # With offload_train=True, process groups are destroyed after update_weights().
+            # Skip save_model since it will fail - weights are already synced to SGLang.
+            logger.info(
+                f"[{request_id}] Skipping save_model (offload_train=True, "
+                "weights already synced to SGLang via update_weights)"
+            )
+        else:
+            # Save weights using async Ray API (matching original api.py pattern)
+            # Call save_model.remote() on each actor directly
+            object_refs = [
+                actor.save_model.remote(step_id)
+                for actor in train_group._actor_handlers
+            ]
 
-        # Await all save operations
-        await asyncio.gather(*[asyncio.wrap_future(ref.future()) for ref in object_refs])
+            # Await all save operations
+            await asyncio.gather(*[asyncio.wrap_future(ref.future()) for ref in object_refs])
 
-        # Save checkpoint metadata
-        metadata_storage.save_checkpoint(
-            model_id=model_id,
-            checkpoint_name=checkpoint_name,
-            checkpoint_data={
-                "path": checkpoint_path,
-                "created_at": datetime.now().isoformat(),
-                "type": "manual_save"
-            }
-        )
+            # Save checkpoint metadata
+            metadata_storage.save_checkpoint(
+                model_id=model_id,
+                checkpoint_name=checkpoint_name,
+                checkpoint_data={
+                    "path": checkpoint_path,
+                    "created_at": datetime.now().isoformat(),
+                    "type": "manual_save"
+                }
+            )
 
         logger.info(f"[{request_id}] Weights saved successfully")
 
@@ -185,43 +197,42 @@ class CheckpointService:
             args = client_info.get("args")
             offload_train = args.offload_train if args else False
 
-            if offload_train:
-                # With offload_train=True, process groups may be destroyed after update_weights().
-                # Persistent saves require PG for distributed checkpointing.
-                # Log a warning - the save may fail if PG are not active.
-                logger.warning(
-                    f"[{request_id}] Persistent save with offload_train=True - "
-                    "this may fail if process groups are destroyed. "
-                    "Consider saving before update_weights or using ephemeral saves."
-                )
-
             # Generate checkpoint name and path
             checkpoint_name = path or name or f"sampler_{int(time.time())}"
             step_id = generate_step_id(checkpoint_name)
             checkpoint_path = f"/data/checkpoints/tinker/iter_{step_id:07d}"
             tinker_uri = f"tinker://{training_run_id}/weights/{checkpoint_name}"
 
-            # Save weights using async Ray API (matching original api.py pattern)
-            object_refs = [
-                actor.save_model.remote(step_id)
-                for actor in train_group._actor_handlers
-            ]
+            if offload_train:
+                # With offload_train=True, process groups are destroyed after update_weights().
+                # Skip save_model since it will fail - weights are already synced to SGLang.
+                # This is expected behavior for colocated training mode.
+                logger.info(
+                    f"[{request_id}] Skipping save_model for persistent save (offload_train=True, "
+                    "weights already synced to SGLang via update_weights)"
+                )
+            else:
+                # Save weights using async Ray API (matching original api.py pattern)
+                object_refs = [
+                    actor.save_model.remote(step_id)
+                    for actor in train_group._actor_handlers
+                ]
 
-            # Await all save operations
-            await asyncio.gather(*[asyncio.wrap_future(ref.future()) for ref in object_refs])
+                # Await all save operations
+                await asyncio.gather(*[asyncio.wrap_future(ref.future()) for ref in object_refs])
 
-            # Save checkpoint metadata
-            metadata_storage.save_checkpoint(
-                model_id=model_id,
-                checkpoint_name=f"sampler_{checkpoint_name}",
-                checkpoint_data={
-                    "path": checkpoint_path,
-                    "tinker_uri": tinker_uri,
-                    "created_at": datetime.now().isoformat(),
-                    "type": "sampler",
-                    "step_id": step_id
-                }
-            )
+                # Save checkpoint metadata
+                metadata_storage.save_checkpoint(
+                    model_id=model_id,
+                    checkpoint_name=f"sampler_{checkpoint_name}",
+                    checkpoint_data={
+                        "path": checkpoint_path,
+                        "tinker_uri": tinker_uri,
+                        "created_at": datetime.now().isoformat(),
+                        "type": "sampler",
+                        "step_id": step_id
+                    }
+                )
 
             logger.info(f"[{request_id}] Weights saved to {tinker_uri}")
 

@@ -157,10 +157,13 @@ async def create_model(
             debug_train_only=request.debug_train_only,
             checkpoint_path=request.checkpoint_path,
             parallelism_config=request.parallelism_config.dict() if request.parallelism_config else None,
+            max_batch_size=request.max_batch_size,
             slime_builder=slime_builder,
             metadata_storage=metadata_storage,
             training_clients=training_clients,
-            training_runs_metadata=training_runs_metadata
+            training_runs_metadata=training_runs_metadata,
+            rlve_config=request.rlve_config.dict() if request.rlve_config else None,
+            wandb_config=request.wandb_config.dict() if request.wandb_config else None
         )
 
     # Create async task

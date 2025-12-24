@@ -35,10 +35,13 @@ class ModelService:
         debug_train_only: bool,
         checkpoint_path: Optional[str],
         parallelism_config: Optional[Dict[str, Any]],
+        max_batch_size: int,
         slime_builder: SlimeArgumentBuilder,
         metadata_storage: MetadataStorage,
         training_clients: Dict[str, Dict[str, Any]],
-        training_runs_metadata: Dict[str, Dict[str, Any]]
+        training_runs_metadata: Dict[str, Dict[str, Any]],
+        rlve_config: Optional[Dict[str, Any]] = None,
+        wandb_config: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Create a new training model with Ray actors and GPU resources.
@@ -55,6 +58,8 @@ class ModelService:
             metadata_storage: Metadata storage instance
             training_clients: Global training clients dict
             training_runs_metadata: Global training runs metadata dict
+            rlve_config: Optional RLVE configuration for server-side problem generation
+            wandb_config: Optional Wandb logging configuration
 
         Returns:
             Dict with model_id, base_model, lora_config, status
@@ -76,7 +81,10 @@ class ModelService:
             lora_config=lora_config,
             debug_train_only=debug_train_only,
             checkpoint_path=checkpoint_path,
-            parallelism_config=parallelism_config
+            parallelism_config=parallelism_config,
+            max_batch_size=max_batch_size,
+            rlve_config=rlve_config,
+            wandb_config=wandb_config
         )
         print(f"[DEBUG model_service] build_args() returned, hf_path={hf_path}", flush=True)
         logger.debug(f"[{request_id}] build_args() completed")
@@ -86,6 +94,10 @@ class ModelService:
         logger.info(f"[{request_id}] Model config: base={base_model}, hf_path={hf_path}")
         if lora_config:
             logger.info(f"[{request_id}] LoRA config: {lora_config}")
+        if rlve_config and rlve_config.get("enabled"):
+            logger.info(f"[{request_id}] RLVE config: {len(rlve_config.get('environment_list', []))} environments")
+        if wandb_config and wandb_config.get("enabled"):
+            logger.info(f"[{request_id}] Wandb config: project={wandb_config.get('project', 'rlve')}")
 
         # Create training run metadata (use model_id as training_run_id for compatibility)
         training_run_id = model_id
@@ -95,11 +107,14 @@ class ModelService:
             "base_model": base_model,
             "hf_path": hf_path,
             "lora_config": lora_config,
+            "rlve_config": rlve_config,
+            "wandb_config": wandb_config,
             "created_at": datetime.now().isoformat(),
             "checkpoint_path": checkpoint_path,
             "model_owner": "kgateway-user",
             "is_lora": lora_config is not None,
             "lora_rank": lora_config.get("rank", 0) if lora_config else 0,
+            "is_rlve": rlve_config is not None and rlve_config.get("enabled", False),
             "corrupted": False,
             "last_request_time": datetime.now().isoformat(),
             "last_checkpoint": None,
@@ -279,6 +294,8 @@ class ModelService:
                 "hf_path": hf_path,
                 "router_ip": router_ip,
                 "router_port": router_port,
+                "rlve_config": rlve_config,
+                "wandb_config": wandb_config,
                 "created_at": datetime.now().isoformat()
             }
 

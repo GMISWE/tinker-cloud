@@ -29,6 +29,63 @@ class ParallelismConfig(BaseModel):
     num_gpus: int = Field(default=4, ge=1, le=32, description="Total number of GPUs")
 
 
+class RLVEConfig(BaseModel):
+    """RLVE (Reinforcement Learning with Verifiable Environments) configuration.
+
+    When enabled, Miles handles server-side:
+    - Problem generation from Gym environments
+    - Sampling via SGLang
+    - Reward computation via verifiers
+    - Accuracy/difficulty tracking with curriculum
+    """
+
+    enabled: bool = Field(default=False, description="Enable RLVE training mode")
+    environment_list: List[str] = Field(
+        default_factory=list,
+        description="List of Gym environments (e.g., ['Sorting', 'Division', 'SAT'])"
+    )
+    custom_prompt_preprocessor: str = Field(
+        default="TinyZero",
+        description="Prompt preprocessor: 'TinyZero' or 'ChatTemplate_NoSystemPrompt'"
+    )
+    answer_marker_type: str = Field(
+        default="<answer></answer>",
+        description="Answer marker type: '<answer></answer>' or '\\boxed{}'"
+    )
+    initial_difficulty: int = Field(default=0, ge=0, description="Initial difficulty level")
+    difficulty_sliding_window_size: int = Field(
+        default=4, ge=1, description="Sliding window for difficulty sampling"
+    )
+    min_metric_to_increase_difficulty: float = Field(
+        default=0.9, ge=0.0, le=1.0, description="Accuracy threshold to increase difficulty"
+    )
+    min_prompts_before_difficulty_check: int = Field(
+        default=8, ge=1, description="Min prompts before checking difficulty"
+    )
+    # Rollout configuration
+    rollout_batch_size: int = Field(default=32, ge=1, description="Number of prompts per rollout")
+    n_samples_per_prompt: int = Field(default=8, ge=1, description="Samples generated per prompt")
+    rollout_max_response_len: int = Field(default=4096, ge=1, description="Max response length")
+    rollout_temperature: float = Field(default=1.0, ge=0.0, le=2.0, description="Sampling temperature")
+
+    @validator('environment_list')
+    def validate_environment_list(cls, v, values):
+        """Ensure environment_list is non-empty when enabled."""
+        if values.get('enabled', False) and not v:
+            raise ValueError("environment_list cannot be empty when RLVE is enabled")
+        return v
+
+
+class WandbConfig(BaseModel):
+    """Wandb logging configuration for RLVE training."""
+
+    enabled: bool = Field(default=False, description="Enable Wandb logging")
+    project: str = Field(default="rlve", description="Wandb project name")
+    run_name: Optional[str] = Field(default=None, description="Wandb run name")
+    group: Optional[str] = Field(default=None, description="Wandb run group")
+    api_key: Optional[str] = Field(default=None, description="Wandb API key (if not in env)")
+
+
 class CreateModelRequest(BaseModel):
     """Request to create a new training client."""
 
@@ -43,6 +100,11 @@ class CreateModelRequest(BaseModel):
     debug_train_only: bool = Field(default=False, description="Debug mode (skip SGLang updates)")
     checkpoint_path: Optional[str] = Field(default=None, description="Checkpoint to resume from")
     parallelism_config: Optional[ParallelismConfig] = Field(default=None, description="Parallelism settings")
+    max_batch_size: int = Field(default=4096, description="Max batch size for forward_backward (avoids gradient accumulation)")
+
+    # RLVE (Reinforcement Learning with Verifiable Environments) configuration
+    rlve_config: Optional[RLVEConfig] = Field(default=None, description="RLVE training configuration")
+    wandb_config: Optional[WandbConfig] = Field(default=None, description="Wandb logging configuration")
 
 
 class DeleteModelRequest(BaseModel):

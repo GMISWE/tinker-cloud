@@ -58,7 +58,7 @@ class SessionService:
     def __init__(
         self,
         storage: Optional["SessionStorage"] = None,
-        heartbeat_warn_threshold_sec: int = 120
+        heartbeat_warn_threshold_sec: int = 600  # 10 minutes - model creation can take 5+ mins
     ):
         """
         Initialize SessionService.

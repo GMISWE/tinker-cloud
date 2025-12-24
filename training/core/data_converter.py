@@ -555,6 +555,16 @@ class TinkerDataConverter:
         # Find the result with actual loss values (pipeline last stage)
         # With DP>1, only one rank (pipeline last stage) has populated loss_dict
         result_with_loss = None
+
+        # DEBUG: Log all results to understand actor output distribution
+        all_logprobs_from_all_results = []
+        for idx, result in enumerate(results):
+            r_loss = result.get("loss", {})
+            r_lp = r_loss.get("log_probs", [])
+            print(f"[CONVERTER DEBUG] Result {idx}: has_loss={bool(r_loss)}, log_probs_count={len(r_lp) if r_lp else 0}", flush=True)
+            if r_lp:
+                all_logprobs_from_all_results.extend(r_lp)
+
         for result in results:
             if result.get("loss"):  # Non-empty loss dict
                 result_with_loss = result
@@ -569,7 +579,15 @@ class TinkerDataConverter:
 
         # Extract per-sample logprobs from loss_dict
         # Slime returns this as "log_probs" (with underscore) containing list of tensors
+        # BUG FIX: With TP>1, different actors may return different samples' logprobs
+        # Aggregate from ALL results instead of just the first one
         per_sample_logprobs = loss_dict.get("log_probs", None)
+
+        # Use aggregated logprobs if we collected more than from single result
+        if all_logprobs_from_all_results and len(all_logprobs_from_all_results) > len(per_sample_logprobs or []):
+            print(f"[CONVERTER DEBUG] Using aggregated logprobs: {len(all_logprobs_from_all_results)} (vs single result: {len(per_sample_logprobs) if per_sample_logprobs else 0})", flush=True)
+            per_sample_logprobs = all_logprobs_from_all_results
+
         print(f"[CONVERTER DEBUG] per_sample_logprobs type: {type(per_sample_logprobs)}, is None: {per_sample_logprobs is None}", flush=True)
         if per_sample_logprobs:
             print(f"[CONVERTER DEBUG] per_sample_logprobs length: {len(per_sample_logprobs)}", flush=True)
