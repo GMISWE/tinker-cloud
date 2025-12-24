@@ -223,7 +223,7 @@ class ModelService:
 
                 # Connect training actors to rollout manager
                 print(f"[DEBUG model_service] Setting rollout_manager on train_group", flush=True)
-                train_group.set_rollout_manager(rollout_manager)
+                await asyncio.to_thread(train_group.set_rollout_manager, rollout_manager)
                 print(f"[DEBUG model_service] rollout_manager set on train_group", flush=True)
 
                 # Initialize SGLang memory state (match Miles create_rollout_manager + train.py flow)

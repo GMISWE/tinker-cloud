@@ -281,7 +281,10 @@ class TinkerDataConverter:
                     ref_data = cls.extract_tensor_data(ref_logprobs)
                     ref_log_probs_list.append(torch.tensor(maybe_trim(ref_data), dtype=torch.float32))
                 else:
-                    ref_log_probs_list.append(torch.zeros(response_len, dtype=torch.float32))
+                    # Use sampling logprobs as reference (policy at sampling time = "frozen" reference)
+                    # log_probs_list[-1] contains the sampling logprobs we just added at line 268
+                    # This enables proper KL penalty computation in Miles
+                    ref_log_probs_list.append(log_probs_list[-1].clone())
 
                 values = cls._get_field(loss_fn_inputs, "values")
                 if values is not None:
@@ -346,6 +349,8 @@ class TinkerDataConverter:
             rollout_data["ref_log_probs"] = ref_log_probs_list
             rollout_data["values"] = values_list
             rollout_data["returns"] = returns_list
+            # rollout_log_probs = sampling logprobs, needed for TIS (Truncated Importance Sampling)
+            rollout_data["rollout_log_probs"] = [lp.clone() for lp in log_probs_list]
         else:
             # SFT-like data detected (including DPO backward pass)
             # Override loss type to use sft_loss instead of policy_loss
@@ -576,6 +581,8 @@ class TinkerDataConverter:
 
         loss_dict = result_with_loss.get("loss", {})
         grad_norm = result_with_loss.get("grad_norm", 0.0)
+        print(f"[CONVERTER DEBUG] loss_dict keys: {list(loss_dict.keys()) if isinstance(loss_dict, dict) else type(loss_dict)}", flush=True)
+        print(f"[CONVERTER DEBUG] ppo_kl in loss_dict: {'ppo_kl' in loss_dict if isinstance(loss_dict, dict) else False}", flush=True)
 
         # Extract per-sample logprobs from loss_dict
         # Slime returns this as "log_probs" (with underscore) containing list of tensors

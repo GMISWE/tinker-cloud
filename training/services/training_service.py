@@ -86,7 +86,8 @@ class TrainingService:
         rollout_data = self.converter.forward_to_rollout(data)
 
         # Call Slime forward_only (no gradients)
-        results = train_group.forward_only(
+        results = await asyncio.to_thread(
+            train_group.forward_only,
             rollout_id=0,
             rollout_data_ref=Box(ray.put(rollout_data))
         )
@@ -232,8 +233,47 @@ class TrainingService:
         num_samples = len(rollout_data.get("tokens", []))
         logger.info(f"Forward-backward with {num_samples} samples")
 
+        # CRITICAL FIX: Compute log_probs with Megatron before training.
+        # Miles native calls compute_log_prob() (forward_only) to populate log_probs
+        # using the same Megatron engine that will compute logprobs during training.
+        # This ensures old_log_probs (from batch["log_probs"]) matches new log_probs
+        # from the training forward pass, giving ppo_kl ≈ 0.
+        # Without this, log_probs comes from SGLang (different engine) → ppo_kl ≠ 0.
+        if is_rl and not getattr(args, 'use_rollout_logprobs', False):
+            logger.info(f"Computing Megatron logprobs via forward_only for {model_id}")
+            forward_only_results = await asyncio.to_thread(
+                train_group.forward_only,
+                rollout_id=0,
+                rollout_data_ref=Box(ray.put(rollout_data))
+            )
+
+            # Extract Megatron-computed logprobs from forward_only results.
+            # Results come from multiple actors; only pipeline-last stage has log_probs.
+            # Note: forward_only_step returns {"loss": loss_dict, "grad_norm": ..., "valid_step": ...}
+            # where loss_dict contains {"log_probs": [...]} from run_forward_only.
+            megatron_logprobs = []
+            print(f"[DEBUG forward_only] Got {len(forward_only_results)} results from forward_only", flush=True)
+            for idx, result in enumerate(forward_only_results):
+                print(f"[DEBUG forward_only] Result {idx} keys: {list(result.keys()) if isinstance(result, dict) else type(result)}", flush=True)
+                # log_probs is nested in result["loss"]["log_probs"]
+                loss_dict = result.get("loss", {}) if isinstance(result, dict) else {}
+                print(f"[DEBUG forward_only] Result {idx} loss_dict keys: {list(loss_dict.keys()) if isinstance(loss_dict, dict) else type(loss_dict)}", flush=True)
+                lp = loss_dict.get("log_probs", []) if isinstance(loss_dict, dict) else []
+                if lp:
+                    print(f"[DEBUG forward_only] Result {idx} has {len(lp)} log_probs", flush=True)
+                    megatron_logprobs.extend(lp)
+
+            if megatron_logprobs:
+                logger.info(f"Replacing SGLang log_probs with {len(megatron_logprobs)} Megatron logprobs")
+                # Replace SGLang logprobs with Megatron logprobs
+                # Keep rollout_log_probs and ref_log_probs as SGLang values (for TIS and KL loss)
+                rollout_data["log_probs"] = megatron_logprobs
+            else:
+                logger.warning("forward_only returned no log_probs; using SGLang logprobs as fallback")
+
         # Call Slime forward_backward_only
-        results = train_group.forward_backward_only(
+        results = await asyncio.to_thread(
+            train_group.forward_backward_only,
             rollout_id=0,
             rollout_data_ref=Box(ray.put(rollout_data))
         )
@@ -272,7 +312,7 @@ class TrainingService:
         logger.info(f"Optimizer step for {model_id}")
 
         # Apply optimizer step
-        results = train_group.apply_optimizer_step()
+        results = await asyncio.to_thread(train_group.apply_optimizer_step)
 
         # Sync weights to SGLang and onload if RL training
         # Follow Miles' train.py sequence:
@@ -291,25 +331,25 @@ class TrainingService:
 
             # Step 1: Offload Megatron model to free GPU memory for SGLang
             logger.info(f"Offloading Megatron model for {model_id}")
-            train_group.offload()
+            await asyncio.to_thread(train_group.offload)
 
             # Step 2: Onload SGLang weights (needed for update_weights)
             logger.info(f"Onloading SGLang weights for {model_id}")
-            ray.get(rollout_manager.onload.remote(tags=[GPU_MEMORY_TYPE_WEIGHTS]))
+            await asyncio.to_thread(lambda: ray.get(rollout_manager.onload.remote(tags=[GPU_MEMORY_TYPE_WEIGHTS])))
 
-            # Step 2: Sync updated weights from Megatron to SGLang
+            # Step 3: Sync updated weights from Megatron to SGLang
             logger.info(f"Pushing updated weights to SGLang for {model_id}")
-            train_group.update_weights()
+            await asyncio.to_thread(train_group.update_weights)
             logger.info(f"Weights synced to SGLang for {model_id}")
 
             # Step 3: Onload CUDA graphs
             if GPU_MEMORY_TYPE_CUDA_GRAPH is not None:
                 logger.info(f"Onloading SGLang CUDA graphs for {model_id}")
-                ray.get(rollout_manager.onload.remote(tags=[GPU_MEMORY_TYPE_CUDA_GRAPH]))
+                await asyncio.to_thread(lambda: ray.get(rollout_manager.onload.remote(tags=[GPU_MEMORY_TYPE_CUDA_GRAPH])))
 
             # Step 4: Onload KV cache
             logger.info(f"Onloading SGLang KV cache for {model_id}")
-            ray.get(rollout_manager.onload.remote(tags=[GPU_MEMORY_TYPE_KV_CACHE]))
+            await asyncio.to_thread(lambda: ray.get(rollout_manager.onload.remote(tags=[GPU_MEMORY_TYPE_KV_CACHE])))
 
             logger.info(f"SGLang fully onloaded for {model_id}")
 

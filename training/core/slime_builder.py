@@ -160,6 +160,19 @@ class SlimeArgumentBuilder:
             '--global-batch-size', str(global_batch_size),
             # RL algorithm
             '--advantage-estimator', os.environ.get('SLIME_ADVANTAGE_ESTIMATOR', 'grpo'),
+            # KL regularization - enabled by default to prevent policy collapse
+            # Uses sampling logprobs as reference (set in data_converter.py)
+            '--use-kl-loss',
+            '--kl-loss-coef', os.environ.get('SLIME_KL_LOSS_COEF', '0.02'),
+            # TIS (Truncated Importance Sampling) - clips importance ratios for stability
+            '--use-tis',
+            # PPO clipping - asymmetric clip for importance ratios (matches Miles native)
+            '--eps-clip', os.environ.get('SLIME_EPS_CLIP', '0.2'),
+            '--eps-clip-high', os.environ.get('SLIME_EPS_CLIP_HIGH', '0.28'),
+            # Entropy coefficient (0 = no entropy bonus, matches Miles native)
+            '--entropy-coef', os.environ.get('SLIME_ENTROPY_COEF', '0.00'),
+            # Note: --normalize-advantages defaults to False, which is correct
+            # (tinker-cookbook already centers advantages within groups)
             # Parallelism
             '--tensor-model-parallel-size', str(tp_size),
             '--pipeline-model-parallel-size', str(pp_size),
