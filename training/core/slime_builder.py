@@ -182,7 +182,7 @@ class SlimeArgumentBuilder:
             # checkpoint resume is specified (see miles/utils/arguments.py:1452-1460)
             '--ref-load', megatron_checkpoint_path,
             '--save', self.default_save_dir,
-            '--save-interval', '100',
+            '--save-interval', '20000',  # ~100 batches (each batch ~200 microbatches)
             # Memory management: colocate SGLang with Megatron, enable offload
             # These MUST be set here because parse_args() sets defaults based on them
             '--colocate',
