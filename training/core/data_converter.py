@@ -117,7 +117,7 @@ class TinkerDataConverter:
             # Response length is number of non-zero mask elements
             response_length = int(loss_mask.sum().item())
             response_lengths_list.append(response_length)
-            print(f"[CONVERTER DEBUG SFT] Sample {len(loss_masks_list)-1}: loss_mask sum={response_length}, len={len(loss_mask)}", flush=True)
+            # print(f"[CONVERTER DEBUG SFT] Sample {len(loss_masks_list)-1}: loss_mask sum={response_length}, len={len(loss_mask)}", flush=True)
 
         # Build rollout_data with dummy RL fields (not used for forward-only)
         batch_size = len(data)
@@ -170,12 +170,12 @@ class TinkerDataConverter:
                 # If we have weights+target but no logprobs, it's SFT data (including DPO backward pass)
                 detected_is_rl = has_advantages or has_logprobs
                 if detected_is_rl != is_rl:
-                    print(f"[CONVERTER] Auto-detected data format: is_rl={detected_is_rl} (was {is_rl}), "
-                          f"has_advantages={has_advantages}, has_logprobs={has_logprobs}, "
-                          f"has_weights={has_weights}, has_target={has_target}", flush=True)
+                    # print(f"[CONVERTER] Auto-detected data format: is_rl={detected_is_rl} (was {is_rl}), "
+                    #       f"has_advantages={has_advantages}, has_logprobs={has_logprobs}, "
+                    #       f"has_weights={has_weights}, has_target={has_target}", flush=True)
                     is_rl = detected_is_rl
 
-        print(f"[CONVERTER DEBUG SFT] forward_backward_to_rollout called with {len(data)} samples, is_rl={is_rl}", flush=True)
+        # print(f"[CONVERTER DEBUG SFT] forward_backward_to_rollout called with {len(data)} samples, is_rl={is_rl}", flush=True)
         tokens_list = []
         loss_masks_list = []
         response_lengths_list = []
@@ -187,7 +187,7 @@ class TinkerDataConverter:
         values_list = [] if is_rl else None
         returns_list = [] if is_rl else None
 
-        print(f"[CONVERTER] Converting {len(data)} forward_backward samples (is_rl={is_rl})", flush=True)
+        # print(f"[CONVERTER] Converting {len(data)} forward_backward samples (is_rl={is_rl})", flush=True)
         logger.info(f"Converting {len(data)} forward_backward samples (is_rl={is_rl})")
 
         # Handle legacy HTTP test format: empty data or [{"input": "...", "target": "..."}]
@@ -207,12 +207,12 @@ class TinkerDataConverter:
             }
 
         for idx, datum in enumerate(data):
-            print(f"[CONVERTER] Processing datum {idx}, type={type(datum)}", flush=True)
+            # print(f"[CONVERTER] Processing datum {idx}, type={type(datum)}", flush=True)
             # Extract input tokens
             model_input = cls._get_field(datum, "model_input")
-            print(f"[CONVERTER] model_input type={type(model_input)}, value={model_input}", flush=True)
+            # print(f"[CONVERTER] model_input type={type(model_input)}, value={model_input}", flush=True)
             tokens = cls.extract_tokens_from_model_input(model_input)
-            print(f"[CONVERTER] Extracted {len(tokens)} input tokens: {tokens}", flush=True)
+            # print(f"[CONVERTER] Extracted {len(tokens)} input tokens: {tokens}", flush=True)
             logger.debug(f"Extracted {len(tokens)} input tokens: {tokens}")
             tokens_list.append(torch.tensor(tokens, dtype=torch.long))
 
@@ -236,10 +236,10 @@ class TinkerDataConverter:
                     response_len = len(mask_data)
                 elif logprobs_data is not None:
                     response_len = len(logprobs_data)
-                    print(f"[CONVERTER RL] Sample {idx}: No mask, using logprobs length={response_len} (tokens={len(tokens)})", flush=True)
+                    # print(f"[CONVERTER RL] Sample {idx}: No mask, using logprobs length={response_len} (tokens={len(tokens)})", flush=True)
                 else:
                     response_len = len(tokens)
-                    print(f"[CONVERTER RL] Sample {idx}: No mask/logprobs, using token length={response_len}", flush=True)
+                    # print(f"[CONVERTER RL] Sample {idx}: No mask/logprobs, using token length={response_len}", flush=True)
 
                 # Step 3: Handle causal LM shift (N-1 adjustment)
                 #
@@ -250,7 +250,7 @@ class TinkerDataConverter:
                 token_length = len(tokens)
                 needs_causal_trim = (response_len == token_length and token_length > 1)
                 if needs_causal_trim:
-                    print(f"[CONVERTER RL] Sample {idx}: Applying N-1 causal trim ({response_len} -> {response_len - 1})", flush=True)
+                    # print(f"[CONVERTER RL] Sample {idx}: Applying N-1 causal trim ({response_len} -> {response_len - 1})", flush=True)
                     response_len = token_length - 1
 
                 # Helper to trim tensor data for causal LM shift (skip first element)
@@ -400,7 +400,7 @@ class TinkerDataConverter:
             if weights_data is not None:
                 weights = TinkerDataConverter.extract_tensor_data(weights_data)
                 response_lengths_list.append(len(weights))
-                print(f"[CONVERTER DEBUG] Original weights[{idx}] length = {len(weights)}", flush=True)
+                # print(f"[CONVERTER DEBUG] Original weights[{idx}] length = {len(weights)}", flush=True)
                 continue
 
             # RL path: mask is removed by tinker-cookbook's remove_mask()
@@ -414,12 +414,12 @@ class TinkerDataConverter:
             if logprobs_data is not None:
                 logprobs = TinkerDataConverter.extract_tensor_data(logprobs_data)
                 response_lengths_list.append(len(logprobs))
-                print(f"[CONVERTER DEBUG] Original logprobs[{idx}] length = {len(logprobs)} (using as response_length)", flush=True)
+                # print(f"[CONVERTER DEBUG] Original logprobs[{idx}] length = {len(logprobs)} (using as response_length)", flush=True)
                 continue
 
             # No length info available
             response_lengths_list.append(0)
-            print(f"[CONVERTER DEBUG] Sample[{idx}] no weights/mask/logprobs found, using 0", flush=True)
+            # print(f"[CONVERTER DEBUG] Sample[{idx}] no weights/mask/logprobs found, using 0", flush=True)
 
         return response_lengths_list
 
@@ -485,21 +485,23 @@ class TinkerDataConverter:
                         logprobs_length = len(logprob_list)
                         if logprobs_length > response_length:
                             logprob_list = logprob_list[-response_length:]
-                            print(f"[CONVERTER DEBUG] Sample {sample_index}: trimmed logprobs from {original_logprobs_length} to {response_length}", flush=True)
+                            # print(f"[CONVERTER DEBUG] Sample {sample_index}: trimmed logprobs from {original_logprobs_length} to {response_length}", flush=True)
                         elif logprobs_length < response_length:
                             padding = [0.0] * (response_length - logprobs_length)
                             logprob_list = padding + logprob_list
-                            print(f"[CONVERTER DEBUG] Sample {sample_index}: padded logprobs from {original_logprobs_length} to {response_length}", flush=True)
+                            # print(f"[CONVERTER DEBUG] Sample {sample_index}: padded logprobs from {original_logprobs_length} to {response_length}", flush=True)
                         else:
-                            print(f"[CONVERTER DEBUG] Sample {sample_index}: logprobs {original_logprobs_length} matches response_length {response_length}", flush=True)
+                            pass
+                            # print(f"[CONVERTER DEBUG] Sample {sample_index}: logprobs {original_logprobs_length} matches response_length {response_length}", flush=True)
                 else:
-                    print(f"[CONVERTER DEBUG] Sample {sample_index}: no response_length, using raw logprobs length {original_logprobs_length}", flush=True)
+                    pass
+                    # print(f"[CONVERTER DEBUG] Sample {sample_index}: no response_length, using raw logprobs length {original_logprobs_length}", flush=True)
 
                 # Use logprobs as-is - no [0.0] prepend needed here
                 # The [0.0] prepend for DPO [1:] slice compensation is done in sglang_client.py
                 # for the compute_logprobs_async path (reference model), not here
                 payload_logprobs = logprob_list
-                print(f"[CONVERTER DEBUG] Sample {sample_index}: final payload_logprobs length = {len(payload_logprobs)}", flush=True)
+                # print(f"[CONVERTER DEBUG] Sample {sample_index}: final payload_logprobs length = {len(payload_logprobs)}", flush=True)
 
                 loss_fn_outputs.append({
                     "loss": {
@@ -562,13 +564,33 @@ class TinkerDataConverter:
         result_with_loss = None
 
         # DEBUG: Log all results to understand actor output distribution
+        # FIX: Interleave results from each DP rank to restore original sample order
+        # With strided DP partitioning: DP rank r gets samples [r, r+dp_size, r+2*dp_size, ...]
         all_logprobs_from_all_results = []
+        dp_results_with_logprobs = []
         for idx, result in enumerate(results):
             r_loss = result.get("loss", {})
             r_lp = r_loss.get("log_probs", [])
-            print(f"[CONVERTER DEBUG] Result {idx}: has_loss={bool(r_loss)}, log_probs_count={len(r_lp) if r_lp else 0}", flush=True)
+            # print(f"[CONVERTER DEBUG] Result {idx}: has_loss={bool(r_loss)}, log_probs_count={len(r_lp) if r_lp else 0}", flush=True)
             if r_lp:
-                all_logprobs_from_all_results.extend(r_lp)
+                dp_results_with_logprobs.append(r_lp)
+
+        # Interleave logprobs from all DP ranks to restore original order
+        if len(dp_results_with_logprobs) > 1:
+            dp_size = len(dp_results_with_logprobs)
+            samples_per_rank = len(dp_results_with_logprobs[0])
+            total_samples = dp_size * samples_per_rank
+            interleaved = [None] * total_samples
+            for dp_rank, lp_list in enumerate(dp_results_with_logprobs):
+                for local_idx, logprob in enumerate(lp_list):
+                    global_idx = local_idx * dp_size + dp_rank  # Strided pattern
+                    if global_idx < total_samples:
+                        interleaved[global_idx] = logprob
+            # Filter out None entries (in case of uneven distribution)
+            all_logprobs_from_all_results = [lp for lp in interleaved if lp is not None]
+            # print(f"[CONVERTER DEBUG] Interleaved {len(all_logprobs_from_all_results)} logprobs from {dp_size} DP ranks", flush=True)
+        elif len(dp_results_with_logprobs) == 1:
+            all_logprobs_from_all_results = dp_results_with_logprobs[0]
 
         for result in results:
             if result.get("loss"):  # Non-empty loss dict
@@ -581,8 +603,8 @@ class TinkerDataConverter:
 
         loss_dict = result_with_loss.get("loss", {})
         grad_norm = result_with_loss.get("grad_norm", 0.0)
-        print(f"[CONVERTER DEBUG] loss_dict keys: {list(loss_dict.keys()) if isinstance(loss_dict, dict) else type(loss_dict)}", flush=True)
-        print(f"[CONVERTER DEBUG] ppo_kl in loss_dict: {'ppo_kl' in loss_dict if isinstance(loss_dict, dict) else False}", flush=True)
+        # print(f"[CONVERTER DEBUG] loss_dict keys: {list(loss_dict.keys()) if isinstance(loss_dict, dict) else type(loss_dict)}", flush=True)
+        # print(f"[CONVERTER DEBUG] ppo_kl in loss_dict: {'ppo_kl' in loss_dict if isinstance(loss_dict, dict) else False}", flush=True)
 
         # Extract per-sample logprobs from loss_dict
         # Slime returns this as "log_probs" (with underscore) containing list of tensors
@@ -592,12 +614,12 @@ class TinkerDataConverter:
 
         # Use aggregated logprobs if we collected more than from single result
         if all_logprobs_from_all_results and len(all_logprobs_from_all_results) > len(per_sample_logprobs or []):
-            print(f"[CONVERTER DEBUG] Using aggregated logprobs: {len(all_logprobs_from_all_results)} (vs single result: {len(per_sample_logprobs) if per_sample_logprobs else 0})", flush=True)
+            # print(f"[CONVERTER DEBUG] Using aggregated logprobs: {len(all_logprobs_from_all_results)} (vs single result: {len(per_sample_logprobs) if per_sample_logprobs else 0})", flush=True)
             per_sample_logprobs = all_logprobs_from_all_results
 
-        print(f"[CONVERTER DEBUG] per_sample_logprobs type: {type(per_sample_logprobs)}, is None: {per_sample_logprobs is None}", flush=True)
-        if per_sample_logprobs:
-            print(f"[CONVERTER DEBUG] per_sample_logprobs length: {len(per_sample_logprobs)}", flush=True)
+        # print(f"[CONVERTER DEBUG] per_sample_logprobs type: {type(per_sample_logprobs)}, is None: {per_sample_logprobs is None}", flush=True)
+        # if per_sample_logprobs:
+        #     print(f"[CONVERTER DEBUG] per_sample_logprobs length: {len(per_sample_logprobs)}", flush=True)
 
         # Determine batch_size from original_data (actual samples from Tinker)
         # Don't use rollout_data as it may be padded for data parallel
@@ -614,7 +636,7 @@ class TinkerDataConverter:
             batch_size = 1
             logger.warning("Could not determine batch_size - defaulting to 1")
 
-        print(f"[CONVERTER DEBUG] batch_size: {batch_size}", flush=True)
+        # print(f"[CONVERTER DEBUG] batch_size: {batch_size}", flush=True)
 
         # Get tokens for fallback
         tokens_list = rollout_data.get("tokens", []) if rollout_data else []
@@ -623,10 +645,10 @@ class TinkerDataConverter:
         response_lengths_list = TinkerDataConverter._extract_response_lengths_from_original(original_data)
         if not response_lengths_list and rollout_data and rollout_data.get("response_lengths"):
             response_lengths_list = [int(length) for length in rollout_data.get("response_lengths", [])]
-        if not response_lengths_list:
-            print(f"[CONVERTER DEBUG] No mask lengths available; using zero-length defaults", flush=True)
+        # if not response_lengths_list:
+        #     print(f"[CONVERTER DEBUG] No mask lengths available; using zero-length defaults", flush=True)
 
-        print(f"[CONVERTER DEBUG] response_lengths_list: {response_lengths_list}", flush=True)
+        # print(f"[CONVERTER DEBUG] response_lengths_list: {response_lengths_list}", flush=True)
 
         # Build per-sample loss_fn_outputs
         loss_fn_outputs = []
@@ -643,7 +665,7 @@ class TinkerDataConverter:
 
             # Add per-sample logprobs if available
             if per_sample_logprobs and i < len(per_sample_logprobs):
-                print(f"[CONVERTER DEBUG] Processing sample {i}", flush=True)
+                # print(f"[CONVERTER DEBUG] Processing sample {i}", flush=True)
                 # Convert tensor to list for JSON serialization
                 logprobs_tensor = per_sample_logprobs[i]
                 if hasattr(logprobs_tensor, 'cpu'):
@@ -651,7 +673,7 @@ class TinkerDataConverter:
                 else:
                     response_logprobs = logprobs_tensor if isinstance(logprobs_tensor, list) else list(logprobs_tensor)
 
-                print(f"[CONVERTER DEBUG] Sample {i}: response_logprobs length = {len(response_logprobs)}", flush=True)
+                # print(f"[CONVERTER DEBUG] Sample {i}: response_logprobs length = {len(response_logprobs)}", flush=True)
 
                 # Extract RESPONSE LENGTH (non-zero mask count) for proper trimming
                 # Slime returns full sequence logprobs, but Tinker expects RESPONSE portion only
@@ -659,38 +681,39 @@ class TinkerDataConverter:
                 if i < len(response_lengths_list):
                     response_length = response_lengths_list[i]  # Number of non-zero mask elements
                     logprobs_length = len(response_logprobs)
-                    print(f"[CONVERTER DEBUG] Sample {i}: response_length = {response_length}, logprobs_length = {logprobs_length}", flush=True)
+                    # print(f"[CONVERTER DEBUG] Sample {i}: response_length = {response_length}, logprobs_length = {logprobs_length}", flush=True)
 
                     if logprobs_length > response_length:
                         # Slime returned full sequence logprobs - extract only the LAST response_length elements
                         final_logprobs = response_logprobs[-response_length:]
-                        print(f"[CONVERTER DEBUG] Sample {i}: Trimmed from {logprobs_length} to {len(final_logprobs)}", flush=True)
+                        # print(f"[CONVERTER DEBUG] Sample {i}: Trimmed from {logprobs_length} to {len(final_logprobs)}", flush=True)
                     elif logprobs_length == response_length:
                         # Slime returned exactly the response portion - use as-is
                         final_logprobs = response_logprobs
-                        print(f"[CONVERTER DEBUG] Sample {i}: Using as-is (lengths match)", flush=True)
+                        # print(f"[CONVERTER DEBUG] Sample {i}: Using as-is (lengths match)", flush=True)
                     else:
                         # Slime returned fewer logprobs than response - pad with zeros
                         padding_length = response_length - logprobs_length
                         final_logprobs = [0.0] * padding_length + response_logprobs
-                        print(f"[CONVERTER DEBUG] Sample {i}: Padded from {logprobs_length} to {len(final_logprobs)}", flush=True)
+                        # print(f"[CONVERTER DEBUG] Sample {i}: Padded from {logprobs_length} to {len(final_logprobs)}", flush=True)
                 else:
                     # No mask info - use logprobs as-is
                     final_logprobs = response_logprobs
-                    print(f"[CONVERTER DEBUG] Sample {i}: No mask info, using logprobs as-is", flush=True)
+                    # print(f"[CONVERTER DEBUG] Sample {i}: No mask info, using logprobs as-is", flush=True)
 
                 output_entry["logprobs"] = {
                     "data": final_logprobs,
                     "shape": [len(final_logprobs)],
                     "dtype": "float32"
                 }
-                print(f"[CONVERTER DEBUG] Sample {i}: FINAL logprobs length in output_entry = {len(final_logprobs)}", flush=True)
+                # print(f"[CONVERTER DEBUG] Sample {i}: FINAL logprobs length in output_entry = {len(final_logprobs)}", flush=True)
             else:
-                print(f"[CONVERTER DEBUG] Sample {i}: No logprobs available", flush=True)
+                pass
+                # print(f"[CONVERTER DEBUG] Sample {i}: No logprobs available", flush=True)
                 # Fallback: return zeros padded to RESPONSE length (not full sequence)
                 # Tinker-cookbook expects logprobs to match response length (non-zero mask count)
                 response_length = response_lengths_list[i] if i < len(response_lengths_list) else 0
-                print(f"[CONVERTER DEBUG] Sample {i}: Using zero-padding with response_length {response_length}", flush=True)
+                # print(f"[CONVERTER DEBUG] Sample {i}: Using zero-padding with response_length {response_length}", flush=True)
                 output_entry["logprobs"] = {
                     "data": [0.0] * response_length,
                     "shape": [response_length],
@@ -723,7 +746,7 @@ class TinkerDataConverter:
 
         # Note: Top-level logprobs removed - client uses loss_fn_outputs[i].logprobs instead
         # This reduces response size by ~50% for large batches
-        print(f"[CONVERTER DEBUG] Returning {len(loss_fn_outputs)} loss_fn_outputs", flush=True)
+        # print(f"[CONVERTER DEBUG] Returning {len(loss_fn_outputs)} loss_fn_outputs", flush=True)
 
         return {
             "loss_fn_output_type": loss_fn,
