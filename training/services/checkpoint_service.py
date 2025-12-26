@@ -159,30 +159,9 @@ class CheckpointService:
             sampling_session_id = f"{model_id}_{sampling_session_seq_id}_{uuid.uuid4().hex[:8]}"
             logger.info(f"[{request_id}] Ephemeral save for sampler: {model_id} -> {sampling_session_id}")
 
-            # Check if offload_train is enabled
-            args = client_info.get("args")
-            offload_train = args.offload_train if args else False
-
-            if offload_train:
-                # With offload_train=True, process groups are destroyed after update_weights().
-                # But for ephemeral saves, we don't need to actually save to disk - the weights
-                # are already synced to SGLang via update_weights(). Just return the session ID.
-                logger.info(f"[{request_id}] Skipping save_model for ephemeral save (offload_train=True, weights already synced to SGLang)")
-            else:
-                # Generate step_id for the save
-                step_id = generate_step_id(f"ephemeral_{sampling_session_seq_id}")
-
-                # Save weights using async Ray API
-                object_refs = [
-                    actor.save_model.remote(step_id)
-                    for actor in train_group._actor_handlers
-                ]
-
-                # Await all save operations
-                await asyncio.gather(*[asyncio.wrap_future(ref.future()) for ref in object_refs])
-                logger.info(f"[{request_id}] Ephemeral weights saved to disk")
-
-            logger.info(f"[{request_id}] Ephemeral save completed, session_id={sampling_session_id}")
+            # Skip save_model for ephemeral saves - weights already synced to SGLang via update_weights()
+            # No need to write 22GB to disk every batch, just return the session ID
+            logger.info(f"[{request_id}] Skipping save_model for ephemeral save (weights already in SGLang)")
 
             return {
                 "path": None,
