@@ -15,6 +15,7 @@ from ..utils.model_config import (
     get_parallelism_config,
     detect_torch_dist_path,
     parse_checkpoint_uri,
+    compute_sglang_mem_fraction,
 )
 
 logger = logging.getLogger(__name__)
@@ -307,8 +308,8 @@ class SlimeArgumentBuilder:
         args.tokenizer_type = "HuggingFaceTokenizer"
         args.model_name = "qwen2.5"
 
-        # Dynamic batch size
-        args.use_dynamic_batch_size = True
+        # Dynamic batch size - disabled for simplicity to avoid reordering complexity
+        args.use_dynamic_batch_size = False
         args.max_tokens_per_gpu = 4096
 
         # Features
@@ -331,7 +332,7 @@ class SlimeArgumentBuilder:
         args.rollout_external = False
         args.debug_rollout_only = False
         args.debug_train_only = debug_train_only
-        args.sglang_mem_fraction_static = 0.8
+        args.sglang_mem_fraction_static = compute_sglang_mem_fraction(model_config, base_model)
 
         # Rollout function paths
         args.rollout_function_path = "miles.rollout.sglang_rollout.generate_rollout"
@@ -389,9 +390,10 @@ class SlimeArgumentBuilder:
                 "PYTHONPATH": "/root/Megatron-LM:/root/miles",
             }
 
-        # Enable offload_train and offload_rollout for memory management
-        # offload_train: Required when train_memory_margin_bytes > 0 (default is 1GB)
-        args.offload_train = True
-        args.offload_rollout = True
+        # Disable offload_train for simpler GPU memory management
+        # When offload_train=False, must also set train_memory_margin_bytes=0 to avoid assert
+        args.offload_train = False
+        args.offload_rollout = False
+        args.train_memory_margin_bytes = 0
 
         return args

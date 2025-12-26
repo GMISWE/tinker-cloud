@@ -21,6 +21,7 @@ from .model_config import (
     get_parallelism_config,
     detect_torch_dist_path,
     parse_checkpoint_uri,
+    compute_sglang_mem_fraction,
 )
 
 __all__ = [
@@ -42,4 +43,5 @@ __all__ = [
     "get_parallelism_config",
     "detect_torch_dist_path",
     "parse_checkpoint_uri",
+    "compute_sglang_mem_fraction",
 ]

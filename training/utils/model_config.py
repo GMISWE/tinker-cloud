@@ -271,6 +271,46 @@ def extract_model_name(args) -> str:
     return "unknown"
 
 
+def compute_sglang_mem_fraction(model_config: Dict[str, Any], model_name: str = "") -> float:
+    """
+    Compute SGLang memory fraction based on model size.
+
+    Smaller models need less GPU memory for KV cache, so we can use a smaller fraction.
+    This allows colocated training without offload for small models.
+
+    Args:
+        model_config: Model configuration dict from load_model_config()
+        model_name: Optional model name/path for extracting size
+
+    Returns:
+        Memory fraction (0.0-1.0) for SGLang's mem_fraction_static
+    """
+    total_params = estimate_model_params(model_config, model_name)
+
+    # Memory fraction based on model size:
+    # - Larger models need more KV cache memory
+    # - Smaller models can use less, leaving room for Megatron
+    if total_params <= 1.0:       # <= 1B: 10% (~19GB on H200)
+        mem_fraction = 0.10
+    elif total_params <= 2.0:     # 1-2B: 15% (~28GB)
+        mem_fraction = 0.15
+    elif total_params <= 4.0:     # 2-4B: 20% (~38GB)
+        mem_fraction = 0.20
+    elif total_params <= 8.0:     # 4-8B: 30% (~57GB)
+        mem_fraction = 0.30
+    elif total_params <= 14.0:    # 8-14B: 40% (~76GB)
+        mem_fraction = 0.40
+    elif total_params <= 35.0:    # 14-35B: 50% (~95GB)
+        mem_fraction = 0.50
+    else:                          # > 35B: 70% (~132GB)
+        mem_fraction = 0.70
+
+    logger.info(
+        f"SGLang mem_fraction={mem_fraction:.2f} for {total_params:.1f}B model"
+    )
+    return mem_fraction
+
+
 def detect_architecture(model_name: str) -> str:
     """
     Detect model architecture from model name.
