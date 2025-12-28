@@ -543,83 +543,44 @@ class TinkerDataConverter:
 
     @staticmethod
     def rollout_to_forward_backward_result(
-        results: List[Dict[str, Any]],
+        results,  # Can be Dict (new aggregated format) or List[Dict] (legacy per-actor format)
         loss_fn: str = "cross_entropy",
         rollout_data: Optional[Dict[str, Any]] = None,
         original_data: Optional[List[Any]] = None
     ) -> Dict[str, Any]:
         """
-        Convert Slime forward_backward_only results to Tinker result format.
+        Convert Miles forward_backward_only results to Tinker result format.
 
         Args:
-            results: List of results from Slime (per-GPU results)
+            results: Aggregated result dict from Miles (or legacy list of per-GPU results)
             loss_fn: Loss function type
             rollout_data: Optional rollout_data dict with tokens, loss_masks, response_lengths
+            original_data: Original Tinker data for response length extraction
 
         Returns:
             Tinker forward_backward result dict
         """
-        # Find the result with actual loss values (pipeline last stage)
-        # With DP>1, only one rank (pipeline last stage) has populated loss_dict
-        result_with_loss = None
-
-        # DEBUG: Log all results to understand actor output distribution
-        # FIX: Interleave results from each DP rank to restore original sample order
-        # With strided DP partitioning: DP rank r gets samples [r, r+dp_size, r+2*dp_size, ...]
-        all_logprobs_from_all_results = []
-        dp_results_with_logprobs = []
-        for idx, result in enumerate(results):
-            r_loss = result.get("loss", {})
-            r_lp = r_loss.get("log_probs", [])
-            # print(f"[CONVERTER DEBUG] Result {idx}: has_loss={bool(r_loss)}, log_probs_count={len(r_lp) if r_lp else 0}", flush=True)
-            if r_lp:
-                dp_results_with_logprobs.append(r_lp)
-
-        # Interleave logprobs from all DP ranks to restore original order
-        if len(dp_results_with_logprobs) > 1:
-            dp_size = len(dp_results_with_logprobs)
-            samples_per_rank = len(dp_results_with_logprobs[0])
-            total_samples = dp_size * samples_per_rank
-            interleaved = [None] * total_samples
-            for dp_rank, lp_list in enumerate(dp_results_with_logprobs):
-                for local_idx, logprob in enumerate(lp_list):
-                    global_idx = local_idx * dp_size + dp_rank  # Strided pattern
-                    if global_idx < total_samples:
-                        interleaved[global_idx] = logprob
-            # Filter out None entries (in case of uneven distribution)
-            all_logprobs_from_all_results = [lp for lp in interleaved if lp is not None]
-            # print(f"[CONVERTER DEBUG] Interleaved {len(all_logprobs_from_all_results)} logprobs from {dp_size} DP ranks", flush=True)
-        elif len(dp_results_with_logprobs) == 1:
-            all_logprobs_from_all_results = dp_results_with_logprobs[0]
-
-        for result in results:
-            if result.get("loss"):  # Non-empty loss dict
-                result_with_loss = result
-                break
-
-        # Fallback to first result if none have loss
-        if result_with_loss is None:
-            result_with_loss = results[0] if results else {}
+        # Handle both new aggregated format (dict) and legacy per-actor format (list)
+        if isinstance(results, dict):
+            # New format: Miles returns single aggregated result with logprobs in original order
+            result_with_loss = results
+        else:
+            # Legacy format: List of per-actor results (for backwards compatibility)
+            # Find the result with actual loss values
+            result_with_loss = None
+            for result in results:
+                if result.get("loss"):
+                    result_with_loss = result
+                    break
+            if result_with_loss is None:
+                result_with_loss = results[0] if results else {}
 
         loss_dict = result_with_loss.get("loss", {})
         grad_norm = result_with_loss.get("grad_norm", 0.0)
-        # print(f"[CONVERTER DEBUG] loss_dict keys: {list(loss_dict.keys()) if isinstance(loss_dict, dict) else type(loss_dict)}", flush=True)
-        # print(f"[CONVERTER DEBUG] ppo_kl in loss_dict: {'ppo_kl' in loss_dict if isinstance(loss_dict, dict) else False}", flush=True)
 
         # Extract per-sample logprobs from loss_dict
-        # Slime returns this as "log_probs" (with underscore) containing list of tensors
-        # BUG FIX: With TP>1, different actors may return different samples' logprobs
-        # Aggregate from ALL results instead of just the first one
+        # Miles now returns logprobs already in original input order (no interleaving needed)
         per_sample_logprobs = loss_dict.get("log_probs", None)
-
-        # Use aggregated logprobs if we collected more than from single result
-        if all_logprobs_from_all_results and len(all_logprobs_from_all_results) > len(per_sample_logprobs or []):
-            # print(f"[CONVERTER DEBUG] Using aggregated logprobs: {len(all_logprobs_from_all_results)} (vs single result: {len(per_sample_logprobs) if per_sample_logprobs else 0})", flush=True)
-            per_sample_logprobs = all_logprobs_from_all_results
-
-        # print(f"[CONVERTER DEBUG] per_sample_logprobs type: {type(per_sample_logprobs)}, is None: {per_sample_logprobs is None}", flush=True)
-        # if per_sample_logprobs:
-        #     print(f"[CONVERTER DEBUG] per_sample_logprobs length: {len(per_sample_logprobs)}", flush=True)
 
         # Determine batch_size from original_data (actual samples from Tinker)
         # Don't use rollout_data as it may be padded for data parallel
