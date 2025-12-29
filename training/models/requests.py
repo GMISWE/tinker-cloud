@@ -68,6 +68,13 @@ class RLVEConfig(BaseModel):
     rollout_max_response_len: int = Field(default=4096, ge=1, description="Max response length")
     rollout_temperature: float = Field(default=1.0, ge=0.0, le=2.0, description="Sampling temperature")
 
+    # GB200-specific RLVE settings
+    balance_data: bool = Field(default=True, description="Balance data across DP ranks by sequence length")
+    partial_rollout: bool = Field(default=True, description="Enable partial rollout with oversampling")
+    over_sampling_batch_size: int = Field(default=384, ge=1, description="Oversampling batch size for partial rollout")
+    use_dynamic_sampling_filter: bool = Field(default=True, description="Filter samples by reward variance (nonzero std)")
+    num_rollout: int = Field(default=500, ge=1, description="Number of rollout iterations")
+
     @validator('environment_list')
     def validate_environment_list(cls, v, values):
         """Ensure environment_list is non-empty when enabled."""

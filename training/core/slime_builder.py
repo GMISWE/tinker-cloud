@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional, Tuple
 from ..utils.model_config import (
     load_model_config,
     get_parallelism_config,
+    auto_detect_all_parallelism,
     detect_torch_dist_path,
     parse_checkpoint_uri,
     compute_sglang_mem_fraction,
@@ -74,19 +75,42 @@ class SlimeArgumentBuilder:
         logger.info(f"HF path: {hf_model_path}, Megatron path: {megatron_checkpoint_path}")
         logger.info(f"Loaded model config: {model_config}")
 
-        # Determine parallelism
-        parallel_config = get_parallelism_config(
-            model_config, parallelism_config, base_model
-        )
-        tp_size = parallel_config['tensor_parallel_size']
-        pp_size = parallel_config['pipeline_parallel_size']
-        num_gpus = parallel_config['num_gpus']
+        # Determine parallelism - use new unified auto-detection
+        rlve_enabled = rlve_config and rlve_config.get("enabled", False)
+        num_gpus = int(os.environ.get("SLIME_NUM_GPUS", "4"))
+        if parallelism_config:
+            num_gpus = parallelism_config.get("num_gpus", num_gpus)
 
-        logger.info(f"Parallelism: TP={tp_size}, PP={pp_size}, GPUs={num_gpus}")
+        # Get max sequence length for CP decision
+        max_seq_len = 2048
+        if rlve_config:
+            max_seq_len = rlve_config.get('rollout_max_response_len', 4096)
+
+        # Auto-detect all parallelism dimensions
+        parallel = auto_detect_all_parallelism(
+            model_config,
+            num_gpus,
+            max_seq_len=max_seq_len,
+            rlve_enabled=rlve_enabled,
+            model_name=base_model
+        )
+        tp_size = parallel['tp']
+        pp_size = parallel['pp']
+        cp_size = parallel['cp']
+
+        # Build parallel_config dict for compatibility
+        parallel_config = {
+            'tensor_parallel_size': tp_size,
+            'pipeline_parallel_size': pp_size,
+            'context_parallel_size': cp_size,
+            'num_gpus': num_gpus,
+        }
+
+        logger.info(f"Parallelism: TP={tp_size}, PP={pp_size}, CP={cp_size}, GPUs={num_gpus}")
 
         # Build minimal args for parse_args
         minimal_args = self._build_minimal_args(
-            hf_model_path, model_config, tp_size, pp_size, megatron_checkpoint_path, max_batch_size,
+            hf_model_path, model_config, tp_size, pp_size, cp_size, megatron_checkpoint_path, max_batch_size,
             rlve_config=rlve_config
         )
 
@@ -115,6 +139,7 @@ class SlimeArgumentBuilder:
         model_config: Dict[str, Any],
         tp_size: int,
         pp_size: int,
+        cp_size: int,
         megatron_checkpoint_path: str,
         max_batch_size: int = 4096,
         rlve_config: Optional[Dict[str, Any]] = None
@@ -161,12 +186,7 @@ class SlimeArgumentBuilder:
             '--global-batch-size', str(global_batch_size),
             # RL algorithm
             '--advantage-estimator', os.environ.get('SLIME_ADVANTAGE_ESTIMATOR', 'grpo'),
-            # KL regularization - enabled by default to prevent policy collapse
-            # Uses sampling logprobs as reference (set in data_converter.py)
-            '--use-kl-loss',
-            '--kl-loss-coef', os.environ.get('SLIME_KL_LOSS_COEF', '0.02'),
-            # TIS (Truncated Importance Sampling) - clips importance ratios for stability
-            '--use-tis',
+            # Note: KL/TIS settings are added conditionally below based on RLVE mode
             # PPO clipping - asymmetric clip for importance ratios (matches Miles native)
             '--eps-clip', os.environ.get('SLIME_EPS_CLIP', '0.2'),
             '--eps-clip-high', os.environ.get('SLIME_EPS_CLIP_HIGH', '0.28'),
@@ -177,6 +197,7 @@ class SlimeArgumentBuilder:
             # Parallelism
             '--tensor-model-parallel-size', str(tp_size),
             '--pipeline-model-parallel-size', str(pp_size),
+            '--context-parallel-size', str(cp_size),
             # Checkpoint paths - these are needed during parse_args() so that
             # the fallback logic can set args.load = args.ref_load when no
             # checkpoint resume is specified (see miles/utils/arguments.py:1452-1460)
@@ -188,6 +209,18 @@ class SlimeArgumentBuilder:
             '--colocate',
             '--offload',  # Equivalent to --offload-train + --offload-rollout
         ]
+
+        # Add TIS/KL settings conditionally based on RLVE mode
+        if rlve_enabled:
+            # RLVE mode: Use TIS, no KL loss (matches GB200 script)
+            minimal_args.append('--use-tis')
+        else:
+            # Standard mode: Use KL loss for stability
+            minimal_args.extend([
+                '--use-kl-loss',
+                '--kl-loss-coef', os.environ.get('SLIME_KL_LOSS_COEF', '0.1'),
+                '--kl-loss-type', 'low_var_kl',
+            ])
 
         # Add untie-embeddings flag if needed
         if not model_config['tie_word_embeddings']:
@@ -213,7 +246,22 @@ class SlimeArgumentBuilder:
                 '--disable-rollout-global-dataset',  # RLVE uses procedural generation, not global dataset
                 '--rollout-max-response-len', str(rlve_config.get("rollout_max_response_len", 4096)),
                 '--rollout-temperature', str(rlve_config.get("rollout_temperature", 1.0)),
+                # GB200-specific args
+                '--num-rollout', str(rlve_config.get("num_rollout", 500)),
+                '--over-sampling-batch-size', str(rlve_config.get("over_sampling_batch_size", 384)),
             ])
+
+            # Add conditional boolean flags
+            if rlve_config.get("balance_data", True):
+                minimal_args.append('--balance-data')
+            if rlve_config.get("partial_rollout", True):
+                minimal_args.append('--partial-rollout')
+            if rlve_config.get("use_dynamic_sampling_filter", True):
+                minimal_args.extend([
+                    '--dynamic-sampling-filter-path',
+                    'miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std',
+                ])
+
             logger.info(f"RLVE enabled with {len(environment_list)} environments: {environment_list[:3]}...")
 
         return minimal_args
@@ -269,15 +317,27 @@ class SlimeArgumentBuilder:
         args.lora_alpha = lora_config.get("alpha", 0) if lora_config else 0
         args.lora_dropout = lora_config.get("dropout", 0.0) if lora_config else 0.0
 
-        # Parallelism settings
+        # Parallelism settings - use values from parallel_config (already auto-detected in build_args)
+        tp_size = parallel_config.get('tensor_parallel_size', 2)
+        pp_size = parallel_config.get('pipeline_parallel_size', 1)
+        cp_size = parallel_config.get('context_parallel_size', 1)
         num_gpus = parallel_config.get('num_gpus', 4)
+        dp_size = num_gpus // (tp_size * pp_size * cp_size)
+
+        args.tensor_model_parallel_size = tp_size
+        args.pipeline_model_parallel_size = pp_size
+        args.context_parallel_size = cp_size
         args.virtual_pipeline_model_parallel_size = None
-        args.context_parallel_size = 1
-        args.sequence_parallel = False
+        args.sequence_parallel = cp_size > 1  # Enable sequence parallel with CP>1
         args.use_distributed_optimizer = False
         args.num_gpus_per_node = num_gpus
         args.actor_num_gpus_per_node = num_gpus
         args.actor_num_nodes = 1
+
+        logger.info(
+            f"Parallelism config: TP={tp_size}, PP={pp_size}, "
+            f"CP={cp_size}, DP={dp_size} (RLVE={rlve_enabled})"
+        )
 
         # Optimizer settings
         args.optimizer = "adam"

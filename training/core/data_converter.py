@@ -304,6 +304,14 @@ class TinkerDataConverter:
                 loss_masks_list.append(loss_mask)
                 response_lengths_list.append(response_len)
 
+                # DEBUG: Print per-sample lengths to diagnose mismatch
+                print(f"[CONVERTER DEBUG] Sample {idx}: response_len={response_len}, "
+                      f"advantages_len={len(advantages_list[-1])}, "
+                      f"logprobs_len={len(log_probs_list[-1])}, "
+                      f"loss_mask_len={len(loss_mask)}, "
+                      f"token_len={len(tokens)}, "
+                      f"needs_causal_trim={needs_causal_trim}", flush=True)
+
             else:
                 # SFT mode: Extract target and weights
                 target = cls._get_field(loss_fn_inputs, "target_tokens")
@@ -351,6 +359,9 @@ class TinkerDataConverter:
             rollout_data["returns"] = returns_list
             # rollout_log_probs = sampling logprobs, needed for TIS (Truncated Importance Sampling)
             rollout_data["rollout_log_probs"] = [lp.clone() for lp in log_probs_list]
+            # Flag for CP handling: Tinker sends full-size tensors
+            # (logprobs, advantages computed client-side, not CP-split)
+            rollout_data["_with_tinker"] = True
         else:
             # SFT-like data detected (including DPO backward pass)
             # Override loss type to use sft_loss instead of policy_loss
@@ -362,6 +373,21 @@ class TinkerDataConverter:
         logger.info(f"rollout_data keys: {list(rollout_data.keys())}")
         if "_loss_type_override" in rollout_data:
             logger.info(f"_loss_type_override set to: {rollout_data['_loss_type_override']}")
+
+        # DEBUG: Print totals to diagnose mismatch
+        if is_rl:
+            total_response_len = sum(response_lengths_list)
+            total_advantages_len = sum(len(a) for a in advantages_list)
+            total_logprobs_len = sum(len(lp) for lp in log_probs_list)
+            total_tokens_len = sum(len(t) for t in tokens_list)
+            print(f"[CONVERTER DEBUG] TOTALS: num_samples={len(tokens_list)}, "
+                  f"response_lengths_sum={total_response_len}, "
+                  f"advantages_sum={total_advantages_len}, "
+                  f"logprobs_sum={total_logprobs_len}, "
+                  f"tokens_sum={total_tokens_len}", flush=True)
+            print(f"[CONVERTER DEBUG] response_lengths_list={response_lengths_list}", flush=True)
+            print(f"[CONVERTER DEBUG] advantages_lens={[len(a) for a in advantages_list]}", flush=True)
+
         return rollout_data
 
     @staticmethod
