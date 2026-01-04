@@ -305,12 +305,12 @@ class TinkerDataConverter:
                 response_lengths_list.append(response_len)
 
                 # DEBUG: Print per-sample lengths to diagnose mismatch
-                print(f"[CONVERTER DEBUG] Sample {idx}: response_len={response_len}, "
-                      f"advantages_len={len(advantages_list[-1])}, "
-                      f"logprobs_len={len(log_probs_list[-1])}, "
-                      f"loss_mask_len={len(loss_mask)}, "
-                      f"token_len={len(tokens)}, "
-                      f"needs_causal_trim={needs_causal_trim}", flush=True)
+                # print(f"[CONVERTER DEBUG] Sample {idx}: response_len={response_len}, "
+                #       f"advantages_len={len(advantages_list[-1])}, "
+                #       f"logprobs_len={len(log_probs_list[-1])}, "
+                #       f"loss_mask_len={len(loss_mask)}, "
+                #       f"token_len={len(tokens)}, "
+                #       f"needs_causal_trim={needs_causal_trim}", flush=True)
 
             else:
                 # SFT mode: Extract target and weights
@@ -380,13 +380,13 @@ class TinkerDataConverter:
             total_advantages_len = sum(len(a) for a in advantages_list)
             total_logprobs_len = sum(len(lp) for lp in log_probs_list)
             total_tokens_len = sum(len(t) for t in tokens_list)
-            print(f"[CONVERTER DEBUG] TOTALS: num_samples={len(tokens_list)}, "
-                  f"response_lengths_sum={total_response_len}, "
-                  f"advantages_sum={total_advantages_len}, "
-                  f"logprobs_sum={total_logprobs_len}, "
-                  f"tokens_sum={total_tokens_len}", flush=True)
-            print(f"[CONVERTER DEBUG] response_lengths_list={response_lengths_list}", flush=True)
-            print(f"[CONVERTER DEBUG] advantages_lens={[len(a) for a in advantages_list]}", flush=True)
+            # print(f"[CONVERTER DEBUG] TOTALS: num_samples={len(tokens_list)}, "
+            #       f"response_lengths_sum={total_response_len}, "
+            #       f"advantages_sum={total_advantages_len}, "
+            #       f"logprobs_sum={total_logprobs_len}, "
+            #       f"tokens_sum={total_tokens_len}", flush=True)
+            # print(f"[CONVERTER DEBUG] response_lengths_list={response_lengths_list}", flush=True)
+            # print(f"[CONVERTER DEBUG] advantages_lens={[len(a) for a in advantages_list]}", flush=True)
 
         return rollout_data
 

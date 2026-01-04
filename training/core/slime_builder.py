@@ -210,10 +210,14 @@ class SlimeArgumentBuilder:
             '--offload',  # Equivalent to --offload-train + --offload-rollout
         ]
 
+        # Add kv-channels if model has explicit head_dim (e.g., Qwen3)
+        if model_config.get('kv_channels'):
+            minimal_args.extend(['--kv-channels', str(model_config['kv_channels'])])
+
         # Add TIS/KL settings conditionally based on RLVE mode
         if rlve_enabled:
-            # RLVE mode: Use TIS, no KL loss (matches GB200 script)
-            minimal_args.append('--use-tis')
+            # RLVE mode: TIS disabled for testing (was: minimal_args.append('--use-tis'))
+            pass
         else:
             # Standard mode: Use KL loss for stability
             minimal_args.extend([

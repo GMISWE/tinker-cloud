@@ -41,6 +41,7 @@ def load_model_config(base_model: str) -> Dict[str, Any]:
             'num_query_groups': getattr(
                 config, 'num_key_value_heads', config.num_attention_heads
             ),
+            'kv_channels': getattr(config, 'head_dim', None),  # Qwen3 explicit head_dim
             'vocab_size': config.vocab_size,
             'norm_epsilon': getattr(
                 config, 'rms_norm_eps',

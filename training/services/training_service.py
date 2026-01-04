@@ -132,21 +132,21 @@ class TrainingService:
             ValueError: If validation fails
             Exception: If training fails
         """
-        print(f"[DEBUG] Forward-backward pass for {model_id}", flush=True)
+        # print(f"[DEBUG] Forward-backward pass for {model_id}", flush=True)
         logger.info(f"Forward-backward pass for {model_id}")
 
         # Offload SGLang before training to free GPU memory (only if offload_rollout enabled)
         rollout_manager = client_info.get("rollout_manager") if client_info else None
         offload_rollout = args.offload_rollout if args else True
-        print(f"[DEBUG] rollout_manager = {rollout_manager}, offload_rollout = {offload_rollout}", flush=True)
+        # print(f"[DEBUG] rollout_manager = {rollout_manager}, offload_rollout = {offload_rollout}", flush=True)
         if rollout_manager is not None and offload_rollout:
-            print(f"[DEBUG] Offloading SGLang for {model_id} before training...", flush=True)
+            # print(f"[DEBUG] Offloading SGLang for {model_id} before training...", flush=True)
             logger.info(f"Offloading SGLang for {model_id} before training")
             await asyncio.to_thread(lambda: ray.get(rollout_manager.offload.remote()))
-            print(f"[DEBUG] SGLang offloaded for {model_id}", flush=True)
+            # print(f"[DEBUG] SGLang offloaded for {model_id}", flush=True)
             logger.info(f"SGLang offloaded for {model_id}")
         elif rollout_manager is None:
-            print(f"[DEBUG] No rollout_manager found for {model_id}, skipping SGLang offload", flush=True)
+            # print(f"[DEBUG] No rollout_manager found for {model_id}, skipping SGLang offload", flush=True)
             logger.warning(f"No rollout_manager found for {model_id}, skipping SGLang offload")
 
         # Determine training mode (RL vs SFT)
