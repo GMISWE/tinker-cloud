@@ -1,5 +1,5 @@
 #!/bin/bash
-# OpenTinker-Miles All-in-One Entrypoint
+# TinkerCloud All-in-One Entrypoint
 #
 # This script:
 # 1. Creates required data directories
@@ -16,7 +16,7 @@
 set -e
 
 echo "========================================"
-echo "OpenTinker-Miles Starting..."
+echo "TinkerCloud Starting..."
 echo "========================================"
 
 # Create data directories (mounted from host or emptyDir)

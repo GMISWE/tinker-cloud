@@ -154,7 +154,7 @@ print("\n" + "=" * 80)
 print("✓ CLEANUP COMPLETE")
 print("=" * 80)
 print("\nTo check Ray actors inside container:")
-print("  docker exec opentinker-miles-test ray list actors --filter state=ALIVE")
+print("  docker exec tinkercloud-test ray list actors --filter state=ALIVE")
 print("=" * 80)
 
 sys.exit(0)

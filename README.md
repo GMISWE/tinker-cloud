@@ -1,4 +1,4 @@
-# OpenTinker Miles Training API
+# TinkerCloud Training API
 
 Exposes the Tinker training surface while delegating RL training jobs to Miles/Slime Ray actors.
 
