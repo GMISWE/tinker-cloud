@@ -106,62 +106,7 @@ docker run -p 8000:8000 \
 
 ## Sessions
 
-Sessions provide a way to manage multiple models within a single training workflow (e.g., DPO with separate policy and reference models).
-
-### Creating a Session
-
-```python
-import requests
-
-# Create a new session
-resp = requests.post(
-    "http://localhost:8000/api/v1/session",
-    headers={"X-API-Key": "slime-dev-key"},
-    json={"session_id": "my-dpo-session"}  # optional, auto-generated if omitted
-)
-session = resp.json()
-print(session["session_id"])
-```
-
-### Loading Models into a Session
-
-```python
-# Load policy model
-requests.post(
-    "http://localhost:8000/api/v1/session/my-dpo-session/models",
-    headers={"X-API-Key": "slime-dev-key"},
-    json={
-        "model_name": "/data/models/Qwen2.5-0.5B-Instruct",
-        "role": "policy"  # optional metadata
-    }
-)
-
-# Load reference model (same weights, different instance)
-requests.post(
-    "http://localhost:8000/api/v1/session/my-dpo-session/models",
-    headers={"X-API-Key": "slime-dev-key"},
-    json={
-        "model_name": "/data/models/Qwen2.5-0.5B-Instruct",
-        "role": "reference"
-    }
-)
-```
-
-### Session Lifecycle
-
-```python
-# List models in session
-resp = requests.get(
-    "http://localhost:8000/api/v1/session/my-dpo-session",
-    headers={"X-API-Key": "slime-dev-key"}
-)
-
-# Delete session (unloads all models)
-requests.delete(
-    "http://localhost:8000/api/v1/session/my-dpo-session",
-    headers={"X-API-Key": "slime-dev-key"}
-)
-```
+See [docs/sessions.md](docs/sessions.md) for detailed documentation on session management.
 
 ## API Surface
 
@@ -178,11 +123,7 @@ requests.delete(
 - `POST /api/v1/save_weights` / `save_weights_for_sampler` – Persist checkpoints
 
 ### Sessions
-- `POST /api/v1/session` – Create a new session
-- `GET /api/v1/session/{session_id}` – Get session details and models
-- `DELETE /api/v1/session/{session_id}` – Delete session and unload models
-- `POST /api/v1/session/{session_id}/models` – Load a model into session
-- `DELETE /api/v1/session/{session_id}/models/{model_id}` – Unload model from session
+- See [docs/sessions.md](docs/sessions.md) for session endpoints
 
 ### Health
 - `GET /api/v1/health` – Lightweight readiness probe
