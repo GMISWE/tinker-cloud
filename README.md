@@ -110,23 +110,17 @@ See [docs/sessions.md](docs/sessions.md) for detailed documentation on session m
 
 ## API Surface
 
-### Training
-- `POST /api/v1/forward_backward` – Execute forward/backward pass (DPO/SFT/RL)
-- `POST /api/v1/forward` – Forward-only reference run (logprobs)
-- `POST /api/v1/optim_step` – Apply optimizer step once gradients are accumulated
-- `POST /api/v1/retrieve_future` – Poll background tasks
-
-### Sampling
-- `POST /api/v1/sample` – Generate sequences with the latest weights
-
-### Checkpoints
-- `POST /api/v1/save_weights` / `save_weights_for_sampler` – Persist checkpoints
-
-### Sessions
-- See [docs/sessions.md](docs/sessions.md) for session endpoints
-
-### Health
-- `GET /api/v1/health` – Lightweight readiness probe
+| Category | Endpoint | Description |
+|----------|----------|-------------|
+| Training | `POST /api/v1/forward_backward` | Execute forward/backward pass (DPO/SFT/RL) |
+| Training | `POST /api/v1/forward` | Forward-only reference run (logprobs) |
+| Training | `POST /api/v1/optim_step` | Apply optimizer step once gradients are accumulated |
+| Training | `POST /api/v1/retrieve_future` | Poll background tasks |
+| Sampling | `POST /api/v1/sample` | Generate sequences with the latest weights |
+| Checkpoints | `POST /api/v1/save_weights` | Persist checkpoint to disk |
+| Checkpoints | `POST /api/v1/save_weights_for_sampler` | Save weights and get sampling client |
+| Sessions | See [docs/sessions.md](docs/sessions.md) | Session management endpoints |
+| Health | `GET /api/v1/health` | Lightweight readiness probe |
 
 See `training/routers` for the full list of endpoints.
 
