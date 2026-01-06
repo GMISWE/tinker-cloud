@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build and push OpenTinker-Miles all-in-one image
+# Build and push TinkerCloud all-in-one image
 #
 # Usage:
 #   ./docker/build.sh          # Build only
@@ -16,7 +16,7 @@ IMAGE_NAME="tinkercloud"
 TAG="${TAG:-latest}"
 FULL_IMAGE="${REGISTRY}/${IMAGE_NAME}:${TAG}"
 
-echo "=== Building OpenTinker-Miles Image ==="
+echo "=== Building TinkerCloud Image ==="
 echo "  Project: ${PROJECT_DIR}"
 echo "  Image: ${FULL_IMAGE}"
 echo ""

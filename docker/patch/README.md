@@ -23,7 +23,7 @@ To generate a patch for specific files only:
 
 ```bash
 cd /path/to/tinker_gmi
-git diff <base_commit>..<target_commit> -- src/tinker/lib/public_interfaces/service_client.py > ../opentinker-miles/docker/patch/latest/tinker_gmi.patch
+git diff <base_commit>..<target_commit> -- src/tinker/lib/public_interfaces/service_client.py > ../tinkercloud/docker/patch/latest/tinker_gmi.patch
 ```
 
 ## Applying Patches
