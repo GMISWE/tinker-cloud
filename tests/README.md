@@ -1,14 +1,14 @@
-# opentinker-miles Tests
+# tinkercloud Tests
 
-Integration tests for opentinker-miles server running in Docker.
+Integration tests for tinkercloud server running in Docker.
 
 ## Prerequisites
 
-1. **opentinker-miles server running:**
+1. **tinkercloud server running:**
    ```bash
-   cd /root/gavin/opentinker-miles
+   cd /root/gavin/tinkercloud
    ALLOW_PARTIAL_BATCHES=true \
-   PYTHONPATH=/root/gavin/opentinker-miles:/root/Megatron-LM:/root/miles:$PYTHONPATH \
+   PYTHONPATH=/root/gavin/tinkercloud:/root/Megatron-LM:/root/miles:$PYTHONPATH \
    python -m uvicorn training.api:app --host 0.0.0.0 --port 8000
    ```
 
@@ -62,6 +62,43 @@ python tests/test_dpo.py --test reduced
 python tests/test_dpo.py --test all
 ```
 
+### RLVE Tests
+
+**Shell script (quick, Tinker-only):**
+```bash
+# Run 1 batch (default)
+./tests/test_rlve_reduced.sh
+
+# Run specific number of batches
+./tests/test_rlve_reduced.sh 3
+```
+
+**Python (pytest compatible):**
+```bash
+# Run all RLVE tests
+PYTHONPATH=/root/gavin/miles:/root/gavin/tinker-cookbook pytest tests/test_rlve.py -v
+
+# Run specific test
+pytest tests/test_rlve.py::test_rlve_reduced -v
+
+# Run directly
+python tests/test_rlve.py --test reduced
+python tests/test_rlve.py --test all
+```
+
+**Full comparison (both paths, ~15 min):**
+```bash
+# Runs Tinker RLVE, then Native Miles RLVE, compares advantages
+./tests/test_rlve_both_paths.sh
+```
+
+**Note:** For DEBUG_ADVANTAGES to work, start server with:
+```bash
+DEBUG_ADVANTAGES=1 ALLOW_PARTIAL_BATCHES=true \
+PYTHONPATH=/root/gavin/tinkercloud:/root/Megatron-LM:/root/miles:$PYTHONPATH \
+python -m uvicorn training.api:app --host 0.0.0.0 --port 8000
+```
+
 ### Other Tests
 
 ```bash
@@ -73,13 +110,16 @@ pytest tests/test_model_creation.py -v
 
 # Full HTTP API test
 pytest tests/test_gmi_http.py -v
+
+# RLVE advantage alignment unit test (mock rewards)
+PYTHONPATH=/root/gavin/miles:/root/gavin/tinker-cookbook pytest tests/test_advantage_alignment.py -v
 ```
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TINKER_BASE_URL` | `http://localhost:8000` | opentinker-miles server URL |
+| `TINKER_BASE_URL` | `http://localhost:8000` | tinkercloud server URL |
 | `TINKER_API_KEY` | `slime-dev-key` | API key for authentication |
 | `TEST_MODEL_PATH` | `/data/models/Qwen2.5-0.5B-Instruct` | Path to HF model |
 
@@ -93,5 +133,9 @@ pytest tests/test_gmi_http.py -v
 | `test_health.py` | Server health check tests |
 | `test_model_creation.py` | Model loading tests |
 | `test_gmi_http.py` | Full HTTP API tests |
-| `test_advantage_computation.py` | Advantage calculation unit tests |
+| `test_advantage_computation.py` | Advantage calculation unit tests (group centering) |
+| `test_advantage_alignment.py` | RLVE advantage path alignment unit test (mock rewards) |
+| `test_rlve.py` | RLVE training integration tests (Tinker path) |
+| `test_rlve_reduced.sh` | Shell script for quick RLVE test (Tinker-only) |
+| `test_rlve_both_paths.sh` | Full RLVE comparison (Tinker + Native Miles) |
 | `test_kgateway_training.py` | Training flow tests |

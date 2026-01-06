@@ -32,8 +32,8 @@ Tinker Client ─▶ FastAPI (training/api.py) ─▶ Ray TrainGroup ─▶ Mile
 ## Quickstart
 
 ```bash
-git clone <repo>/opentinker-miles
-cd opentinker-miles
+git clone <repo>/tinkercloud
+cd tinkercloud
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt

@@ -5,7 +5,7 @@
 # Usage: ./test_dpo_reduced.sh [num_steps]
 #
 # Prerequisites:
-#   - opentinker-miles server running on localhost:8000
+#   - tinkercloud server running on localhost:8000
 #   - Model available at /data/models/Qwen2.5-0.5B-Instruct
 #   - tinker-cookbook installed
 
@@ -32,15 +32,15 @@ fi
 
 # Check server is running
 if ! curl -s http://localhost:8000/health -H "X-API-Key: slime-dev-key" | grep -q "healthy"; then
-    echo "ERROR: opentinker-miles server not running on localhost:8000"
-    echo "Start with: cd /root/gavin/opentinker-miles && python -m uvicorn training.api:app --host 0.0.0.0 --port 8000"
+    echo "ERROR: tinkercloud server not running on localhost:8000"
+    echo "Start with: cd /root/gavin/tinkercloud && python -m uvicorn training.api:app --host 0.0.0.0 --port 8000"
     exit 1
 fi
 
 # Run cleanup first
 echo "Running cleanup..."
 TINKER_BASE_URL=http://localhost:8000 TINKER_API_KEY=slime-dev-key \
-    python /root/gavin/opentinker-miles/tests/cleanup_test_env.py 2>/dev/null || true
+    python /root/gavin/tinkercloud/tests/cleanup_test_env.py 2>/dev/null || true
 
 # Run DPO training
 echo "Starting DPO training..."

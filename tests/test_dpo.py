@@ -1,14 +1,14 @@
 """
 DPO (Direct Preference Optimization) integration tests.
 
-These tests verify that the opentinker-miles server correctly handles
+These tests verify that the tinkercloud server correctly handles
 DPO training workflows, including:
 - Forward pass for reference model logprobs
 - Forward-backward pass for policy model
 - Optimizer step
 
 Prerequisites:
-    - opentinker-miles server running on localhost:8000
+    - tinkercloud server running on localhost:8000
     - Model available at /data/models/Qwen2.5-0.5B-Instruct
     - tinker-cookbook installed
 
@@ -58,7 +58,7 @@ def check_prerequisites():
             raise RuntimeError("Server not healthy")
     except Exception as e:
         raise RuntimeError(
-            f"opentinker-miles server not running on {base_url}: {e}"
+            f"tinkercloud server not running on {base_url}: {e}"
         )
 
 
