@@ -49,6 +49,7 @@ def load_model_config(base_model: str) -> Dict[str, Any]:
             ),
             'rotary_base': getattr(config, 'rope_theta', 10000),
             'tie_word_embeddings': getattr(config, 'tie_word_embeddings', False),
+            'max_position_embeddings': getattr(config, 'max_position_embeddings', 2048),
         }
     except Exception as e:
         logger.error(f"Failed to load model config from {hf_model_path}: {e}")

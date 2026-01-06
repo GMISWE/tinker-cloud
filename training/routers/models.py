@@ -158,6 +158,7 @@ async def create_model(
             checkpoint_path=request.checkpoint_path,
             parallelism_config=request.parallelism_config.dict() if request.parallelism_config else None,
             max_batch_size=request.max_batch_size,
+            max_seq_len=request.max_seq_len,
             slime_builder=slime_builder,
             metadata_storage=metadata_storage,
             training_clients=training_clients,
