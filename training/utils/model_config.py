@@ -206,8 +206,13 @@ def auto_detect_all_parallelism(
     num_params = estimate_model_params(model_config, model_name)
     logger.info(f"Auto-detecting parallelism for {num_params:.2f}B params, {num_gpus} GPUs, max_seq_len={max_seq_len}")
 
+    # Check for environment override (for debugging/testing)
+    env_tp = os.environ.get('SLIME_DEFAULT_TP')
+    if env_tp:
+        tp = int(env_tp)
+        logger.info(f"Using SLIME_DEFAULT_TP override: TP={tp}")
     # TP: based on model size
-    if num_params < 2.0:  # <2B params
+    elif num_params < 2.0:  # <2B params
         tp = 1
     elif num_params < 10.0:  # 2-10B params
         tp = min(2, num_gpus)
@@ -223,7 +228,11 @@ def auto_detect_all_parallelism(
         pp = 1
 
     # CP: based on sequence length requirements
-    if max_seq_len > 2048:
+    env_cp = os.environ.get('SLIME_DEFAULT_CP')
+    if env_cp:
+        cp = int(env_cp)
+        logger.info(f"Using SLIME_DEFAULT_CP override: CP={cp}")
+    elif max_seq_len > 2048:
         cp = 2  # Long sequences benefit from context parallel
     else:
         cp = 1  # Short sequences don't need CP
