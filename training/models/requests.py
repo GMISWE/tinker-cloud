@@ -108,6 +108,7 @@ class CreateModelRequest(BaseModel):
     checkpoint_path: Optional[str] = Field(default=None, description="Checkpoint to resume from")
     parallelism_config: Optional[ParallelismConfig] = Field(default=None, description="Parallelism settings")
     max_batch_size: int = Field(default=4096, description="Max batch size for forward_backward (avoids gradient accumulation)")
+    max_seq_len: int = Field(default=2048, description="Max sequence length for parallelism decisions (CP auto-detection)")
 
     # RLVE (Reinforcement Learning with Verifiable Environments) configuration
     rlve_config: Optional[RLVEConfig] = Field(default=None, description="RLVE training configuration")

@@ -36,6 +36,7 @@ class ModelService:
         checkpoint_path: Optional[str],
         parallelism_config: Optional[Dict[str, Any]],
         max_batch_size: int,
+        max_seq_len: int,
         slime_builder: SlimeArgumentBuilder,
         metadata_storage: MetadataStorage,
         training_clients: Dict[str, Dict[str, Any]],
@@ -83,6 +84,7 @@ class ModelService:
             checkpoint_path=checkpoint_path,
             parallelism_config=parallelism_config,
             max_batch_size=max_batch_size,
+            max_seq_len=max_seq_len,
             rlve_config=rlve_config,
             wandb_config=wandb_config
         )

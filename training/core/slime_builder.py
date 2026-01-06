@@ -48,6 +48,7 @@ class SlimeArgumentBuilder:
         checkpoint_path: Optional[str] = None,
         parallelism_config: Optional[Dict] = None,
         max_batch_size: int = 4096,
+        max_seq_len: int = 2048,
         rlve_config: Optional[Dict[str, Any]] = None,
         wandb_config: Optional[Dict[str, Any]] = None
     ) -> Tuple[Namespace, str]:
@@ -82,9 +83,9 @@ class SlimeArgumentBuilder:
             num_gpus = parallelism_config.get("num_gpus", num_gpus)
 
         # Get max sequence length for CP decision
-        max_seq_len = 2048
-        if rlve_config:
-            max_seq_len = rlve_config.get('rollout_max_response_len', 4096)
+        # Use parameter value (from tinker-cookbook), but allow rlve_config to override for RLVE mode
+        if rlve_config and rlve_config.get('rollout_max_response_len'):
+            max_seq_len = rlve_config.get('rollout_max_response_len')
 
         # Auto-detect all parallelism dimensions
         parallel = auto_detect_all_parallelism(
