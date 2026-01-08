@@ -277,7 +277,8 @@ class TrainingService:
         self,
         model_id: str,
         train_group: Any,
-        client_info: Dict[str, Any]
+        client_info: Dict[str, Any],
+        adam_params: Optional[Any] = None
     ) -> Dict[str, Any]:
         """
         Apply optimizer step to update model weights.
@@ -286,6 +287,7 @@ class TrainingService:
             model_id: Model identifier (for logging)
             train_group: Slime RayTrainGroup instance
             client_info: Client metadata (contains optimizer, rollout_manager)
+            adam_params: Optional Adam optimizer parameters from client (for dynamic LR)
 
         Returns:
             Dict with success status, grad_norm, and learning_rates
@@ -293,7 +295,12 @@ class TrainingService:
         Raises:
             Exception: If optimizer step fails
         """
-        logger.info(f"Optimizer step for {model_id}")
+        # Extract learning rate from adam_params if provided
+        learning_rate = adam_params.learning_rate if adam_params else None
+        if learning_rate is not None:
+            logger.info(f"Optimizer step for {model_id} with lr={learning_rate}")
+        else:
+            logger.info(f"Optimizer step for {model_id}")
 
         args = client_info.get("args")
         offload_train = args.offload_train if args else True
@@ -303,11 +310,17 @@ class TrainingService:
         if not offload_train and not offload_rollout:
             # Simple path: no offload, use combined method
             logger.info(f"Applying optimizer step and syncing weights for {model_id}")
-            results = await asyncio.to_thread(train_group.apply_optimizer_step_and_sync)
+            results = await asyncio.to_thread(
+                train_group.apply_optimizer_step_and_sync,
+                learning_rate=learning_rate
+            )
             logger.info(f"Weights synced to SGLang for {model_id}")
         else:
             # Offload path: need interleaved offload/onload calls
-            results = await asyncio.to_thread(train_group.apply_optimizer_step)
+            results = await asyncio.to_thread(
+                train_group.apply_optimizer_step,
+                learning_rate=learning_rate
+            )
 
             if rollout_manager is not None:
                 from sglang.srt.constants import GPU_MEMORY_TYPE_KV_CACHE, GPU_MEMORY_TYPE_WEIGHTS

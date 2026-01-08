@@ -93,6 +93,20 @@ class WandbConfig(BaseModel):
     api_key: Optional[str] = Field(default=None, description="Wandb API key (if not in env)")
 
 
+class AdamParams(BaseModel):
+    """Adam optimizer parameters (matches tinker_gmi.types.AdamParams).
+
+    These parameters are passed at optim_step() time to allow dynamic LR schedules.
+    """
+
+    learning_rate: float = Field(default=1e-4, description="Learning rate")
+    beta1: float = Field(default=0.9, description="Adam beta1")
+    beta2: float = Field(default=0.95, description="Adam beta2")
+    eps: float = Field(default=1e-12, description="Adam epsilon")
+    weight_decay: float = Field(default=0.0, description="Weight decay")
+    grad_clip_norm: float = Field(default=0.0, description="Gradient clip norm (0 = no clip)")
+
+
 class CreateModelRequest(BaseModel):
     """Request to create a new training client."""
 
@@ -443,6 +457,7 @@ class OptimStepRequest(BaseModel):
     """Request to perform optimizer step (new format)."""
     model_id: str = Field(..., description="Model ID")
     step_num: Optional[int] = Field(default=None, ge=0, description="Step number for logging")
+    adam_params: Optional[AdamParams] = Field(default=None, description="Adam optimizer parameters (for dynamic LR)")
 
 
 class ASampleRequest(BaseModel):

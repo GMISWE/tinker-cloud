@@ -295,9 +295,9 @@ class SlimeArgumentBuilder:
             lora_alpha = lora_rank
         lora_dropout = lora_config.get("dropout", 0.0)
 
-        # Use local transformer implementation for LoRA
-        # (TE layers not supported by current LoRA injector)
-        minimal_args.extend(['--transformer-impl', 'local'])
+        # Note: LoRA now supports both Megatron and Transformer Engine layers,
+        # so we don't need to switch to --transformer-impl local anymore.
+        # This preserves TE optimizations (FP8, fused kernels).
 
         minimal_args.extend([
             '--lora-rank', str(lora_rank),
@@ -385,7 +385,7 @@ class SlimeArgumentBuilder:
         args.pipeline_model_parallel_size = pp_size
         args.context_parallel_size = cp_size
         args.virtual_pipeline_model_parallel_size = None
-        args.sequence_parallel = cp_size > 1  # Enable sequence parallel with CP>1
+        args.sequence_parallel = cp_size > 1 and tp_size > 1  # SP requires both CP>1 and TP>1
         args.use_distributed_optimizer = False
         args.num_gpus_per_node = num_gpus
         args.actor_num_gpus_per_node = num_gpus
@@ -438,7 +438,9 @@ class SlimeArgumentBuilder:
         args.rollout_num_gpus_per_engine = 1
         args.sglang_router_ip = None
         args.sglang_router_port = None
-        args.rollout_temperature = 0.7
+        # SFT mode needs temperature=1.0 for proper cross-entropy loss computation
+        # RL mode can use temperature<1.0 for sampling exploration
+        args.rollout_temperature = 1.0 if debug_train_only else 0.7
         args.rollout_top_p = 0.9
         args.rollout_top_k = 50
         args.rollout_max_response_len = 256

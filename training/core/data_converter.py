@@ -451,7 +451,7 @@ class TinkerDataConverter:
 
     @staticmethod
     def rollout_to_forward_result(
-        results: List[Dict[str, Any]],
+        results,  # Can be Dict (new aggregated format) or List[Dict] (legacy per-actor format)
         loss_fn: str = "cross_entropy",
         rollout_data: Optional[Dict[str, Any]] = None,
         original_data: Optional[List[Any]] = None
@@ -460,7 +460,7 @@ class TinkerDataConverter:
         Convert Slime forward_only results to Tinker forward result format.
 
         Args:
-            results: List of results from Slime (per-GPU results)
+            results: Aggregated result dict from Miles (or legacy list of per-GPU results)
             loss_fn: Loss function type
 
         Returns:
@@ -473,19 +473,23 @@ class TinkerDataConverter:
         if not response_lengths_list and rollout_data and rollout_data.get("response_lengths"):
             response_lengths_list = [int(length) for length in rollout_data.get("response_lengths", [])]
 
-        # Miles returns one result per (data-parallel, pipeline) shard.
-        # Only the pipeline-last shard at TP-rank-0 includes log_probs.
-        # Find the FIRST result with log_probs to avoid DP duplication.
-        result_with_logprobs = None
-        for result in results:
-            loss_dict = result.get("loss") or {}
-            if isinstance(loss_dict, dict) and loss_dict.get("log_probs"):
-                result_with_logprobs = result
-                break
+        # Handle both new aggregated format (dict) and legacy per-actor format (list)
+        if isinstance(results, dict):
+            # New format: Miles returns single aggregated result with logprobs in original order
+            result_with_logprobs = results
+        else:
+            # Legacy format: List of per-actor results (for backwards compatibility)
+            # Find the result with logprobs
+            result_with_logprobs = None
+            for result in results:
+                loss_dict = result.get("loss") or {}
+                if isinstance(loss_dict, dict) and loss_dict.get("log_probs"):
+                    result_with_logprobs = result
+                    break
 
-        if result_with_logprobs is None:
-            # Fallback: try legacy format or first result
-            result_with_logprobs = results[0] if results else {}
+            if result_with_logprobs is None:
+                # Fallback: try legacy format or first result
+                result_with_logprobs = results[0] if results else {}
 
         # Process only the single result with logprobs (avoid DP duplication)
         results_to_process = [result_with_logprobs]
