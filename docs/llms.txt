@@ -1,0 +1,381 @@
+# Tinkercloud Documentation (LLM-Friendly)
+
+Tinkercloud is a FastAPI middleware that bridges the Tinker API with Miles (https://github.com/radixark/miles) for distributed GPU training. Miles orchestrates Megatron-LM for training and SGLang for inference.
+
+## Architecture
+
+```
+tinker-cookbook/tinker_gmi (Client)
+    │ HTTP POST /api/v1/* (X-API-Key header)
+    ▼
+tinkercloud (Middleware, :8000)
+    │ Ray Remote Calls
+    ▼
+Miles (Backend) - orchestrates Megatron-LM + SGLang
+├── RayTrainGroup - Distributed training (TP/PP/CP/DP)
+├── RolloutManager - SGLang inference engines
+└── Uses Megatron-LM internally for distributed training
+```
+
+## Quick Start
+
+```python
+import tinker
+
+client = tinker.ServiceClient(base_url="http://localhost:8000", api_key="slime-dev-key")
+
+# Create training client (allocates GPUs)
+training_client = await client.create_lora_training_client_async(
+    model_name="Qwen/Qwen2.5-7B-Instruct",
+    rank=32
+)
+tokenizer = training_client.get_tokenizer()
+
+# Forward-backward (compute gradients)
+datum = tinker.Datum(
+    model_input=tinker.ModelInput.from_ints(tokens),
+    loss_fn_inputs={
+        "target_tokens": tinker.TensorData.from_numpy(np.array(target_tokens, dtype=np.int64)),
+        "weights": tinker.TensorData.from_numpy(np.ones(len(target_tokens), dtype=np.float32))
+    }
+)
+fwd_bwd = await training_client.forward_backward_async([datum], "cross_entropy")
+result = await fwd_bwd.result_async()
+
+# Optimizer step (update weights)
+await (await training_client.optim_step_async(tinker.AdamParams(learning_rate=1e-6))).result_async()
+
+# Sampling
+sampling_client = await training_client.save_weights_and_get_sampling_client_async()
+response = await sampling_client.sample_async(
+    prompt=tinker.ModelInput.from_ints(prompt_tokens),
+    num_samples=1,
+    sampling_params=tinker.SamplingParams(max_tokens=100, temperature=0.7)
+)
+```
+
+## API Reference
+
+All endpoints require `X-API-Key: slime-dev-key` header.
+
+### Health
+- `GET /health` → `{"status": "healthy"}`
+- `GET /api/v1/health` → `{"status", "version", "ray_status", "active_models", "active_sessions"}`
+- `GET /api/v1/get_server_capabilities` → `{"supported_models", "max_batch_size", "features"}`
+
+### Model Lifecycle
+- `POST /api/v1/create_model` → Creates training session with model initialization
+- `POST /api/v1/delete_model` → Deletes model and frees GPU resources
+- `POST /api/v1/get_info` → Returns model metadata
+- `GET /api/v1/get_tokenizer?model_id=...` → Returns tokenizer JSON
+
+### Training Operations
+- `POST /api/v1/forward` → Logprobs only (no gradients)
+- `POST /api/v1/forward_backward` → Compute gradients
+- `POST /api/v1/optim_step` → Apply gradients with Adam
+
+### Sampling Operations
+- `POST /api/v1/asample` → Async text generation
+- `POST /api/v1/sample` → Sync text generation
+- `POST /api/v1/create_sampling_client` → Create sampling session
+
+### Checkpoint Operations
+- `POST /api/v1/save_weights` → Save full checkpoint
+- `POST /api/v1/save_weights_for_sampler` → Save and sync to SGLang
+- `POST /api/v1/weights_info` → Get checkpoint metadata
+
+### Session Management
+- `POST /api/v1/create_session` → Create client session
+- `POST /api/v1/session_heartbeat` → Keep session alive
+- `GET /api/v1/sessions` → List all sessions
+- `GET /api/v1/sessions/{session_id}` → Get session details
+
+### Async Operations
+- `POST /api/v1/retrieve_future/{request_id}` → Poll for async result
+- `POST /api/v1/cleanup_futures` → Clean up old futures
+
+## Data Types
+
+### ModelInput
+```json
+{"chunks": [{"tokens": [1, 2, 3, 4, 5]}]}
+// OR
+{"tokens": [1, 2, 3, 4, 5]}
+// OR
+{"input_ids": [1, 2, 3, 4, 5]}
+```
+
+### TensorData
+```json
+{"data": [0.5, -0.3, 0.8], "shape": [3], "dtype": "float32"}
+```
+Supported dtypes: `float32`, `float64`, `int32`, `int64`, `bool`
+
+### Datum (Training Sample)
+```json
+{
+  "model_input": {"chunks": [{"tokens": [1, 2, 3, 4, 5]}]},
+  "loss_fn_inputs": {
+    "target_tokens": {"data": [3, 4, 5], "dtype": "int64"},
+    "weights": {"data": [1.0, 1.0, 1.0], "dtype": "float32"}
+  }
+}
+```
+
+### LoraConfig
+```json
+{"rank": 32, "train_mlp": true, "train_attn": true, "train_unembed": true}
+```
+
+### AdamParams
+```json
+{"learning_rate": 1e-6, "beta1": 0.9, "beta2": 0.95, "eps": 1e-8, "weight_decay": 0.01}
+```
+
+### SamplingParams
+```json
+{"max_tokens": 100, "temperature": 0.7, "top_p": 0.9, "stop": ["<|endoftext|>"]}
+```
+
+### RLVEConfig (Server-side RLVE)
+```json
+{
+  "enabled": true,
+  "environment_list": ["Division", "Multiplication", "GCDOne_Counting"],
+  "n_samples_per_prompt": 8,
+  "rollout_max_response_len": 4096
+}
+```
+
+## Loss Functions
+
+| Loss Function | Required Inputs | Use Case |
+|---------------|-----------------|----------|
+| `cross_entropy` | `target_tokens`, `weights` | Supervised learning |
+| `importance_sampling` | `target_tokens`, `logprobs`, `advantages` | RL (on-policy) |
+| `ppo` | `target_tokens`, `logprobs`, `advantages` | RL (clipped) |
+
+### Cross-Entropy Inputs
+```json
+{
+  "target_tokens": {"data": [3, 4, 5], "dtype": "int64"},
+  "weights": {"data": [1.0, 1.0, 1.0], "dtype": "float32"}
+}
+```
+
+### RL (importance_sampling/ppo) Inputs
+```json
+{
+  "target_tokens": {"data": [5, 6, 7, 8], "dtype": "int64"},
+  "logprobs": {"data": [-2.1, -1.8, -3.2, -2.5], "dtype": "float32"},
+  "advantages": {"data": [0.5, -0.3, 0.8, 0.2], "dtype": "float32"}
+}
+```
+
+## Request Examples
+
+### Create Model
+```bash
+curl -X POST http://localhost:8000/api/v1/create_model \
+  -H "X-API-Key: slime-dev-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "session_id": "abc-123",
+    "model_seq_id": 0,
+    "model_name": "Qwen/Qwen2.5-7B-Instruct",
+    "lora_config": {"rank": 32, "train_mlp": true, "train_attn": true},
+    "max_batch_size": 256,
+    "max_seq_len": 4096
+  }'
+```
+
+### Forward-Backward
+```bash
+curl -X POST http://localhost:8000/api/v1/forward_backward \
+  -H "X-API-Key: slime-dev-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_id": "model-abc-123",
+    "data": [{
+      "model_input": {"chunks": [{"tokens": [1, 2, 3, 4, 5]}]},
+      "loss_fn_inputs": {
+        "target_tokens": {"data": [3, 4, 5], "dtype": "int64"},
+        "weights": {"data": [1.0, 1.0, 1.0], "dtype": "float32"}
+      }
+    }],
+    "loss_fn": "cross_entropy"
+  }'
+```
+
+### Optim Step
+```bash
+curl -X POST http://localhost:8000/api/v1/optim_step \
+  -H "X-API-Key: slime-dev-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_id": "model-abc-123",
+    "adam_params": {"learning_rate": 1e-6, "beta1": 0.9, "beta2": 0.95}
+  }'
+```
+
+### Async Sample
+```bash
+curl -X POST http://localhost:8000/api/v1/asample \
+  -H "X-API-Key: slime-dev-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_id": "model-abc-123",
+    "prompt": {"chunks": [{"tokens": [1, 2, 3]}]},
+    "num_samples": 1,
+    "sampling_params": {"max_tokens": 100, "temperature": 0.7}
+  }'
+```
+
+### Poll for Result
+```bash
+curl -X POST http://localhost:8000/api/v1/retrieve_future/req-abc-123 \
+  -H "X-API-Key: slime-dev-key"
+```
+
+## Response Types
+
+### AsyncOperationResponse
+```json
+{"request_id": "req-abc-123", "message": "Operation started"}
+```
+
+### FutureStatus
+```json
+{"status": "pending|completed|failed", "result": {...}, "error": "..."}
+```
+
+### ForwardBackwardResult
+```json
+{
+  "loss_fn_outputs": [{"logprobs": {"data": [...], "dtype": "float32"}}],
+  "metrics": {"loss:sum": 2.5, "ppo_kl": 0.01}
+}
+```
+
+### SampleResult
+```json
+{
+  "sequences": [{
+    "tokens": [4, 5, 6, 7, 8],
+    "logprobs": [-1.2, -0.8, -2.1, -1.5, -0.9],
+    "finish_reason": "stop"
+  }]
+}
+```
+
+## GPU Memory Management
+
+Tinkercloud uses colocated mode where training (via Miles/Megatron) and inference (SGLang) share GPUs:
+
+1. **Before Training**: `rollout_manager.offload()` - Free GPU for training
+2. **After Optim Step**: `train_group.offload()` - Free GPU for SGLang
+3. **Weight Sync**: `onload(WEIGHTS)` → `update_weights()` → `onload(CUDA_GRAPH)` → `onload(KV_CACHE)`
+
+## Async Polling Pattern
+
+All long-running operations return `request_id` immediately:
+
+```
+Client → POST /forward_backward → {"request_id": "req-123"}
+Client → POST /retrieve_future/req-123 → {"status": "pending"}
+... poll every 100ms ...
+Client → POST /retrieve_future/req-123 → {"status": "completed", "result": {...}}
+```
+
+## Installation
+
+```bash
+# Install tinkercloud
+cd /root/gavin/tinkercloud && pip install -e .
+
+# Install Miles
+cd /root/gavin/miles && pip install -e .
+
+# Install tinker_gmi client
+cd /root/gavin/tinker_gmi && pip install -e .
+
+# Set environment
+export TINKER_API_KEY=slime-dev-key
+export PYTHONPATH=/root/Megatron-LM:/root/miles:$PYTHONPATH
+
+# Start Ray
+ray start --head --port=6379 --dashboard-host=0.0.0.0 --dashboard-port=8265
+
+# Start server
+cd /root/gavin/tinkercloud
+ALLOW_PARTIAL_BATCHES=true \
+  PYTHONPATH=/root/gavin/tinkercloud:/root/Megatron-LM:/root/miles:$PYTHONPATH \
+  python3 -m uvicorn training.api:app --host 0.0.0.0 --port 8000
+```
+
+## Error Handling
+
+```json
+{"detail": "Error message describing the problem"}
+```
+
+HTTP Status Codes:
+- `400` - Bad request (invalid parameters)
+- `401` - Unauthorized (missing/invalid API key)
+- `404` - Not found (model/session doesn't exist)
+- `500` - Internal server error
+- `503` - Service unavailable (Ray cluster issues)
+
+## Python Type Imports
+
+```python
+from tinker import types
+
+# Core types
+types.ModelInput
+types.TensorData
+types.Datum
+
+# Configs
+types.LoraConfig
+types.AdamParams
+types.SamplingParams
+types.RLVEConfig
+
+# Responses
+types.ForwardBackwardOutput
+types.OptimStepResponse
+types.SampleResponse
+types.SaveWeightsResponse
+```
+
+## Available Models
+
+| Model | Path |
+|-------|------|
+| Qwen2.5-0.5B-Instruct | /data/models/Qwen2.5-0.5B-Instruct_torch_dist |
+| Qwen2.5-7B-Instruct | /data/models/Qwen2.5-7B-Instruct_torch_dist |
+| Qwen3-4B-Instruct-2507 | /data/models/Qwen3-4B-Instruct-2507_torch_dist |
+| DeepScaleR-1.5B-Preview | /data/models/DeepScaleR-1.5B-Preview_torch_dist |
+| DeepSeek-R1-Distill-Qwen-1.5B | /data/models/DeepSeek-R1-Distill-Qwen-1.5B_torch_dist |
+
+## Quick Commands
+
+```bash
+# Check health
+curl -s http://localhost:8000/health -H "X-API-Key: slime-dev-key"
+
+# Cleanup sessions (free GPUs)
+TINKER_BASE_URL=http://localhost:8000 TINKER_API_KEY=slime-dev-key \
+  python /root/gavin/tinker_gmi/tests_integration/cleanup_test_env.py
+
+# View logs
+tail -f /data/logs/tinkercloud.log
+
+# Check GPU usage
+nvidia-smi
+
+# Restart Ray (clears all actors)
+ray stop --force && sleep 3 && \
+  ray start --head --port=6379 --dashboard-host=0.0.0.0 --dashboard-port=8265
+```

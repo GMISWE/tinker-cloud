@@ -1,0 +1,34 @@
+title: Tinkercloud
+description: Tinker-compatible middleware for Miles
+remote_theme: just-the-docs/just-the-docs
+url: https://radixark.github.io
+baseurl: /tinkercloud
+
+# Search
+search_enabled: true
+search:
+  heading_level: 3
+
+# Footer with edit link
+gh_edit_link: true
+gh_edit_repository: https://github.com/radixark/tinkercloud
+gh_edit_branch: main
+gh_edit_source: docs
+gh_edit_view_mode: tree
+
+# Color scheme
+color_scheme: light
+
+# Aux links (top right)
+aux_links:
+  "GitHub":
+    - "https://github.com/radixark/tinkercloud"
+  "Miles":
+    - "https://github.com/radixark/miles"
+
+# Exclude from processing
+exclude:
+  - llms.txt
+  - Gemfile
+  - Gemfile.lock
+  - README.md

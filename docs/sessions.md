@@ -1,3 +1,9 @@
+---
+layout: default
+title: Sessions
+nav_order: 5
+---
+
 # TinkerCloud Session Management
 
 This document describes how TinkerCloud implements session management to track client connections, training runs, and sampling endpoints.
