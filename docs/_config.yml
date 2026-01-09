@@ -24,6 +24,9 @@ gh_edit_view_mode: tree
 # Color scheme
 color_scheme: light
 
+# Disable logo
+logo: false
+
 # Aux links (top right)
 aux_links:
   "GitHub":
