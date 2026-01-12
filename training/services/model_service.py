@@ -294,6 +294,7 @@ class ModelService:
                 "training_run_id": training_run_id,
                 "args": args,
                 "hf_path": hf_path,
+                "hf_checkpoint": base_model,  # Original HF model name for VLM processor loading
                 "router_ip": router_ip,
                 "router_port": router_port,
                 "rlve_config": rlve_config,

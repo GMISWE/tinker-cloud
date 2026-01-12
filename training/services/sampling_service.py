@@ -30,7 +30,8 @@ class SamplingService:
         num_samples: int,
         sampling_params: Optional[Dict[str, Any]],
         prompt_logprobs: bool,
-        training_clients: Dict[str, Dict[str, Any]]
+        training_clients: Dict[str, Dict[str, Any]],
+        image_data: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
         Async sampling via SGLang.
@@ -42,6 +43,7 @@ class SamplingService:
             sampling_params: Optional sampling parameters dict
             prompt_logprobs: Whether to return prompt logprobs
             training_clients: Global training clients dict
+            image_data: Optional list of base64-encoded images or URLs for VLM models
 
         Returns:
             Dict with sequences and optional prompt_logprobs
@@ -57,6 +59,8 @@ class SamplingService:
         client_info = training_clients[model_id]
 
         logger.info(f"[{request_id}] Async sampling for {model_id}")
+        if image_data:
+            logger.info(f"[{request_id}] With {len(image_data)} images")
 
         # Get SGLang router URL
         router_ip = client_info.get("router_ip")
@@ -75,7 +79,8 @@ class SamplingService:
             result = await sglang_client.generate(
                 input_ids=prompt_tokens,
                 sampling_params=sampling_params or {},
-                prompt_logprobs=prompt_logprobs
+                prompt_logprobs=prompt_logprobs,
+                image_data=image_data
             )
 
             sequences.append({
@@ -99,7 +104,8 @@ class SamplingService:
         prompts: List[List[int]],
         num_samples: int,
         sampling_params: Optional[Dict[str, Any]],
-        training_clients: Dict[str, Dict[str, Any]]
+        training_clients: Dict[str, Dict[str, Any]],
+        image_data_list: Optional[List[Optional[List[str]]]] = None
     ) -> Dict[str, Any]:
         """
         Synchronous sampling via SGLang.
@@ -110,6 +116,7 @@ class SamplingService:
             num_samples: Number of samples per prompt
             sampling_params: Optional sampling parameters dict
             training_clients: Global training clients dict
+            image_data_list: Optional list of image data lists (one per prompt)
 
         Returns:
             Dict with sequences list
@@ -125,6 +132,8 @@ class SamplingService:
         client_info = training_clients[model_id]
 
         logger.info(f"[{request_id}] Sampling {num_samples} sequences")
+        if image_data_list:
+            logger.info(f"[{request_id}] With images for {sum(1 for x in image_data_list if x)} prompts")
 
         # Get SGLang router URL
         router_ip = client_info.get("router_ip")
@@ -137,12 +146,18 @@ class SamplingService:
 
         # Sample from all prompts
         all_sequences = []
-        for prompt_tokens in prompts:
+        for i, prompt_tokens in enumerate(prompts):
+            # Get image data for this prompt if provided
+            image_data = None
+            if image_data_list and i < len(image_data_list):
+                image_data = image_data_list[i]
+
             for _ in range(num_samples):
                 result = await sglang_client.generate(
                     input_ids=prompt_tokens,
                     sampling_params=sampling_params or {},
-                    prompt_logprobs=False
+                    prompt_logprobs=False,
+                    image_data=image_data
                 )
 
                 all_sequences.append({

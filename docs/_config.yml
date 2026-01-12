@@ -1,7 +1,7 @@
 title: Tinkercloud
 description: Tinker-compatible middleware for Miles
 remote_theme: just-the-docs/just-the-docs@v0.8.2
-url: https://gavinzhu-gmi.github.io
+url: https://GMISWE.github.io
 baseurl: /tinker-cloud
 
 plugins:

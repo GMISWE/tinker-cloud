@@ -38,7 +38,8 @@ class SGLangClient:
         self,
         input_ids: List[int],
         sampling_params: Optional[Dict[str, Any]] = None,
-        prompt_logprobs: bool = False
+        prompt_logprobs: bool = False,
+        image_data: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
         Generate text completion from SGLang.
@@ -50,6 +51,7 @@ class SGLangClient:
                 - top_p: float (default 0.9)
                 - max_tokens: int (default 256)
             prompt_logprobs: Whether to return prompt log probabilities
+            image_data: Optional list of base64-encoded images or URLs for VLM models
 
         Returns:
             Dict with:
@@ -74,6 +76,11 @@ class SGLangClient:
             },
             "return_logprob": True,
         }
+
+        # Add image data for VLM models
+        if image_data:
+            payload["image_data"] = image_data
+            logger.debug(f"Added {len(image_data)} images to SGLang request")
 
         # Request prompt logprobs if needed
         if prompt_logprobs:
@@ -178,7 +185,8 @@ class SGLangClient:
         self,
         input_ids_list: List[List[int]],
         sampling_params: Optional[Dict[str, Any]] = None,
-        prompt_logprobs: bool = False
+        prompt_logprobs: bool = False,
+        image_data_list: Optional[List[Optional[List[str]]]] = None
     ) -> List[Dict[str, Any]]:
         """
         Generate multiple completions (one per input).
@@ -187,12 +195,17 @@ class SGLangClient:
             input_ids_list: List of input token ID lists
             sampling_params: Sampling parameters
             prompt_logprobs: Whether to return prompt logprobs
+            image_data_list: Optional list of image data lists (one per input)
 
         Returns:
             List of generation results (one per input)
         """
         results = []
-        for input_ids in input_ids_list:
-            result = await self.generate(input_ids, sampling_params, prompt_logprobs)
+        for i, input_ids in enumerate(input_ids_list):
+            # Get image data for this sample if provided
+            image_data = None
+            if image_data_list and i < len(image_data_list):
+                image_data = image_data_list[i]
+            result = await self.generate(input_ids, sampling_params, prompt_logprobs, image_data)
             results.append(result)
         return results
