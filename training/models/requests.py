@@ -330,9 +330,20 @@ class SFTLossFnInputs(LossFnInputs):
 
 
 class ModelInputChunk(BaseModel):
-    """Chunk in model input."""
-    tokens: List[int] = Field(..., description="Token IDs")
-    type: str = Field(default="encoded_text", description="Chunk type")
+    """Chunk in model input.
+
+    Supports multiple chunk types:
+    - encoded_text: Token IDs (tokens field required)
+    - image: Base64-encoded image data (image field required)
+    - image_url: Remote image URL (image_url field required)
+    """
+    type: str = Field(default="encoded_text", description="Chunk type: encoded_text, image, or image_url")
+    # Text chunk fields
+    tokens: Optional[List[int]] = Field(default=None, description="Token IDs (for encoded_text chunks)")
+    # Image chunk fields
+    image: Optional[str] = Field(default=None, description="Base64-encoded image data (for image chunks)")
+    image_url: Optional[str] = Field(default=None, description="Remote image URL (for image_url chunks)")
+    image_format: Optional[str] = Field(default=None, description="Image format: jpeg, png, etc.")
 
 
 class ModelInput(BaseModel):
@@ -369,9 +380,20 @@ class ForwardBackwardInput(BaseModel):
 # ============= Sampling Models =============
 
 class PromptChunk(BaseModel):
-    """Chunk in prompt."""
-    tokens: List[int] = Field(..., description="Token IDs")
-    type: str = Field(default="encoded_text", description="Chunk type")
+    """Chunk in prompt.
+
+    Supports multiple chunk types:
+    - encoded_text: Token IDs (tokens field required)
+    - image: Base64-encoded image data (image field required)
+    - image_url: Remote image URL (image_url field required)
+    """
+    type: str = Field(default="encoded_text", description="Chunk type: encoded_text, image, or image_url")
+    # Text chunk fields
+    tokens: Optional[List[int]] = Field(default=None, description="Token IDs (for encoded_text chunks)")
+    # Image chunk fields
+    image: Optional[str] = Field(default=None, description="Base64-encoded image data (for image chunks)")
+    image_url: Optional[str] = Field(default=None, description="Remote image URL (for image_url chunks)")
+    image_format: Optional[str] = Field(default=None, description="Image format: jpeg, png, etc.")
 
 
 class PromptInput(BaseModel):
@@ -381,14 +403,38 @@ class PromptInput(BaseModel):
     input_ids: Optional[List[int]] = Field(default=None, description="Input IDs")
 
     def get_tokens(self) -> List[int]:
-        """Extract tokens from whichever format was provided."""
+        """Extract tokens from whichever format was provided.
+
+        For multimodal inputs, concatenates tokens from all text chunks.
+        Image chunks are skipped (handled separately by multimodal pipeline).
+        """
         if self.chunks:
-            return self.chunks[0].tokens
-        elif self.tokens:
+            # Collect tokens from all text chunks (skip image chunks)
+            all_tokens = []
+            for chunk in self.chunks:
+                if chunk.type == "encoded_text" and chunk.tokens:
+                    all_tokens.extend(chunk.tokens)
+            if all_tokens:
+                return all_tokens
+        if self.tokens:
             return self.tokens
-        elif self.input_ids:
+        if self.input_ids:
             return self.input_ids
         raise ValueError("No tokens found in prompt")
+
+    def get_images(self) -> List[str]:
+        """Extract image data from chunks.
+
+        Returns list of base64-encoded images or URLs.
+        """
+        images = []
+        if self.chunks:
+            for chunk in self.chunks:
+                if chunk.type == "image" and chunk.image:
+                    images.append(chunk.image)
+                elif chunk.type == "image_url" and chunk.image_url:
+                    images.append(chunk.image_url)
+        return images
 
 
 # ============= Other Requests =============

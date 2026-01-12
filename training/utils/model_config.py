@@ -359,12 +359,32 @@ def extract_model_name(args) -> str:
     return "unknown"
 
 
+def is_vlm_model(model_name: str) -> bool:
+    """
+    Detect if a model is a Vision-Language Model (VLM).
+
+    Args:
+        model_name: Model name or path
+
+    Returns:
+        True if the model is detected as a VLM
+    """
+    vlm_indicators = ["VL", "Vision", "-VL-", "Qwen3-VL", "Qwen2.5-VL", "LLaVA", "PaliGemma"]
+    model_name_lower = model_name.lower()
+    for indicator in vlm_indicators:
+        if indicator.lower() in model_name_lower:
+            return True
+    return False
+
+
 def compute_sglang_mem_fraction(model_config: Dict[str, Any], model_name: str = "") -> float:
     """
     Compute SGLang memory fraction based on model size.
 
     Smaller models need less GPU memory for KV cache, so we can use a smaller fraction.
     This allows colocated training without offload for small models.
+
+    VLM models get a reduced fraction to leave room for the vision encoder.
 
     Args:
         model_config: Model configuration dict from load_model_config()
@@ -374,6 +394,7 @@ def compute_sglang_mem_fraction(model_config: Dict[str, Any], model_name: str = 
         Memory fraction (0.0-1.0) for SGLang's mem_fraction_static
     """
     total_params = estimate_model_params(model_config, model_name)
+    is_vlm = is_vlm_model(model_name)
 
     # Memory fraction based on model size:
     # - Larger models need more KV cache memory
@@ -393,8 +414,15 @@ def compute_sglang_mem_fraction(model_config: Dict[str, Any], model_name: str = 
     else:                          # > 35B: 70% (~132GB)
         mem_fraction = 0.70
 
+    # VLM models need extra memory for vision encoder
+    # Reduce fraction by ~10% to leave room for vision processing
+    if is_vlm:
+        vlm_reduction = 0.10
+        mem_fraction = max(0.10, mem_fraction - vlm_reduction)
+        logger.info(f"VLM detected: reduced mem_fraction by {vlm_reduction}")
+
     logger.info(
-        f"SGLang mem_fraction={mem_fraction:.2f} for {total_params:.1f}B model"
+        f"SGLang mem_fraction={mem_fraction:.2f} for {total_params:.1f}B {'VLM' if is_vlm else 'LLM'}"
     )
     return mem_fraction
 

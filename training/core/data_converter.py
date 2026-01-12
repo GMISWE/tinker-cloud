@@ -35,8 +35,12 @@ class TinkerDataConverter:
 
         Supports multiple formats:
         - {"chunks": [{"tokens": [1,2,3], "type": "encoded_text"}]}
+        - {"chunks": [{"type": "image", ...}, {"tokens": [1,2,3], "type": "encoded_text"}]}
         - {"tokens": [1,2,3]}
         - {"input_ids": [1,2,3]}
+
+        For multimodal inputs, concatenates tokens from all text chunks.
+        Image chunks are skipped (handled separately via extract_multimodal_from_model_input).
 
         Works with both dict and Pydantic model inputs.
         """
@@ -45,8 +49,20 @@ class TinkerDataConverter:
         if chunks:
             if not chunks:
                 raise ValueError("Empty chunks in model_input")
-            first_chunk = chunks[0]
-            return TinkerDataConverter._get_field(first_chunk, "tokens")
+            # Collect tokens from all text chunks (skip image chunks)
+            all_tokens = []
+            for chunk in chunks:
+                chunk_type = TinkerDataConverter._get_field(chunk, "type") or "encoded_text"
+                if chunk_type == "encoded_text":
+                    tokens = TinkerDataConverter._get_field(chunk, "tokens")
+                    if tokens:
+                        all_tokens.extend(tokens)
+            if all_tokens:
+                return all_tokens
+            # Fallback: try first chunk's tokens (legacy format)
+            first_chunk_tokens = TinkerDataConverter._get_field(chunks[0], "tokens")
+            if first_chunk_tokens:
+                return first_chunk_tokens
 
         # Try tokens
         tokens = TinkerDataConverter._get_field(model_input, "tokens")
@@ -71,6 +87,96 @@ class TinkerDataConverter:
         """
         data = TinkerDataConverter._get_field(tensor_dict, "data")
         return data if data is not None else tensor_dict
+
+    @staticmethod
+    def extract_multimodal_from_model_input(model_input: Any) -> Dict[str, List[str]]:
+        """
+        Extract multimodal data (images) from model_input chunks.
+
+        Scans chunks for image data (base64 or URLs) and returns them
+        in a format compatible with Miles' multimodal_inputs field.
+
+        Args:
+            model_input: model_input dict or Pydantic model with chunks
+
+        Returns:
+            Dict with "images" key containing list of base64 strings or URLs.
+            Empty dict if no images found.
+
+        Example:
+            Input chunks: [
+                {"type": "image", "image": "base64data..."},
+                {"type": "encoded_text", "tokens": [1,2,3]}
+            ]
+            Output: {"images": ["base64data..."]}
+        """
+        images = []
+        chunks = TinkerDataConverter._get_field(model_input, "chunks")
+
+        if chunks:
+            for chunk in chunks:
+                chunk_type = TinkerDataConverter._get_field(chunk, "type")
+                if chunk_type == "image":
+                    # Base64-encoded image data
+                    image_data = TinkerDataConverter._get_field(chunk, "image")
+                    if image_data:
+                        images.append(image_data)
+                elif chunk_type == "image_url":
+                    # Remote image URL
+                    image_url = TinkerDataConverter._get_field(chunk, "image_url")
+                    if image_url:
+                        images.append(image_url)
+
+        return {"images": images} if images else {}
+
+    @classmethod
+    def process_multimodal_inputs(
+        cls,
+        data: List[Any],
+        model_name: str
+    ) -> Optional[List[Dict[str, Any]]]:
+        """
+        Extract and process images from data to pixel_values tensors.
+
+        This method converts raw base64 image data to processed tensors
+        (pixel_values, image_grid_thw, etc.) that Miles/Megatron expects
+        for VLM training.
+
+        Args:
+            data: List of training data samples (dicts or Pydantic models)
+            model_name: HuggingFace model name for processor selection
+
+        Returns:
+            List of processed tensor dicts (one per sample), or None if no images.
+            Each dict contains tensors like:
+            - pixel_values: torch.Tensor
+            - image_grid_thw: torch.Tensor (for Qwen VL models)
+        """
+        from ..utils.image_processor import VLMImageProcessor
+
+        # Extract raw images from each sample
+        batch_images: List[List[str]] = []
+        has_any_images = False
+
+        for datum in data:
+            model_input = cls._get_field(datum, "model_input")
+            mm = cls.extract_multimodal_from_model_input(model_input)
+            images = mm.get("images", [])
+            batch_images.append(images)
+            if images:
+                has_any_images = True
+
+        if not has_any_images:
+            return None
+
+        # Process images to tensors
+        try:
+            processed_list = VLMImageProcessor.process_batch(batch_images, model_name)
+            logger.info(f"Processed multimodal inputs for {len(data)} samples using {model_name}")
+            return processed_list
+        except Exception as e:
+            logger.error(f"Failed to process multimodal inputs: {e}")
+            raise
 
     @classmethod
     def forward_to_rollout(cls, data: List[Any]) -> Dict[str, Any]:
@@ -134,6 +240,18 @@ class TinkerDataConverter:
             "values": [torch.zeros(max_len, dtype=torch.float32) for _ in range(batch_size)],
             "returns": [torch.zeros(max_len, dtype=torch.float32) for _ in range(batch_size)],
         }
+
+        # Extract multimodal inputs (images) if present
+        multimodal_inputs = []
+        for datum in data:
+            model_input = cls._get_field(datum, "model_input")
+            mm = cls.extract_multimodal_from_model_input(model_input)
+            multimodal_inputs.append(mm)
+
+        # Only add if any sample has images
+        if any(m.get("images") for m in multimodal_inputs):
+            rollout_data["multimodal_inputs"] = multimodal_inputs
+            logger.info(f"Extracted multimodal inputs: {sum(len(m.get('images', [])) for m in multimodal_inputs)} images")
 
         logger.debug(f"Converted {batch_size} forward samples to rollout_data")
         return rollout_data
@@ -387,6 +505,18 @@ class TinkerDataConverter:
             #       f"tokens_sum={total_tokens_len}", flush=True)
             # print(f"[CONVERTER DEBUG] response_lengths_list={response_lengths_list}", flush=True)
             # print(f"[CONVERTER DEBUG] advantages_lens={[len(a) for a in advantages_list]}", flush=True)
+
+        # Extract multimodal inputs (images) if present
+        multimodal_inputs = []
+        for datum in data:
+            model_input = cls._get_field(datum, "model_input")
+            mm = cls.extract_multimodal_from_model_input(model_input)
+            multimodal_inputs.append(mm)
+
+        # Only add if any sample has images
+        if any(m.get("images") for m in multimodal_inputs):
+            rollout_data["multimodal_inputs"] = multimodal_inputs
+            logger.info(f"Extracted multimodal inputs: {sum(len(m.get('images', [])) for m in multimodal_inputs)} images")
 
         return rollout_data
 

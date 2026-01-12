@@ -92,8 +92,9 @@ async def asample(
     if not model_id:
         raise HTTPException(status_code=404, detail="No model with RolloutManager found")
 
-    # Extract prompt tokens
+    # Extract prompt tokens and images (for VLM models)
     prompt_tokens = request.prompt.get_tokens()
+    image_data = request.prompt.get_images() or None  # Convert empty list to None
 
     async def execute():
         result_dict = await service.async_sample(
@@ -102,7 +103,8 @@ async def asample(
             num_samples=request.num_samples,
             sampling_params=request.sampling_params.dict() if request.sampling_params else None,
             prompt_logprobs=request.prompt_logprobs,
-            training_clients=training_clients
+            training_clients=training_clients,
+            image_data=image_data
         )
 
         # Convert to response model

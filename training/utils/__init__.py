@@ -22,7 +22,9 @@ from .model_config import (
     detect_torch_dist_path,
     parse_checkpoint_uri,
     compute_sglang_mem_fraction,
+    is_vlm_model,
 )
+from .image_processor import VLMImageProcessor
 
 __all__ = [
     # Auth
@@ -44,4 +46,7 @@ __all__ = [
     "detect_torch_dist_path",
     "parse_checkpoint_uri",
     "compute_sglang_mem_fraction",
+    "is_vlm_model",
+    # Image processing
+    "VLMImageProcessor",
 ]

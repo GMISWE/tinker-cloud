@@ -232,6 +232,20 @@ class TrainingService:
                 is_rl=is_rl
             )
 
+            # Process multimodal inputs for VLM models
+            # Convert base64 images to pixel_values tensors
+            hf_checkpoint = client_info.get("hf_checkpoint") if client_info else None
+            if hf_checkpoint:
+                from ..utils.model_config import is_vlm_model
+                if is_vlm_model(hf_checkpoint):
+                    processed_multimodal = self.converter.process_multimodal_inputs(
+                        data, hf_checkpoint
+                    )
+                    if processed_multimodal:
+                        # Replace raw base64 images with processed tensors
+                        rollout_data["multimodal_inputs"] = processed_multimodal
+                        logger.info(f"VLM: Processed multimodal inputs for {len(processed_multimodal)} samples")
+
         # Debug: Log sample count
         num_samples = len(rollout_data.get("tokens", []))
         logger.info(f"Forward-backward with {num_samples} samples")

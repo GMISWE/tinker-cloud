@@ -137,6 +137,25 @@ class SlimeArgumentBuilder:
 
         return args, hf_model_path
 
+    # VLM model name indicators
+    VLM_INDICATORS = ["VL", "Vision", "-VL-", "Qwen3-VL", "Qwen2.5-VL", "LLaVA", "PaliGemma"]
+
+    @staticmethod
+    def is_vlm_model(model_name: str) -> bool:
+        """Detect if a model is a Vision-Language Model (VLM).
+
+        Args:
+            model_name: Model name or path
+
+        Returns:
+            True if the model is detected as a VLM
+        """
+        model_name_lower = model_name.lower()
+        for indicator in SlimeArgumentBuilder.VLM_INDICATORS:
+            if indicator.lower() in model_name_lower:
+                return True
+        return False
+
     def _build_minimal_args(
         self,
         hf_model_path: str,
@@ -151,6 +170,11 @@ class SlimeArgumentBuilder:
         """Build minimal CLI arguments for Slime's parse_args."""
         # Check if RLVE mode is enabled
         rlve_enabled = rlve_config and rlve_config.get("enabled", False)
+
+        # Detect VLM model
+        is_vlm = self.is_vlm_model(hf_model_path)
+        if is_vlm:
+            logger.info(f"Detected VLM model: {hf_model_path}")
 
         # Batch size configuration - satisfies Slime's assertion:
         # rollout_batch_size * n_samples_per_prompt % global_batch_size == 0
@@ -271,6 +295,14 @@ class SlimeArgumentBuilder:
                 ])
 
             logger.info(f"RLVE enabled with {len(environment_list)} environments: {environment_list[:3]}...")
+
+        # Add VLM-specific arguments for Vision-Language Models
+        if is_vlm:
+            minimal_args.extend([
+                '--multimodal-keys', '{"image": "images"}',
+                '--apply-chat-template',
+            ])
+            logger.info("VLM args added: --multimodal-keys, --apply-chat-template")
 
         return minimal_args
 
