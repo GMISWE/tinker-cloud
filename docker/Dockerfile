@@ -119,14 +119,13 @@ ENV PYTHONUNBUFFERED=1 \
 ENV CUDA_DEVICE_MAX_CONNECTIONS="1" \
     NCCL_NVLS_ENABLE="0" \
     NCCL_DEBUG="INFO" \
-    NCCL_IB_DISABLE="0" \
-    NCCL_SOCKET_IFNAME="eth0"
+    NCCL_IB_DISABLE="0"
 
 # Environment - Ray
 ENV NUM_GPUS="4"
 
 # Environment - HuggingFace
-ENV HF_HOME="/data" \
+ENV HF_HOME="/data/models" \
     HF_HUB_OFFLINE="0" \
     TRANSFORMERS_OFFLINE="0"
 

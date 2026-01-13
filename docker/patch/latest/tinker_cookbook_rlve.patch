@@ -6863,6 +6863,21 @@ index 0000000..58ac746
 +    blueprint.make_from_argv(sys.argv[1:])
 +    config = blueprint.make()
 +    main(config)
+diff --git a/pyproject.toml b/pyproject.toml
+index bb8398c..657c753 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -18,8 +18,8 @@ dependencies = [
+     "tinker>=0.6.1",
+     "torch",
+     "torchvision",
+-    # <4.57: mistral regex bug makes API calls even with local_files_only=True (fixed in PR #42743)
+-    "transformers>=4.45.0,<4.57.0",
++    # >=4.57.1: mistral regex bug fixed in PR #42743
++    "transformers>=4.45.0,<4.58.0",
+     "blobfile",
+     "inspect-ai",
+     "anyio",
 diff --git a/scripts/README.md b/scripts/README.md
 new file mode 100644
 index 0000000..c05e06a
@@ -81297,7 +81312,7 @@ index 0000000..1f6f725
 +# RLVE recipe for Tinker
 diff --git a/tinker_cookbook/recipes/rlve/procgen_env.py b/tinker_cookbook/recipes/rlve/procgen_env.py
 new file mode 100644
-index 0000000..11c0d67
+index 0000000..6b54541
 --- /dev/null
 +++ b/tinker_cookbook/recipes/rlve/procgen_env.py
 @@ -0,0 +1,373 @@
@@ -81548,11 +81563,11 @@ index 0000000..11c0d67
 +                "correct": accuracy,
 +                "problem_difficulty": self.problem_difficulty
 +            },
-+            metadata=dict(
-+                            environment=self.environment,
-+                            problem_difficulty=self.problem_difficulty,
-+                            **self.problem.get_config()
-+                        )
++            logs=dict(
++                environment=self.environment,
++                problem_difficulty=self.problem_difficulty,
++                **self.problem.get_config()
++            )
 +        )
 +
 +
@@ -82910,7 +82925,7 @@ index 86cf6e1..8090b82 100644
  
      return advantages_P
 diff --git a/tinker_cookbook/rl/metrics.py b/tinker_cookbook/rl/metrics.py
-index f0673fe..6424ca7 100644
+index f0673fe..ac1a7f7 100644
 --- a/tinker_cookbook/rl/metrics.py
 +++ b/tinker_cookbook/rl/metrics.py
 @@ -14,6 +14,20 @@ import torch
@@ -82934,7 +82949,7 @@ index f0673fe..6424ca7 100644
  
  def compute_kl_sample_train(
      data_D: List[tinker.Datum], training_logprobs_D: List[torch.Tensor]
-@@ -61,12 +75,10 @@ async def compute_post_kl(
+@@ -61,17 +75,15 @@ async def compute_post_kl(
          datum.model_input.append_int(cast(int, datum.loss_fn_inputs["target_tokens"].data[-1]))
          for datum in data_D
      ]
@@ -82951,7 +82966,13 @@ index f0673fe..6424ca7 100644
  
      prev_logprobs_D = [datum.loss_fn_inputs["logprobs"].to_torch() for datum in data_D]
      action_masks = [datum.loss_fn_inputs["mask"].to_torch() > 0 for datum in data_D]
-@@ -99,12 +111,10 @@ async def incorporate_kl_penalty(
+     flat_diffs = [
+-        (prev_logprobs - torch.tensor(new_logprobs[1:]))[action_mask]
++        (prev_logprobs - torch.tensor(new_logprobs[1:1+len(prev_logprobs)]))[action_mask]
+         for new_logprobs, prev_logprobs, action_mask in safezip(
+             new_logprobs_D, prev_logprobs_D, action_masks
+         )
+@@ -99,17 +111,15 @@ async def incorporate_kl_penalty(
          datum.model_input.append_int(cast(int, datum.loss_fn_inputs["target_tokens"].data[-1]))
          for datum in data_D
      ]
@@ -82968,6 +82989,12 @@ index f0673fe..6424ca7 100644
      # compute the logprob differences, zeroed out when the mask == 0
      sampled_logprobs_D = [datum.loss_fn_inputs["logprobs"].to_torch() for datum in data_D]
      float_masks = [datum.loss_fn_inputs["mask"].to_torch().float() for datum in data_D]
+     logprob_diffs = [
+-        (sampled_logprobs - torch.tensor(base_logprobs[1:])) * mask
++        (sampled_logprobs - torch.tensor(base_logprobs[1:1+len(sampled_logprobs)])) * mask
+         for base_logprobs, sampled_logprobs, mask in safezip(
+             base_logprobs_D, sampled_logprobs_D, float_masks
+         )
 diff --git a/tinker_cookbook/rl/problem_env.py b/tinker_cookbook/rl/problem_env.py
 index 5d80cd6..bbfb8fe 100644
 --- a/tinker_cookbook/rl/problem_env.py
@@ -83116,7 +83143,7 @@ index 0000000..94abc30
 +            "overall_mean": sum(all_rewards) / len(all_rewards) if all_rewards else 0.0,
 +        }
 diff --git a/tinker_cookbook/rl/train.py b/tinker_cookbook/rl/train.py
-index d67ad64..1875d3f 100644
+index d67ad64..381d600 100644
 --- a/tinker_cookbook/rl/train.py
 +++ b/tinker_cookbook/rl/train.py
 @@ -8,7 +8,7 @@ import logging
@@ -84020,7 +84047,46 @@ index d67ad64..1875d3f 100644
          ml_logger.log_metrics(metrics, step=i_batch)
  
  
-@@ -1115,8 +1495,25 @@ async def main(
+@@ -1072,33 +1452,20 @@ async def main(
+     cfg: Config,
+ ):
+     """Main training loop for MDP RL."""
+-    ml_logger = ml_log.setup_logging(
+-        log_dir=cfg.log_path,
+-        wandb_project=cfg.wandb_project,
+-        config=cfg,
+-        wandb_name=cfg.wandb_name,
+-    )
+-    if cfg.enable_trace:
+-        # Get and rename the current (main) task
+-        current_task = asyncio.current_task()
+-        if current_task is not None:
+-            current_task.set_name("main")
+-        trace_events_path = os.path.join(cfg.log_path, "trace_events.jsonl")
+-        logger.info(f"Tracing is enabled. Trace events will be saved to {trace_events_path}")
+-        logger.info(
+-            f"Run `python tinker_cookbook/utils/trace.py {trace_events_path} trace.json` and visualize in chrome://tracing or https://ui.perfetto.dev/"
+-        )
+-        trace_init(output_file=trace_events_path)
+-
++    # Suppress noisy loggers early
+     logging.getLogger("httpx").setLevel(logging.WARNING)
+     logging.getLogger("pylatexenc").setLevel(logging.WARNING)
+ 
++    # Check for checkpoint resume before creating clients
+     resume_info = checkpoint_utils.get_last_checkpoint(cfg.log_path)
+     if resume_info:
+         start_batch = resume_info["batch"]
+     else:
+         start_batch = 0
+ 
++    # Create service and training clients BEFORE initializing wandb
++    # This ensures transformers/accelerate are imported before wandb's import hooks
++    # are installed, avoiding circular import issues with accelerate.big_modeling
+     service_client = tinker.ServiceClient(base_url=cfg.base_url)
+     if resume_info:
+         # Resuming interrupted training - load optimizer state for proper continuation
+@@ -1115,19 +1482,88 @@ async def main(
          )
          logger.info(f"Loaded weights from {cfg.load_checkpoint_path}")
      else:
@@ -84046,8 +84112,33 @@ index d67ad64..1875d3f 100644
 +            rlve_config=cfg.rlve_config,
          )
  
-     # Get tokenizer from training client
-@@ -1128,6 +1525,38 @@ async def main(
+-    # Get tokenizer from training client
++    # Get tokenizer from training client (imports transformers)
+     tokenizer = training_client.get_tokenizer()
+ 
++    # Initialize logging/wandb AFTER tokenizer is loaded
++    # This avoids wandb import hooks interfering with transformers->accelerate imports
++    ml_logger = ml_log.setup_logging(
++        log_dir=cfg.log_path,
++        wandb_project=cfg.wandb_project,
++        config=cfg,
++        wandb_name=cfg.wandb_name,
++    )
++    if cfg.enable_trace:
++        # Get and rename the current (main) task
++        current_task = asyncio.current_task()
++        if current_task is not None:
++            current_task.set_name("main")
++        trace_events_path = os.path.join(cfg.log_path, "trace_events.jsonl")
++        logger.info(f"Tracing is enabled. Trace events will be saved to {trace_events_path}")
++        logger.info(
++            f"Run `python tinker_cookbook/utils/trace.py {trace_events_path} trace.json` and visualize in chrome://tracing or https://ui.perfetto.dev/"
++        )
++        trace_init(output_file=trace_events_path)
++
+     # Create dataset from thunk
+     dataset, maybe_test_dataset = await cfg.dataset_builder()
+     evaluators = [evaluator() for evaluator in cfg.evaluator_builders]
      if maybe_test_dataset is not None:
          evaluators.append(RLTestSetEvaluator(maybe_test_dataset, max_tokens=cfg.max_tokens))
  
@@ -84086,7 +84177,7 @@ index d67ad64..1875d3f 100644
      num_batches = len(dataset)
      logger.info(f"Will train on {num_batches} batches")
  
-@@ -1149,6 +1578,7 @@ async def main(
+@@ -1149,6 +1585,7 @@ async def main(
          dataset=dataset,
          ml_logger=ml_logger,
          tokenizer=tokenizer,
@@ -84094,7 +84185,7 @@ index d67ad64..1875d3f 100644
      )
  
      # Save final checkpoint
-@@ -1160,6 +1590,9 @@ async def main(
+@@ -1160,6 +1597,9 @@ async def main(
              kind="both",
              loop_state={"batch": num_batches},
          )
