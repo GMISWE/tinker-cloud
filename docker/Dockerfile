@@ -11,7 +11,7 @@
 #   docker build -t us-west1-docker.pkg.dev/devv-404803/gmi-test-repo/opentinker-miles:latest -f docker/Dockerfile .
 #   docker push us-west1-docker.pkg.dev/devv-404803/gmi-test-repo/opentinker-miles:latest
 
-ARG BASE_IMAGE=us-west1-docker.pkg.dev/devv-404803/gmi-test-repo/miles_dev-202511120a-dev:latest
+ARG BASE_IMAGE=gmicloudai/tinkercloud:dev
 FROM ${BASE_IMAGE}
 
 # ======================================== Arguments =============================================
