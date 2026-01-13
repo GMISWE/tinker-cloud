@@ -177,7 +177,7 @@ asyncio.run(test_training())
 
 ## 6. RLVE Training Setup
 
-RLVE (Reinforcement Learning with Verifiable Environments) uses procedurally generated math/logic problems for training.
+RLVE (Reinforcement Learning with Verifiable Environments) uses procedurally generated problems for training.
 
 ### Available Models
 
@@ -201,12 +201,13 @@ export WANDB_API_KEY=your-wandb-key
 python -m tinker_cookbook.recipes.rlve.train \
     model_name=Qwen/Qwen2.5-7B-Instruct \
     base_url=http://localhost:8000 \
-    environment_list=Division,EuclidGame,Multiplication,Sorting \
+    environment_list="Division,EuclidGame,Multiplication,Sorting" \
+    answer_marker_type="<answer></answer>" \
     groups_per_batch=64 \
     group_size=16 \
     max_tokens=4096 \
     learning_rate=1e-6 \
-    n_batches=100 \
+    n_batches=1000 \
     wandb_project=rlve-test \
     log_path=/data/logs/rlve-test
 ```
@@ -215,6 +216,8 @@ python -m tinker_cookbook.recipes.rlve.train \
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
+| `environment_list` | Comma-separated list of RLVE environments | All 400+ envs |
+| `answer_marker_type` | Answer extraction format (`<answer></answer>` or `\boxed{}`) | `\boxed{}` |
 | `groups_per_batch` | Number of problem groups per batch | 32 |
 | `group_size` | Samples per group (n_samples_per_prompt) | 8 |
 | `max_tokens` | Max response tokens | 4096 |
@@ -382,6 +385,8 @@ cd /workspace/tinker-cookbook
 TINKER_API_KEY=slime-dev-key python -m tinker_cookbook.recipes.rlve.train \
     model_name=Qwen/Qwen2.5-0.5B-Instruct \
     base_url=http://localhost:8000 \
+    environment_list="Division,EuclidGame,Multiplication,Sorting" \
+    answer_marker_type="<answer></answer>" \
     groups_per_batch=4 \
     group_size=4 \
     max_tokens=2048 \
