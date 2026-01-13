@@ -202,7 +202,6 @@ python -m tinker_cookbook.recipes.rlve.train \
     model_name=Qwen/Qwen2.5-7B-Instruct \
     base_url=http://localhost:8000 \
     environment_list="Division,EuclidGame,Multiplication,Sorting" \
-    answer_marker_type="<answer></answer>" \
     groups_per_batch=64 \
     group_size=16 \
     max_tokens=4096 \
@@ -211,6 +210,8 @@ python -m tinker_cookbook.recipes.rlve.train \
     wandb_project=rlve-test \
     log_path=/data/logs/rlve-test
 ```
+
+**Note:** The default `answer_marker_type="\boxed{}"` works best with Qwen models as they naturally output math answers in `\boxed{}` format. The TinyZero template is automatically added to prompts when using this format.
 
 ### Key Parameters
 
@@ -344,11 +345,15 @@ docker run -d --name tinkercloud-rlve \
   -v /data:/data \
   --network host \
   --shm-size=16g \
+  -e ALLOW_PARTIAL_BATCHES=true \
+  -e WANDB_API_KEY=your-wandb-key \
   gmicloudai/tinkercloud:latest
 
 # Check startup logs
 docker logs -f tinkercloud-rlve
 ```
+
+**Note:** `ALLOW_PARTIAL_BATCHES=true` is required for RLVE training to handle filtered sample counts that may not be exactly divisible by `n_samples_per_prompt × dp_size`.
 
 The entrypoint automatically:
 1. Creates required directories (`/data/models`, `/data/checkpoints`, etc.)
@@ -386,7 +391,6 @@ TINKER_API_KEY=slime-dev-key python -m tinker_cookbook.recipes.rlve.train \
     model_name=Qwen/Qwen2.5-0.5B-Instruct \
     base_url=http://localhost:8000 \
     environment_list="Division,EuclidGame,Multiplication,Sorting" \
-    answer_marker_type="<answer></answer>" \
     groups_per_batch=4 \
     group_size=4 \
     max_tokens=2048 \
