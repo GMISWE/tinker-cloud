@@ -16,7 +16,9 @@ FROM ${BASE_IMAGE}
 
 # ======================================== Arguments =============================================
 ARG PATCH_VERSION=latest
-ARG TINKER_GMI_COMMIT=9ba155a
+ARG TINKER_GMI_COMMIT=2d8e9d5
+ARG MILES_COMMIT=22f2527
+ARG TINKER_COOKBOOK_COMMIT=9934ede
 
 LABEL maintainer="OpenTinker Team"
 LABEL description="All-in-One Tinker API + Miles RL Training"
@@ -57,15 +59,57 @@ COPY docker/patch/${PATCH_VERSION}/tinker_gmi.patch /workspace/tinker_gmi/
 RUN cd /workspace/tinker_gmi && \
     git apply tinker_gmi.patch && \
     if grep -R -n '^<<<<<<< ' .; then \
-      echo "Patch failed to apply cleanly. Please resolve conflicts." && \
+      echo "tinker_gmi patch failed to apply cleanly." && \
       exit 1; \
     fi && \
     rm tinker_gmi.patch && \
     pip install -e .
 
+# ====================================== Megatron Patches ============================================
+# NOTE: Base image (gmicloudai/tinkercloud:dev) already has Megatron patches applied:
+#   - 43a60cf27: Fix BytesIO deserialization in checkpoint loading
+#   - 339779dc1: [TMP] Miles patch for Megatron-LM core_v0.14.0
+# These enable: LoRA support, partial checkpoint loading, gated attention, MTP+CP
+# No additional patching needed.
+
+# ====================================== Miles RLVE ============================================
+# Clone Miles from upstream and apply RLVE patches
+# Note: Base image may have /root/miles, remove it first
+RUN rm -rf /root/miles && \
+    git clone https://github.com/radixark/miles.git /root/miles && \
+    cd /root/miles && \
+    git checkout ${MILES_COMMIT}
+
+COPY docker/patch/${PATCH_VERSION}/miles_rlve.patch /root/miles/
+RUN cd /root/miles && \
+    git apply miles_rlve.patch && \
+    if grep -R -n '^<<<<<<< ' .; then \
+      echo "Miles patch failed to apply cleanly." && \
+      exit 1; \
+    fi && \
+    rm miles_rlve.patch && \
+    pip install -e . --no-deps
+
+# ====================================== tinker-cookbook RLVE ============================================
+# Clone tinker-cookbook from upstream and apply RLVE patches
+RUN git clone https://github.com/thinking-machines-lab/tinker-cookbook.git /workspace/tinker-cookbook && \
+    cd /workspace/tinker-cookbook && \
+    git checkout ${TINKER_COOKBOOK_COMMIT}
+
+COPY docker/patch/${PATCH_VERSION}/tinker_cookbook_rlve.patch /workspace/tinker-cookbook/
+RUN cd /workspace/tinker-cookbook && \
+    git apply tinker_cookbook_rlve.patch && \
+    if grep -R -n '^<<<<<<< ' .; then \
+      echo "tinker-cookbook patch failed to apply cleanly." && \
+      exit 1; \
+    fi && \
+    rm tinker_cookbook_rlve.patch && \
+    pip install -e .
+
 # Environment - Training API
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONPATH="/app:/root/miles:/root/Megatron-LM" \
+    PYTHONPATH="/app:/root/miles:/root/Megatron-LM:/root/miles/examples/RLVE:/workspace/tinker-cookbook" \
+    TOKENIZERS_PARALLELISM="false" \
     TRAINING_HOST="0.0.0.0" \
     TRAINING_PORT="8000" \
     TINKER_API_KEY="slime-dev-key" \
