@@ -96,7 +96,7 @@ ray status
 
 ## 4. Start tinkercloud Server
 
-### Option A: Start Server
+### a. Start Server
 
 ```bash
 # Kill any existing server
@@ -116,7 +116,7 @@ ALLOW_PARTIAL_BATCHES=true \
 sleep 5
 ```
 
-### Verify Server Health
+### b. Verify Server Health
 
 ```bash
 curl -s http://localhost:8000/health -H "X-API-Key: slime-dev-key" | python3 -m json.tool
@@ -177,7 +177,7 @@ asyncio.run(test_training())
 
 ## 6. RLVE Training Setup
 
-RLVE (Reinforcement Learning with Verifiable Environments) uses procedurally generated problems for training.
+RLVE (Reinforcement Learning with Verifiable Environments) uses procedurally generated reasoning problems for training.
 
 ### Available Models
 
