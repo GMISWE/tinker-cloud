@@ -457,7 +457,10 @@ class SlimeArgumentBuilder:
         args.tokenizer_type = "HuggingFaceTokenizer"
         args.model_name = "qwen2.5"
 
-        # Dynamic batch size - disabled for simplicity to avoid reordering complexity
+        # Dynamic batch size - DISABLED for GRPO compatibility
+        # GRPO computes advantages assuming contiguous groups of n_samples_per_prompt.
+        # Dynamic batching reorders samples by token length, breaking GRPO group alignment.
+        # TODO: Implement proper advantage reordering to enable dynamic batching with GRPO
         args.use_dynamic_batch_size = False
         args.max_tokens_per_gpu = 4096
 

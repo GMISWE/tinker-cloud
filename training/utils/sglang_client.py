@@ -39,7 +39,8 @@ class SGLangClient:
         input_ids: List[int],
         sampling_params: Optional[Dict[str, Any]] = None,
         prompt_logprobs: bool = False,
-        image_data: Optional[List[str]] = None
+        image_data: Optional[List[str]] = None,
+        prepend_zero_for_slice: bool = False
     ) -> Dict[str, Any]:
         """
         Generate text completion from SGLang.
@@ -52,6 +53,9 @@ class SGLangClient:
                 - max_tokens: int (default 256)
             prompt_logprobs: Whether to return prompt log probabilities
             image_data: Optional list of base64-encoded images or URLs for VLM models
+            prepend_zero_for_slice: If True, prepend 0.0 to prompt_logprobs for
+                DPO training where logprobs[1:] is used. Default False for
+                RL/compute_logprobs use cases.
 
         Returns:
             Dict with:
@@ -144,9 +148,13 @@ class SGLangClient:
                 # when train_dpo.py creates tensors from the logprobs
                 sanitized_logprobs = [0.0 if lp is None else lp for lp in normalized_logprobs]
 
-                # Prepend 0.0 for [1:] slice compensation in train_dpo.py
-                result["prompt_logprobs"] = [0.0] + sanitized_logprobs
-                logger.debug(f"Sanitized {len(normalized_logprobs)} logprobs, prepended 0.0 for DPO [1:] slice compensation")
+                # Conditionally prepend 0.0 for DPO [1:] slice compensation
+                if prepend_zero_for_slice:
+                    result["prompt_logprobs"] = [0.0] + sanitized_logprobs
+                    logger.debug(f"Prepended 0.0 for DPO slice compensation")
+                else:
+                    result["prompt_logprobs"] = sanitized_logprobs
+                logger.debug(f"Sanitized {len(sanitized_logprobs)} prompt logprobs")
 
             logger.debug(f"Generated {len(output_tokens)} tokens from SGLang")
             return result
@@ -186,7 +194,8 @@ class SGLangClient:
         input_ids_list: List[List[int]],
         sampling_params: Optional[Dict[str, Any]] = None,
         prompt_logprobs: bool = False,
-        image_data_list: Optional[List[Optional[List[str]]]] = None
+        image_data_list: Optional[List[Optional[List[str]]]] = None,
+        prepend_zero_for_slice: bool = False
     ) -> List[Dict[str, Any]]:
         """
         Generate multiple completions (one per input).
@@ -206,6 +215,8 @@ class SGLangClient:
             image_data = None
             if image_data_list and i < len(image_data_list):
                 image_data = image_data_list[i]
-            result = await self.generate(input_ids, sampling_params, prompt_logprobs, image_data)
+            result = await self.generate(
+                input_ids, sampling_params, prompt_logprobs, image_data, prepend_zero_for_slice
+            )
             results.append(result)
         return results

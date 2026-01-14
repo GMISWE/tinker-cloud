@@ -422,14 +422,6 @@ class TinkerDataConverter:
                 loss_masks_list.append(loss_mask)
                 response_lengths_list.append(response_len)
 
-                # DEBUG: Print per-sample lengths to diagnose mismatch
-                # print(f"[CONVERTER DEBUG] Sample {idx}: response_len={response_len}, "
-                #       f"advantages_len={len(advantages_list[-1])}, "
-                #       f"logprobs_len={len(log_probs_list[-1])}, "
-                #       f"loss_mask_len={len(loss_mask)}, "
-                #       f"token_len={len(tokens)}, "
-                #       f"needs_causal_trim={needs_causal_trim}", flush=True)
-
             else:
                 # SFT mode: Extract target and weights
                 target = cls._get_field(loss_fn_inputs, "target_tokens")

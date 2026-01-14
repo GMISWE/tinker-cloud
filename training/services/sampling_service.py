@@ -31,7 +31,8 @@ class SamplingService:
         sampling_params: Optional[Dict[str, Any]],
         prompt_logprobs: bool,
         training_clients: Dict[str, Dict[str, Any]],
-        image_data: Optional[List[str]] = None
+        image_data: Optional[List[str]] = None,
+        prepend_zero_for_slice: bool = False
     ) -> Dict[str, Any]:
         """
         Async sampling via SGLang.
@@ -80,7 +81,8 @@ class SamplingService:
                 input_ids=prompt_tokens,
                 sampling_params=sampling_params or {},
                 prompt_logprobs=prompt_logprobs,
-                image_data=image_data
+                image_data=image_data,
+                prepend_zero_for_slice=prepend_zero_for_slice
             )
 
             sequences.append({
