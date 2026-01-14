@@ -15,8 +15,9 @@ Since the software dependencies are complex when tinker/miles/tinkercloud are co
 docker pull gmicloudai/tinkercloud:dev
 
 # Start the container with GPU access
-docker run --rm --gpus all --ipc=host --shm-size=16g \
+docker run -d --gpus all --ipc=host --shm-size=16g \
   --ulimit memlock=-1 --ulimit stack=67108864 \
+  -e ALLOW_PARTIAL_BATCHES=true \
   -v /data:/data \
   -it gmicloudai/tinkercloud:dev /bin/bash
 ```
