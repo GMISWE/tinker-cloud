@@ -16,9 +16,9 @@ FROM ${BASE_IMAGE}
 
 # ======================================== Arguments =============================================
 ARG PATCH_VERSION=latest
-ARG TINKER_GMI_COMMIT=2d8e9d5
+ARG TINKER_GMI_COMMIT=5ad4282
 ARG MILES_COMMIT=22f2527
-ARG TINKER_COOKBOOK_COMMIT=9934ede
+ARG TINKER_COOKBOOK_COMMIT=989f849
 
 LABEL maintainer="OpenTinker Team"
 LABEL description="All-in-One Tinker API + Miles RL Training"

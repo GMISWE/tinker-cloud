@@ -1,0 +1,93 @@
+# OpenTinker-Miles Development Image
+#
+# This image copies local code directly instead of cloning + patching.
+# Use this for rapid development iteration.
+#
+# Usage:
+#   cd /root/.work/gavin/tinkercloud
+#   docker build -t gmicloudai/tinkercloud:dev-local -f docker/Dockerfile.dev \
+#     --build-arg MILES_PATH=../miles \
+#     --build-arg TINKER_GMI_PATH=../tinker_gmi \
+#     --build-arg TINKER_COOKBOOK_PATH=../tinker-cookbook \
+#     .
+#
+# Or use the default paths (assumes standard layout):
+#   docker build -t gmicloudai/tinkercloud:dev-local -f docker/Dockerfile.dev .
+
+ARG BASE_IMAGE=gmicloudai/tinkercloud:dev
+FROM ${BASE_IMAGE}
+
+LABEL maintainer="OpenTinker Team"
+LABEL description="Development build with local code"
+LABEL version="dev"
+
+# ======================================== Install Dependencies =============================================
+WORKDIR /app
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install chz termcolor
+
+# ======================================== Copy tinkercloud API =============================================
+COPY training ./training
+
+# Copy startup scripts
+COPY docker/entrypoint.sh /entrypoint.sh
+COPY docker/prepare_data.sh /prepare_data.sh
+COPY docker/convert_model.sh /convert_model.sh
+RUN chmod +x /entrypoint.sh /prepare_data.sh /convert_model.sh
+
+# Create data directories
+RUN mkdir -p /data/models /data/datasets /data/checkpoints /data/trajectories /data/metadata
+
+# ======================================== Copy Local Code (No Patches) =============================================
+
+# Remove existing miles from base image (if any)
+RUN rm -rf /root/miles
+
+# Copy miles from local (default: ../miles relative to build context)
+# The miles directory should be at the same level as tinkercloud
+COPY miles /root/miles
+RUN cd /root/miles && pip install -e . --no-deps
+
+# Remove existing tinker_gmi (if any)
+RUN rm -rf /workspace/tinker_gmi
+
+# Copy tinker_gmi from local
+COPY tinker_gmi /workspace/tinker_gmi
+RUN cd /workspace/tinker_gmi && pip install -e .
+
+# Remove existing tinker-cookbook (if any)
+RUN rm -rf /workspace/tinker-cookbook
+
+# Copy tinker-cookbook from local
+COPY tinker-cookbook /workspace/tinker-cookbook
+RUN cd /workspace/tinker-cookbook && pip install -e .
+
+# ======================================== Environment =============================================
+# Training API
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH="/app:/root/miles:/root/Megatron-LM:/root/miles/examples/RLVE:/workspace/tinker-cookbook" \
+    TOKENIZERS_PARALLELISM="false" \
+    TRAINING_HOST="0.0.0.0" \
+    TRAINING_PORT="8000" \
+    TINKER_API_KEY="slime-dev-key" \
+    LOG_LEVEL="INFO"
+
+# GPU/NCCL
+ENV CUDA_DEVICE_MAX_CONNECTIONS="1" \
+    NCCL_NVLS_ENABLE="0" \
+    NCCL_DEBUG="INFO" \
+    NCCL_IB_DISABLE="0"
+
+# Ray
+ENV NUM_GPUS="4"
+
+# HuggingFace
+ENV HF_HOME="/data/models" \
+    HF_HUB_OFFLINE="0" \
+    TRANSFORMERS_OFFLINE="0"
+
+# Ports: 8000 (API), 8265 (Ray dashboard), 10001 (Ray client), 30000 (SGLang)
+EXPOSE 8000 8265 10001 30000
+
+ENTRYPOINT ["/entrypoint.sh"]
