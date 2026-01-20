@@ -345,6 +345,8 @@ class SlimeArgumentBuilder:
         )
 
         # Optimizer settings
+        # Note: Initial LR is set here, but can be overridden at each optim_step
+        # via adam_params.learning_rate (Tinker API pattern)
         args.optimizer = "adam"
         args.lr = 1e-6
         args.adam_beta1 = 0.9
