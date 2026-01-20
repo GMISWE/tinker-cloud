@@ -439,9 +439,20 @@ class ForwardBackwardRequest(BaseModel):
         return v
 
 
+class AdamParams(BaseModel):
+    """Adam optimizer parameters."""
+    learning_rate: float = Field(default=0.0001, description="Learning rate")
+    beta1: float = Field(default=0.9, description="Beta1 coefficient")
+    beta2: float = Field(default=0.95, description="Beta2 coefficient")
+    eps: float = Field(default=1e-12, description="Epsilon for numerical stability")
+    weight_decay: float = Field(default=0.0, description="Weight decay")
+    grad_clip_norm: float = Field(default=0.0, description="Gradient clip norm (0.0 = no clipping)")
+
+
 class OptimStepRequest(BaseModel):
     """Request to perform optimizer step (new format)."""
     model_id: str = Field(..., description="Model ID")
+    adam_params: Optional[AdamParams] = Field(default=None, description="Adam optimizer parameters")
     step_num: Optional[int] = Field(default=None, ge=0, description="Step number for logging")
 
 

@@ -277,7 +277,8 @@ class TrainingService:
         self,
         model_id: str,
         train_group: Any,
-        client_info: Dict[str, Any]
+        client_info: Dict[str, Any],
+        adam_params: Any = None
     ) -> Dict[str, Any]:
         """
         Apply optimizer step to update model weights.
@@ -286,6 +287,7 @@ class TrainingService:
             model_id: Model identifier (for logging)
             train_group: Slime RayTrainGroup instance
             client_info: Client metadata (contains optimizer, rollout_manager)
+            adam_params: Optional AdamParams with learning_rate to set before stepping
 
         Returns:
             Dict with success status, grad_norm, and learning_rates
@@ -294,6 +296,12 @@ class TrainingService:
             Exception: If optimizer step fails
         """
         logger.info(f"Optimizer step for {model_id}")
+
+        # Set learning rate if provided via adam_params (Tinker API pattern)
+        if adam_params is not None and hasattr(adam_params, 'learning_rate'):
+            learning_rate = adam_params.learning_rate
+            logger.info(f"Setting learning rate to {learning_rate} for {model_id}")
+            await asyncio.to_thread(train_group.set_learning_rate, learning_rate)
 
         args = client_info.get("args")
         offload_train = args.offload_train if args else True

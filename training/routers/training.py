@@ -204,7 +204,8 @@ async def optim_step(
         return await service.apply_optimizer_step(
             model_id=request.model_id,
             train_group=train_group,
-            client_info=client_info
+            client_info=client_info,
+            adam_params=request.adam_params
         )
 
     # Create background task
