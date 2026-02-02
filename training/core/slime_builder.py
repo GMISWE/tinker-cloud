@@ -112,6 +112,7 @@ class SlimeArgumentBuilder:
         # Build minimal args for parse_args
         minimal_args = self._build_minimal_args(
             hf_model_path, model_config, tp_size, pp_size, cp_size, megatron_checkpoint_path, max_batch_size,
+            num_gpus=num_gpus,
             rlve_config=rlve_config
         )
 
@@ -143,6 +144,7 @@ class SlimeArgumentBuilder:
         cp_size: int,
         megatron_checkpoint_path: str,
         max_batch_size: int = 4096,
+        num_gpus: int = 4,
         rlve_config: Optional[Dict[str, Any]] = None
     ) -> list:
         """Build minimal CLI arguments for Slime's parse_args."""
@@ -193,9 +195,14 @@ class SlimeArgumentBuilder:
             '--eps-clip-high', os.environ.get('SLIME_EPS_CLIP_HIGH', '0.28'),
             # Entropy coefficient (0 = no entropy bonus, matches Miles native)
             '--entropy-coef', os.environ.get('SLIME_ENTROPY_COEF', '0.00'),
+            # Weight decay - must be in minimal_args so Megatron's parse_args sees it
+            # (Megatron defaults to 0.01; set to 0 for RL where weight decay fights policy updates)
+            '--weight-decay', os.environ.get('SLIME_WEIGHT_DECAY', '0.0'),
             # Note: --normalize-advantages defaults to False, which is correct
             # (tinker-cookbook already centers advantages within groups)
-            # Parallelism
+            # Parallelism — actor-num-gpus-per-node must be set here so parse_args()
+            # computes correct world_size and data_parallel_size (Miles defaults to 8)
+            '--actor-num-gpus-per-node', str(num_gpus),
             '--tensor-model-parallel-size', str(tp_size),
             '--pipeline-model-parallel-size', str(pp_size),
             '--context-parallel-size', str(cp_size),
@@ -215,12 +222,15 @@ class SlimeArgumentBuilder:
         if model_config.get('kv_channels'):
             minimal_args.extend(['--kv-channels', str(model_config['kv_channels'])])
 
-        # Add TIS/KL settings conditionally based on RLVE mode
-        if rlve_enabled:
-            # RLVE mode: TIS disabled for testing (was: minimal_args.append('--use-tis'))
-            pass
-        else:
-            # Standard mode: Use KL loss for stability
+        # KL loss configuration:
+        # - RLVE mode: no KL loss (TIS disabled for testing)
+        # - Standard mode: no KL loss by default because with_ref=False means
+        #   ref_log_probs come from SGLang sampling, creating a spurious
+        #   cross-engine KL gradient (Megatron vs SGLang numerical differences)
+        #   that dominates pg_loss ~500:1 and causes training collapse.
+        #   Enable via SLIME_USE_KL_LOSS=1 only when a real Megatron reference
+        #   model is loaded.
+        if os.environ.get('SLIME_USE_KL_LOSS', '0') == '1':
             minimal_args.extend([
                 '--use-kl-loss',
                 '--kl-loss-coef', os.environ.get('SLIME_KL_LOSS_COEF', '0.1'),
@@ -352,7 +362,10 @@ class SlimeArgumentBuilder:
         args.adam_beta1 = 0.9
         args.adam_beta2 = 0.98
         args.adam_eps = 1e-8
-        args.weight_decay = 0.1
+        wd = float(os.environ.get('SLIME_WEIGHT_DECAY', '0.0'))
+        args.weight_decay = wd
+        args.start_weight_decay = wd
+        args.end_weight_decay = wd
 
         # LR scheduler
         args.lr_decay_style = "constant"
