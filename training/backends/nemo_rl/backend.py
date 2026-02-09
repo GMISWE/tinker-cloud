@@ -22,6 +22,11 @@ from ..base import BackendError, BackendHandle, TrainingBackend
 logger = logging.getLogger(__name__)
 
 
+# Default maximum number of forward_backward() calls that can be buffered
+# before apply_optimizer_step() must be called. Prevents unbounded memory growth.
+DEFAULT_MAX_BUFFER_SIZE = 64
+
+
 @dataclass
 class NemoRLHandle(BackendHandle):
     """NeMo RL-specific runtime state."""
@@ -33,6 +38,8 @@ class NemoRLHandle(BackendHandle):
     tokenizer: Any = None            # HuggingFace tokenizer
     loss_fn: Any = None              # ClippedPGLossFn instance
     data_buffer: List = field(default_factory=list)  # R9 buffering
+    max_buffer_size: int = DEFAULT_MAX_BUFFER_SIZE  # CHK006: bound buffer growth
+    _buffer_lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # CHK018: thread safety
     hf_path: str = ""
     colocated_inference: bool = True
     rlve_config: Optional[Dict[str, Any]] = None
@@ -178,6 +185,17 @@ class NemoRLBackend(TrainingBackend):
 
         Data is converted and appended to handle.data_buffer.
         Actual training happens in apply_optimizer_step().
+
+        Deferred contract: Returns {"metrics": {}, "deferred": True,
+        "loss_fn_outputs": []}. Real metrics at optim_step time.
+
+        Thread safety: Buffer access is protected by asyncio.Lock.
+        Concurrent forward_backward calls are serialized at the buffer.
+
+        Constraints:
+        - Buffer bounded by max_buffer_size (default 64, raises on overflow)
+        - All microbatches must have identical field keys
+        - Microbatch ordering is preserved (FIFO)
         """
         h: NemoRLHandle = handle  # type: ignore[assignment]
         try:
@@ -187,20 +205,47 @@ class NemoRLBackend(TrainingBackend):
                     "Empty data list", backend="nemo_rl", operation="forward_backward",
                 )
 
-            # Convert data to NeMo RL BatchedDataDict
+            # Convert data to NeMo RL BatchedDataDict (outside lock — CPU-bound)
             batched_data = self.converter.forward_backward_to_backend(
                 data, loss_fn, h.config,
             )
 
-            # Buffer the data — training deferred to apply_optimizer_step()
-            h.data_buffer.append(batched_data)
+            # CHK018: Acquire lock for buffer access (concurrent requests)
+            async with h._buffer_lock:
+                # CHK006: Enforce maximum buffer size to prevent unbounded memory growth
+                if len(h.data_buffer) >= h.max_buffer_size:
+                    raise BackendError(
+                        f"Buffer full: {len(h.data_buffer)} microbatches buffered "
+                        f"(max_buffer_size={h.max_buffer_size}). "
+                        f"Call apply_optimizer_step() to flush the buffer.",
+                        backend="nemo_rl",
+                        operation="forward_backward",
+                    )
+
+                # CHK016: Validate field compatibility with existing buffer
+                if h.data_buffer:
+                    existing_keys = set(h.data_buffer[0].keys())
+                    new_keys = set(batched_data.keys())
+                    if existing_keys != new_keys:
+                        raise BackendError(
+                            f"Microbatch field mismatch: buffered has {sorted(existing_keys)}, "
+                            f"new batch has {sorted(new_keys)}",
+                            backend="nemo_rl",
+                            operation="forward_backward",
+                        )
+
+                # Buffer the data — training deferred to apply_optimizer_step()
+                h.data_buffer.append(batched_data)
+                buffer_len = len(h.data_buffer)
 
             logger.info(
                 "Buffered microbatch %d for model %s (%d samples)",
-                len(h.data_buffer), h.model_id, len(data),
+                buffer_len, h.model_id, len(data),
             )
 
-            # Return deferred result — no training metrics available yet
+            # Return deferred result — no training metrics available yet.
+            # CHK010: Deferred contract: empty metrics, deferred=True,
+            # empty loss_fn_outputs. Real metrics available at optim_step.
             return {
                 "metrics": {},
                 "deferred": True,
@@ -222,34 +267,58 @@ class NemoRLBackend(TrainingBackend):
         """
         Execute single policy.train() call with all buffered data.
 
-        1. Concatenate all buffered BatchedDataDicts
-        2. Optionally set learning rate
-        3. Call policy.train(all_data, loss_fn)
-        4. Sync weights to inference engine (refit)
-        5. Clear buffer
+        1. Acquire buffer lock and drain buffer (concatenate + clear)
+        2. Pad partial batch if needed (dp_size alignment)
+        3. Optionally set learning rate
+        4. Call policy.train(all_data, loss_fn)
+        5. Sync weights to inference engine (refit)
         6. Return real training metrics
+
+        Buffer-batch relationship: NeMo RL processes ALL buffered data
+        regardless of train_global_batch_size. Micro-batching is controlled
+        by train_micro_batch_size. Ensure config matches expected total.
+
+        Failure recovery: Buffer is cleared BEFORE policy.train() to
+        prevent stale data re-processing. If policy.train() fails (OOM),
+        the client must re-send all forward_backward() data.
         """
         h: NemoRLHandle = handle  # type: ignore[assignment]
         try:
-            if not h.data_buffer:
-                raise BackendError(
-                    "No buffered data to optimize — call forward_backward() first",
-                    backend="nemo_rl",
-                    operation="apply_optimizer_step",
-                )
+            # CHK018: Acquire lock to drain buffer atomically.
+            # Snapshot and clear under the lock; concatenate outside it.
+            async with h._buffer_lock:
+                if not h.data_buffer:
+                    raise BackendError(
+                        "No buffered data to optimize — call forward_backward() first",
+                        backend="nemo_rl",
+                        operation="apply_optimizer_step",
+                    )
 
-            # Concatenate all buffered microbatches and clear buffer immediately
-            # (prevents re-processing stale data if training fails)
-            all_data = await asyncio.to_thread(_concatenate_batches, h.data_buffer)
-            num_buffered = len(h.data_buffer)
-            h.data_buffer.clear()
+                # Atomic swap: take ownership of buffer, give handle a fresh one.
+                # This ensures the buffer is cleared even if concatenation fails (CHK024).
+                buffered_batches = h.data_buffer
+                h.data_buffer = []
+                num_buffered = len(buffered_batches)
+
+            # Concatenate outside the lock (CPU-bound, no contention needed)
+            all_data = await asyncio.to_thread(_concatenate_batches, buffered_batches)
+
+            # CHK027: Warn if buffered sample count doesn't match train_global_batch_size
+            # (check BEFORE padding so the warning reflects actual data volume)
+            original_size = all_data.size
+            gbs = h.config.get("policy", {}).get("train_global_batch_size", 0)
+            if gbs > 0 and original_size != gbs:
+                logger.warning(
+                    "Buffered %d samples but train_global_batch_size=%d. "
+                    "NeMo RL will process all %d samples. Verify this is intended.",
+                    original_size, gbs, original_size,
+                )
 
             # Pad partial batch if needed — policy.train() → shard_by_batch_size()
             # asserts batch_size % dp_size == 0, so a partial batch will crash.
             # Use NeMo RL's maybe_pad_last_batch to pad with sample_mask=0.
             dp_size = h.config.get("dp_size", 1)
             mbs = h.config.get("policy", {}).get("train_micro_batch_size", 1)
-            original_size = all_data.size
             all_data = await asyncio.to_thread(
                 _maybe_pad_batch, all_data, dp_size, mbs,
             )
@@ -392,6 +461,17 @@ class NemoRLBackend(TrainingBackend):
         """Tear down NeMo RL Policy and release GPU resources."""
         h: NemoRLHandle = handle  # type: ignore[assignment]
         try:
+            # CHK007: Warn and discard pending buffered data on deletion.
+            # CHK018: Acquire lock to prevent race with concurrent forward_backward.
+            async with h._buffer_lock:
+                if h.data_buffer:
+                    logger.warning(
+                        "Deleting model %s with %d buffered microbatches "
+                        "(data will be discarded without training)",
+                        h.model_id, len(h.data_buffer),
+                    )
+                    h.data_buffer.clear()
+
             if h.policy is not None:
                 await asyncio.to_thread(h.policy.shutdown)
                 logger.info("NeMo RL policy shut down for %s", h.model_id)
