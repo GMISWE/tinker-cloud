@@ -22,10 +22,13 @@ LABEL version="dev"
 LABEL backend="nemo_rl"
 
 # ======================================== Install Dependencies =============================================
+# NeMo RL base image already provides: ray 2.49.2, fastapi, uvicorn, pydantic,
+# tiktoken, torch, transformers, prometheus-client. Only install extras.
 WORKDIR /app
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt && \
-    pip install chz termcolor
+RUN pip install --no-cache-dir \
+    python-multipart openai \
+    opentelemetry-distro opentelemetry-exporter-otlp \
+    chz termcolor
 
 # ======================================== Copy tinkercloud API =============================================
 COPY training ./training

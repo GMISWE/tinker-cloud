@@ -93,6 +93,7 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
             "max_total_sequence_length": max_seq_len,
             "make_sequence_length_divisible_by": 1,
             "max_grad_norm": 1.0,
+            "offload_optimizer_for_logprob": False,
             # Use DTensor V2 backend (recommended by NeMo RL)
             "dtensor_cfg": {
                 "enabled": True,
@@ -112,6 +113,36 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
             },
             "sequence_packing": {
                 "enabled": False,
+            },
+            # Generation config (colocated by default)
+            "generation": {
+                "backend": "vllm",
+                "max_new_tokens": max_seq_len,
+                "temperature": 1.0,
+                "top_p": 1.0,
+                "top_k": None,
+                "stop_token_ids": None,
+                "stop_strings": None,
+                "vllm_cfg": {
+                    "async_engine": False,
+                    "precision": "bfloat16",
+                    "kv_cache_dtype": "auto",
+                    "tensor_parallel_size": tp_size,
+                    "pipeline_parallel_size": pp_size,
+                    "expert_parallel_size": 1,
+                    "gpu_memory_utilization": 0.6,
+                    "max_model_len": max_seq_len,
+                    "enforce_eager": False,
+                    "use_deep_gemm": False,
+                    "num_last_layers_in_bf16": 0,
+                    "num_first_layers_in_bf16": 0,
+                    "enable_vllm_metrics_logger": False,
+                    "vllm_metrics_logger_interval": 0.5,
+                },
+                "vllm_kwargs": {},
+                "colocated": {
+                    "enabled": True,
+                },
             },
             # Optimizer (AdamW defaults matching Miles)
             "optimizer": {
@@ -174,11 +205,20 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
             "max_colocated_worker_groups": 2,  # policy + generation
         }
 
+        # Checkpointing config (passed to Policy.save_checkpoint)
+        checkpointing_config = {
+            "model_save_format": "safetensors",
+            "save_consolidated": False,
+        }
+        if checkpoint_config:
+            checkpointing_config.update(checkpoint_config)
+
         # Apply overrides
         config_dict = {
             "policy": policy_config,
             "loss_fn": loss_fn_config,
             "cluster": cluster_config,
+            "checkpointing": checkpointing_config,
             "dp_size": dp_size,
             "debug_train_only": debug_train_only,
             "wandb_config": wandb_config,
