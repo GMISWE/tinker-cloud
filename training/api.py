@@ -177,14 +177,16 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
         application.state.backend = backend
         application.state.backend_type = backend_type
 
-        # Initialize service singletons
+        # Initialize service singletons (services that depend on backend get it injected)
         from .services.model_service import ModelService
+        from .services.training_service import TrainingService
         from .services.checkpoint_service import CheckpointService
         from .services.sampling_service import SamplingService
         from .services.session_service import SessionService
 
-        application.state.model_service = ModelService()
-        application.state.checkpoint_service = CheckpointService()
+        application.state.model_service = ModelService(backend=backend)
+        application.state.training_service = TrainingService(backend=backend)
+        application.state.checkpoint_service = CheckpointService(backend=backend)
         application.state.sampling_service = SamplingService()
         # Initialize SessionService with storage for persistence
         application.state.session_service = SessionService(storage=session_storage)
