@@ -172,6 +172,16 @@ class TrainingBackend(ABC):
         ...
 
 
+class UnsupportedFeatureError(BackendError):
+    """Raised when a backend-specific feature is requested on the wrong backend."""
+
+    def __init__(self, feature: str, backend: str, suggestion: str = ""):
+        msg = f"Feature {feature!r} is not supported on the {backend} backend"
+        if suggestion:
+            msg += f". {suggestion}"
+        super().__init__(msg, backend=backend, operation="feature_check")
+
+
 class ArgumentBuilder(ABC):
     """
     Translates HuggingFace model config + user settings into

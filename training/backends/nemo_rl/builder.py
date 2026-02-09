@@ -46,6 +46,22 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
 
         hf_path = base_model
 
+        # Warn about Miles-only RLVE server-side features
+        if rlve_config and rlve_config.get("enabled", False):
+            miles_only_keys = [
+                "custom_prompt_preprocessor", "answer_marker_type",
+                "difficulty_sliding_window_size", "min_metric_to_increase_difficulty",
+                "min_prompts_before_difficulty_check", "over_sampling_batch_size",
+                "use_dynamic_sampling_filter", "partial_rollout", "balance_data",
+            ]
+            unsupported = [k for k in miles_only_keys if k in rlve_config]
+            if unsupported:
+                logger.warning(
+                    "RLVE server-side args ignored on NeMo RL backend (Miles-only): %s. "
+                    "RLVE in Tinker mode is client-driven — these settings have no effect.",
+                    unsupported,
+                )
+
         # Parallelism config
         tp_size = 1
         pp_size = 1
@@ -163,6 +179,7 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
             "policy": policy_config,
             "loss_fn": loss_fn_config,
             "cluster": cluster_config,
+            "dp_size": dp_size,
             "debug_train_only": debug_train_only,
             "wandb_config": wandb_config,
             "rlve_config": rlve_config,
