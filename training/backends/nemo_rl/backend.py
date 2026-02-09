@@ -244,6 +244,22 @@ class NemoRLBackend(TrainingBackend):
             num_buffered = len(h.data_buffer)
             h.data_buffer.clear()
 
+            # Pad partial batch if needed — policy.train() → shard_by_batch_size()
+            # asserts batch_size % dp_size == 0, so a partial batch will crash.
+            # Use NeMo RL's maybe_pad_last_batch to pad with sample_mask=0.
+            dp_size = h.config.get("dp_size", 1)
+            mbs = h.config.get("policy", {}).get("train_micro_batch_size", 1)
+            original_size = all_data.size
+            all_data = await asyncio.to_thread(
+                _maybe_pad_batch, all_data, dp_size, mbs,
+            )
+            if all_data.size != original_size:
+                logger.info(
+                    "Padded partial batch from %d to %d samples "
+                    "(dp_size=%d, mbs=%d, padding samples have sample_mask=0)",
+                    original_size, all_data.size, dp_size, mbs,
+                )
+
             logger.info(
                 "Executing policy.train() with %d buffered microbatches for %s",
                 num_buffered, h.model_id,
@@ -513,3 +529,45 @@ def _set_learning_rate(policy, learning_rate: float):
             f"Failed to set learning rate to {learning_rate}",
             backend="nemo_rl", operation="set_learning_rate", original_error=e,
         ) from e
+
+
+def _maybe_pad_batch(batch, dp_size: int, mbs: int):
+    """Pad batch to next multiple of mbs * dp_size.
+
+    NeMo RL's shard_by_batch_size() asserts batch_size % dp_size == 0.
+    Padding entries get sample_mask=0 so they don't affect loss computation.
+
+    Logic duplicated from nemo_rl.algorithms.utils.maybe_pad_last_batch
+    to avoid coupling TinkerCloud to NeMo RL internals.
+    """
+    import math
+    import torch
+
+    min_padding = (math.ceil(batch.size / (mbs * dp_size)) * mbs * dp_size) - batch.size
+    if min_padding <= 0:
+        return batch
+
+    batch["input_ids"] = torch.cat([
+        batch["input_ids"],
+        batch["input_ids"][-1].unsqueeze(0).repeat(min_padding, 1),
+    ])
+    batch["input_lengths"] = torch.cat([
+        batch["input_lengths"],
+        batch["input_lengths"][-1].unsqueeze(0).repeat(min_padding),
+    ])
+    if "token_mask" in batch:
+        batch["token_mask"] = torch.cat([
+            batch["token_mask"],
+            batch["token_mask"][-1].unsqueeze(0).repeat(min_padding, 1),
+        ])
+    batch["sample_mask"] = torch.cat([
+        batch["sample_mask"],
+        torch.zeros_like(batch["sample_mask"][-1]).unsqueeze(0).repeat(min_padding),
+    ])
+    if "reference_policy_logprobs" in batch:
+        batch["reference_policy_logprobs"] = torch.cat([
+            batch["reference_policy_logprobs"],
+            batch["reference_policy_logprobs"][-1].unsqueeze(0).repeat(min_padding, 1),
+        ])
+
+    return batch
