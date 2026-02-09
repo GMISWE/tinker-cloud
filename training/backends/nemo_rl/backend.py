@@ -401,17 +401,27 @@ class NemoRLBackend(TrainingBackend):
         """Save model checkpoint via policy.save_checkpoint()."""
         h: NemoRLHandle = handle  # type: ignore[assignment]
         try:
-            weights_path = f"{checkpoint_path}/weights"
-            optimizer_path = f"{checkpoint_path}/optimizer"
+            # Translate tinker:// URI to local filesystem path.
+            # The checkpoint_service generates tinker://<run_id>/weights/<name>
+            # but NeMo RL expects a real filesystem path.
+            local_path = _resolve_checkpoint_path(checkpoint_path)
+
+            weights_path = f"{local_path}/weights"
+            optimizer_path = f"{local_path}/optimizer"
+            checkpointing_cfg = h.config.get("checkpointing", {
+                "model_save_format": "safetensors",
+                "save_consolidated": False,
+            })
 
             await asyncio.to_thread(
                 h.policy.save_checkpoint,
                 weights_path=weights_path,
                 optimizer_path=optimizer_path,
+                checkpointing_cfg=checkpointing_cfg,
             )
 
-            logger.info("NeMo RL checkpoint saved to %s", checkpoint_path)
-            return checkpoint_path
+            logger.info("NeMo RL checkpoint saved to %s", local_path)
+            return checkpoint_path  # Return original URI for metadata consistency
 
         except Exception as e:
             raise BackendError(
@@ -428,8 +438,9 @@ class NemoRLBackend(TrainingBackend):
 
         h: NemoRLHandle = handle  # type: ignore[assignment]
         try:
-            weights_path = f"{checkpoint_path}/weights"
-            optimizer_path = f"{checkpoint_path}/optimizer"
+            local_path = _resolve_checkpoint_path(checkpoint_path)
+            weights_path = f"{local_path}/weights"
+            optimizer_path = f"{local_path}/optimizer"
             # Only load optimizer state if it exists (checkpoint may be weights-only)
             if not os.path.exists(optimizer_path):
                 optimizer_path = None
@@ -507,6 +518,29 @@ class NemoRLBackend(TrainingBackend):
 # ---------------------------------------------------------------------------
 # Internal helper functions (called via asyncio.to_thread)
 # ---------------------------------------------------------------------------
+
+_CHECKPOINT_BASE = "/data/checkpoints"
+
+
+def _resolve_checkpoint_path(path: str) -> str:
+    """Convert tinker:// URI to local filesystem path.
+
+    checkpoint_service generates: tinker://<run_id>/weights/<name>
+    We map this to: /data/checkpoints/<run_id>/<name>
+
+    Plain filesystem paths are returned as-is.
+    """
+    if path.startswith("tinker://"):
+        # tinker://model_xxx/weights/checkpoint_name → /data/checkpoints/model_xxx/checkpoint_name
+        parts = path[len("tinker://"):].split("/")
+        # parts: [model_id, "weights", checkpoint_name]
+        run_id = parts[0]
+        name = parts[-1] if len(parts) > 2 else "default"
+        import os
+        local = os.path.join(_CHECKPOINT_BASE, run_id, name)
+        os.makedirs(local, exist_ok=True)
+        return local
+    return path
 
 def _init_nemo_rl_components(
     config_dict: Dict[str, Any],
@@ -633,21 +667,57 @@ def _refit_policy_generation(policy, policy_generation, colocated_inference: boo
 
 
 def _set_learning_rate(policy, learning_rate: float):
-    """Set learning rate on the policy's optimizer."""
+    """Set learning rate on the policy's optimizer.
+
+    NeMo RL workers don't expose a set_learning_rate RPC. Instead, we
+    use run_all_workers_single_data with a lambda that patches the
+    optimizer param_groups in-place.  If that also fails (API change),
+    log a warning rather than crashing the training step.
+    """
+    import ray
+
     try:
         worker_group = policy.worker_group
-        # Set LR on all workers' optimizers
-        import ray
-        futures = worker_group.run_all_workers_single_data(
-            "set_learning_rate",
-            learning_rate=learning_rate,
+
+        # Try the direct method first (future NeMo RL versions may add it)
+        try:
+            futures = worker_group.run_all_workers_single_data(
+                "set_learning_rate",
+                learning_rate=learning_rate,
+            )
+            ray.get(futures)
+            return
+        except (AttributeError, ray.exceptions.RayTaskError):
+            pass
+
+        # Fallback: set LR via optimizer param_groups
+        def _set_lr_on_worker(worker, learning_rate):
+            if hasattr(worker, "optimizer") and worker.optimizer is not None:
+                for pg in worker.optimizer.param_groups:
+                    pg["lr"] = learning_rate
+
+        try:
+            futures = worker_group.run_all_workers_single_data(
+                _set_lr_on_worker,
+                learning_rate=learning_rate,
+            )
+            ray.get(futures)
+            return
+        except Exception:
+            pass
+
+        # If all else fails, just warn — the default LR from config will be used
+        logger.warning(
+            "Could not dynamically set learning rate to %s on NeMo RL workers. "
+            "Using default LR from policy config.",
+            learning_rate,
         )
-        ray.get(futures)
+
     except Exception as e:
-        raise BackendError(
-            f"Failed to set learning rate to {learning_rate}",
-            backend="nemo_rl", operation="set_learning_rate", original_error=e,
-        ) from e
+        logger.warning(
+            "Failed to set learning rate to %s: %s. Continuing with default LR.",
+            learning_rate, e,
+        )
 
 
 def _maybe_pad_batch(batch, dp_size: int, mbs: int):

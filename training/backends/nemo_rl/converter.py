@@ -193,8 +193,8 @@ class NemoRLDataConverter(DataConverter):
                 "loss_fn_outputs": [],
             }
 
-        loss = result.get("loss", 0.0)
-        grad_norm = result.get("grad_norm", 0.0)
+        loss = _to_python_scalar(result.get("loss", 0.0))
+        grad_norm = _to_python_scalar(result.get("grad_norm", 0.0))
 
         # Extract per-microbatch metrics
         all_mb_metrics = result.get("all_mb_metrics", {})
@@ -215,9 +215,11 @@ class NemoRLDataConverter(DataConverter):
             if nemo_key in all_mb_metrics:
                 vals = all_mb_metrics[nemo_key]
                 if isinstance(vals, list) and vals:
-                    metrics[tinker_key] = sum(vals) / len(vals)
+                    metrics[tinker_key] = _to_python_scalar(
+                        sum(_to_python_scalar(v) for v in vals) / len(vals)
+                    )
                 else:
-                    metrics[tinker_key] = vals
+                    metrics[tinker_key] = _to_python_scalar(vals)
 
         return {
             "loss": loss,
@@ -238,12 +240,72 @@ class NemoRLDataConverter(DataConverter):
         })
 
 
+def _to_python_scalar(val):
+    """Convert a torch.Tensor or numpy scalar to a Python float/int."""
+    if isinstance(val, (int, float)):
+        return val
+    if hasattr(val, "item"):  # torch.Tensor or numpy scalar
+        return val.item()
+    return float(val)
+
+
 # ---------------------------------------------------------------------------
 # Helper functions for extracting fields from Tinker Datum dicts / objects
+#
+# Datum can arrive in two formats:
+#   1. Pydantic ForwardBackwardDatum: datum.model_input.tokens,
+#      datum.loss_fn_inputs.logprobs.data (TensorData objects)
+#   2. Flat dict: datum["tokens"], datum["log_probs"] (raw lists)
 # ---------------------------------------------------------------------------
 
+def _get_field(obj, field: str):
+    """Get a field from a dict or object."""
+    if isinstance(obj, dict):
+        return obj.get(field)
+    return getattr(obj, field, None)
+
+
+def _extract_tensor_data(tensor_obj) -> list:
+    """Extract raw data from a TensorData object or passthrough for raw lists."""
+    if tensor_obj is None:
+        return None
+    # TensorData has a .data field containing the raw list
+    data = _get_field(tensor_obj, "data")
+    if data is not None:
+        return data
+    # Already a raw list/tensor
+    return tensor_obj
+
+
 def _extract_tokens(datum) -> torch.Tensor:
-    """Extract token IDs from datum (dict or object)."""
+    """Extract token IDs from datum (Pydantic ForwardBackwardDatum, dict, or flat object)."""
+    # Try nested model_input first (Pydantic ForwardBackwardDatum format)
+    model_input = _get_field(datum, "model_input")
+    if model_input is not None:
+        # Try chunks format: model_input.chunks[0].tokens
+        chunks = _get_field(model_input, "chunks")
+        if chunks:
+            tokens = _get_field(chunks[0], "tokens")
+            if tokens is not None:
+                if isinstance(tokens, torch.Tensor):
+                    return tokens.detach().cpu().long()
+                return torch.tensor(tokens, dtype=torch.long)
+
+        # Try direct tokens: model_input.tokens
+        tokens = _get_field(model_input, "tokens")
+        if tokens is not None:
+            if isinstance(tokens, torch.Tensor):
+                return tokens.detach().cpu().long()
+            return torch.tensor(tokens, dtype=torch.long)
+
+        # Try input_ids: model_input.input_ids
+        input_ids = _get_field(model_input, "input_ids")
+        if input_ids is not None:
+            if isinstance(input_ids, torch.Tensor):
+                return input_ids.detach().cpu().long()
+            return torch.tensor(input_ids, dtype=torch.long)
+
+    # Fall back to flat format: datum.tokens or datum.input_ids
     if isinstance(datum, dict):
         tokens = datum.get("tokens", datum.get("input_ids", []))
     else:
@@ -254,12 +316,28 @@ def _extract_tokens(datum) -> torch.Tensor:
     return torch.tensor(tokens, dtype=torch.long)
 
 
+def _get_loss_fn_inputs(datum):
+    """Get the loss_fn_inputs container from datum."""
+    return _get_field(datum, "loss_fn_inputs")
+
+
 def _extract_loss_masks(datum, seq_len: int) -> torch.Tensor:
     """Extract loss masks from datum, padded to seq_len."""
-    if isinstance(datum, dict):
-        masks = datum.get("loss_masks", datum.get("loss_mask", None))
-    else:
-        masks = getattr(datum, "loss_masks", getattr(datum, "loss_mask", None))
+    masks = None
+
+    # Try nested loss_fn_inputs.mask (Pydantic format — TensorData)
+    loss_fn_inputs = _get_loss_fn_inputs(datum)
+    if loss_fn_inputs is not None:
+        mask_obj = _get_field(loss_fn_inputs, "mask")
+        if mask_obj is not None:
+            masks = _extract_tensor_data(mask_obj)
+
+    # Fall back to flat format: datum.loss_masks or datum.loss_mask
+    if masks is None:
+        if isinstance(datum, dict):
+            masks = datum.get("loss_masks", datum.get("loss_mask", None))
+        else:
+            masks = getattr(datum, "loss_masks", getattr(datum, "loss_mask", None))
 
     if masks is None:
         return torch.ones(seq_len, dtype=torch.float32)
@@ -278,12 +356,39 @@ def _extract_loss_masks(datum, seq_len: int) -> torch.Tensor:
     return masks[:seq_len]
 
 
+# Mapping from NeMo RL converter field names to Pydantic loss_fn_inputs field names
+_FIELD_TO_PYDANTIC = {
+    "advantages": "advantages",
+    "log_probs": "logprobs",          # Tinker flat "log_probs" → Pydantic "logprobs"
+    "ref_log_probs": "ref_logprobs",  # Tinker flat "ref_log_probs" → Pydantic "ref_logprobs"
+    # "rollout_log_probs" has no Pydantic equivalent — generation logprobs are
+    # computed by the sampling service, not passed in forward_backward requests.
+}
+
+
 def _extract_field(datum, field_name: str, expected_len: int):
-    """Extract a response-length tensor field from datum."""
-    if isinstance(datum, dict):
-        value = datum.get(field_name, None)
-    else:
-        value = getattr(datum, field_name, None)
+    """Extract a response-length tensor field from datum.
+
+    Handles both:
+      - Pydantic ForwardBackwardDatum: datum.loss_fn_inputs.<pydantic_field>.data
+      - Flat dict: datum[field_name] (raw list or tensor)
+    """
+    value = None
+
+    # Try nested loss_fn_inputs (Pydantic ForwardBackwardDatum path)
+    loss_fn_inputs = _get_loss_fn_inputs(datum)
+    if loss_fn_inputs is not None:
+        pydantic_field = _FIELD_TO_PYDANTIC.get(field_name, field_name)
+        tensor_obj = _get_field(loss_fn_inputs, pydantic_field)
+        if tensor_obj is not None:
+            value = _extract_tensor_data(tensor_obj)
+
+    # Fall back to flat format: datum[field_name]
+    if value is None:
+        if isinstance(datum, dict):
+            value = datum.get(field_name, None)
+        else:
+            value = getattr(datum, field_name, None)
 
     if value is None:
         return None

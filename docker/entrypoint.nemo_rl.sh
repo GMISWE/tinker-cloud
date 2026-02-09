@@ -59,6 +59,9 @@ if [ "${SKIP_RAY}" != "1" ]; then
     # Get node IP
     NODE_IP=${MASTER_ADDR:-$(hostname -i)}
 
+    # Clean stale Ray session data to avoid session name mismatch
+    rm -rf /tmp/ray 2>/dev/null || true
+
     echo "Starting Ray head node..."
     echo "  Node IP: ${NODE_IP}"
     echo "  GPUs: ${NUM_GPUS}"
