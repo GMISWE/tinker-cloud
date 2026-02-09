@@ -102,6 +102,27 @@ class TrainingBackend(ABC):
         Multiple forward_backward calls accumulate gradients before
         a single apply_optimizer_step call.
 
+        Backend behavior:
+        - Miles: Executes forward+backward immediately. Returns real
+          loss, logprobs, and metrics. deferred=False.
+        - NeMo RL: Buffers data (no GPU work). Returns deferred result.
+          Real training happens at apply_optimizer_step().
+
+        Deferred result contract (NeMo RL):
+            When deferred=True, the response contains:
+            - "metrics": {} (empty dict — no training has occurred)
+            - "loss_fn_outputs": [] (empty list — logprobs not yet computed)
+            - "deferred": True
+            Real metrics and logprobs are returned by apply_optimizer_step()
+            as a single batch covering all buffered forward_backward calls.
+
+        Logprobs resolution (CHK011):
+            NeMo RL computes training logprobs at optim_step time, not
+            per forward_backward call. Clients that need per-minibatch
+            logprobs (e.g., tinker-cookbook compute_kl_sample_train) should
+            use get_logprobs() for a separate forward-only pass, or accept
+            batch-level logprobs from apply_optimizer_step().
+
         Returns:
             {
                 "loss_fn_outputs": [...],
@@ -120,6 +141,32 @@ class TrainingBackend(ABC):
         """
         Apply accumulated gradients via optimizer step, then sync
         weights to inference engine.
+
+        NeMo RL behavior:
+            Concatenates all buffered forward_backward data and calls
+            policy.train() once. NeMo RL internally micro-batches the
+            concatenated data according to train_micro_batch_size.
+
+        Ordering guarantees (CHK019):
+            Buffered microbatches are concatenated in FIFO order (order
+            of forward_backward calls). However, NeMo RL may internally
+            process micro-batches in any order. For GRPO training, micro-
+            batch ordering does not affect correctness — each sample's
+            advantage is pre-computed and independent.
+
+        Buffer-to-batch-size relationship (CHK027):
+            NeMo RL processes ALL provided data regardless of
+            train_global_batch_size config. If 4 forward_backward calls
+            buffer 1024 samples each (4096 total) but train_global_batch_size
+            is 2048, NeMo RL processes all 4096 samples using micro-batching.
+            Ensure train_global_batch_size matches expected total buffered
+            samples to avoid unexpected gradient accumulation behavior.
+
+        Failure recovery (CHK024):
+            The buffer is cleared BEFORE policy.train() executes. If
+            policy.train() fails (e.g., OOM), buffered data is lost.
+            The client must re-send all forward_backward() data and retry.
+            There is no automatic retry mechanism.
 
         Returns:
             {"success": bool, "grad_norm": float, "metrics": {...}}

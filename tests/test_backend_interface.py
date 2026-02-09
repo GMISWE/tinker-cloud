@@ -334,3 +334,52 @@ class TestNemoRLBackendBuffering:
             asyncio.run(
                 backend.apply_optimizer_step(handle)
             )
+
+    def test_buffer_overflow_raises(self, backend, handle):
+        """forward_backward() should raise when buffer exceeds max_buffer_size (CHK006)."""
+        handle.max_buffer_size = 3
+        for _ in range(3):
+            asyncio.run(
+                backend.forward_backward(handle, make_synthetic_batch(2), "importance_sampling")
+            )
+        assert len(handle.data_buffer) == 3
+        with pytest.raises(BackendError, match="Buffer full"):
+            asyncio.run(
+                backend.forward_backward(handle, make_synthetic_batch(2), "importance_sampling")
+            )
+
+    def test_delete_model_clears_buffer(self, backend, handle):
+        """delete_model() should warn and clear pending buffer (CHK007)."""
+        asyncio.run(
+            backend.forward_backward(handle, make_synthetic_batch(2), "importance_sampling")
+        )
+        assert len(handle.data_buffer) == 1
+        # delete_model will fail on policy shutdown (no real policy), but
+        # the buffer should be cleared before that error
+        try:
+            asyncio.run(backend.delete_model(handle))
+        except BackendError:
+            pass  # Expected — no real policy
+        assert len(handle.data_buffer) == 0
+
+    def test_deferred_result_format(self, backend, handle):
+        """forward_backward() deferred result must have exact contract fields (CHK010)."""
+        data = make_synthetic_batch(batch_size=2)
+        result = asyncio.run(
+            backend.forward_backward(handle, data, "importance_sampling")
+        )
+        assert result == {"metrics": {}, "deferred": True, "loss_fn_outputs": []}
+
+    def test_concurrent_forward_backward_thread_safe(self, backend, handle):
+        """Concurrent forward_backward() calls should be serialized by lock (CHK018)."""
+        async def run_concurrent():
+            tasks = [
+                backend.forward_backward(handle, make_synthetic_batch(2), "importance_sampling")
+                for _ in range(5)
+            ]
+            results = await asyncio.gather(*tasks)
+            return results
+
+        results = asyncio.run(run_concurrent())
+        assert len(handle.data_buffer) == 5
+        assert all(r["deferred"] is True for r in results)
