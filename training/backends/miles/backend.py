@@ -461,6 +461,31 @@ class MilesBackend(TrainingBackend):
                 str(e), backend="miles", operation="save_checkpoint", original_error=e,
             ) from e
 
+    async def load_checkpoint(
+        self,
+        handle: BackendHandle,
+        checkpoint_path: str,
+    ) -> None:
+        h: MilesHandle = handle  # type: ignore[assignment]
+        try:
+            # Load weights on all actors via Megatron's load_checkpoint
+            object_refs = [
+                actor.load_checkpoint.remote(checkpoint_path)
+                for actor in h.train_group._actor_handlers
+            ]
+            await asyncio.gather(*[asyncio.wrap_future(ref.future()) for ref in object_refs])
+
+            # Sync loaded weights to inference engine
+            if h.rollout_manager is not None:
+                await asyncio.to_thread(h.train_group.update_weights)
+
+            logger.info("Miles checkpoint loaded from %s", checkpoint_path)
+
+        except Exception as e:
+            raise BackendError(
+                str(e), backend="miles", operation="load_checkpoint", original_error=e,
+            ) from e
+
     async def delete_model(self, handle: BackendHandle) -> None:
         h: MilesHandle = handle  # type: ignore[assignment]
         try:

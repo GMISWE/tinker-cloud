@@ -349,6 +349,45 @@ class NemoRLBackend(TrainingBackend):
                 str(e), backend="nemo_rl", operation="save_checkpoint", original_error=e,
             ) from e
 
+    async def load_checkpoint(
+        self,
+        handle: BackendHandle,
+        checkpoint_path: str,
+    ) -> None:
+        """Load checkpoint weights into policy, then sync to inference engine."""
+        import os
+
+        h: NemoRLHandle = handle  # type: ignore[assignment]
+        try:
+            weights_path = f"{checkpoint_path}/weights"
+            optimizer_path = f"{checkpoint_path}/optimizer"
+            # Only load optimizer state if it exists (checkpoint may be weights-only)
+            if not os.path.exists(optimizer_path):
+                optimizer_path = None
+
+            await asyncio.to_thread(
+                h.policy.load_checkpoint,
+                weights_path=weights_path,
+                optimizer_path=optimizer_path,
+            )
+
+            # Sync loaded weights to inference engine
+            if h.policy_generation is not None and not h.debug_train_only:
+                logger.info("Refitting policy generation after checkpoint load for %s", h.model_id)
+                await asyncio.to_thread(
+                    _refit_policy_generation,
+                    h.policy,
+                    h.policy_generation,
+                    h.colocated_inference,
+                )
+
+            logger.info("NeMo RL checkpoint loaded from %s", checkpoint_path)
+
+        except Exception as e:
+            raise BackendError(
+                str(e), backend="nemo_rl", operation="load_checkpoint", original_error=e,
+            ) from e
+
     async def delete_model(self, handle: BackendHandle) -> None:
         """Tear down NeMo RL Policy and release GPU resources."""
         h: NemoRLHandle = handle  # type: ignore[assignment]
@@ -564,10 +603,12 @@ def _maybe_pad_batch(batch, dp_size: int, mbs: int):
         batch["sample_mask"],
         torch.zeros_like(batch["sample_mask"][-1]).unsqueeze(0).repeat(min_padding),
     ])
-    if "reference_policy_logprobs" in batch:
-        batch["reference_policy_logprobs"] = torch.cat([
-            batch["reference_policy_logprobs"],
-            batch["reference_policy_logprobs"][-1].unsqueeze(0).repeat(min_padding, 1),
-        ])
+    # Pad all remaining 2D tensor fields that NeMo RL may access during sharding
+    for key in ("advantages", "prev_logprobs", "generation_logprobs", "reference_policy_logprobs"):
+        if key in batch:
+            batch[key] = torch.cat([
+                batch[key],
+                batch[key][-1].unsqueeze(0).repeat(min_padding, 1),
+            ])
 
     return batch

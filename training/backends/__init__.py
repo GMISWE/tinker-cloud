@@ -10,6 +10,7 @@ from .base import (
     DataConverter,
     BackendHandle,
     BackendError,
+    UnsupportedFeatureError,
 )
 from .factory import BackendFactory
 
@@ -19,5 +20,6 @@ __all__ = [
     "DataConverter",
     "BackendHandle",
     "BackendError",
+    "UnsupportedFeatureError",
     "BackendFactory",
 ]
