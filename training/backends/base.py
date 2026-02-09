@@ -150,6 +150,27 @@ class TrainingBackend(ABC):
         ...
 
     @abstractmethod
+    async def load_checkpoint(
+        self,
+        handle: BackendHandle,
+        checkpoint_path: str,
+    ) -> None:
+        """
+        Load model weights from a checkpoint.
+
+        After loading, syncs weights to the inference engine via
+        update_inference_weights / refit_policy_generation.
+
+        Args:
+            handle: Backend handle returned by create_model.
+            checkpoint_path: Path to the checkpoint directory.
+
+        Raises:
+            BackendError: If checkpoint loading fails.
+        """
+        ...
+
+    @abstractmethod
     async def delete_model(
         self,
         handle: BackendHandle,
