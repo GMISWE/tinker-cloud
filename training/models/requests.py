@@ -4,7 +4,7 @@ Request models for the training API.
 This module defines Pydantic models for all API request payloads,
 providing validation and documentation.
 """
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, validator, model_validator
 
@@ -331,7 +331,7 @@ class ModelInput(BaseModel):
 class ForwardDatum(BaseModel):
     """Single forward data sample."""
     model_input: ModelInput = Field(..., description="Input tokens")
-    loss_fn_inputs: SFTLossFnInputs = Field(..., description="Loss function inputs")
+    loss_fn_inputs: Dict[str, TensorData] = Field(..., description="Loss function inputs")
 
 
 class ForwardInput(BaseModel):
@@ -343,7 +343,7 @@ class ForwardInput(BaseModel):
 class ForwardBackwardDatum(BaseModel):
     """Single forward_backward data sample."""
     model_input: ModelInput = Field(..., description="Input tokens")
-    loss_fn_inputs: Union[RLLossFnInputs, SFTLossFnInputs] = Field(..., description="Loss inputs")
+    loss_fn_inputs: Dict[str, TensorData] = Field(..., description="Loss inputs")
 
 
 class ForwardBackwardInput(BaseModel):
