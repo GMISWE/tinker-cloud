@@ -359,6 +359,13 @@ class NemoRLBackend(TrainingBackend):
             # Normalize metrics to common schema
             result = self.converter.backend_to_forward_backward_result(train_result, [])
 
+            # Extract per-sample training logprobs from curr_logprobs [B, S-1].
+            # curr_logprobs are computed on pre-optimizer weights (correct KL semantics).
+            # Use token_mask to extract response-only logprobs matching Miles format.
+            loss_fn_outputs = _extract_loss_fn_outputs(
+                train_result.get("curr_logprobs"), all_data, original_size,
+            )
+
             # Override with optimizer step format
             return {
                 "success": True,
@@ -366,6 +373,7 @@ class NemoRLBackend(TrainingBackend):
                 "learning_rates": [],
                 "model_id": h.model_id,
                 "metrics": result.get("metrics", {}),
+                "loss_fn_outputs": loss_fn_outputs,
             }
 
         except BackendError:
@@ -407,7 +415,6 @@ class NemoRLBackend(TrainingBackend):
             local_path = _resolve_checkpoint_path(checkpoint_path)
 
             weights_path = f"{local_path}/weights"
-            optimizer_path = f"{local_path}/optimizer"
             checkpointing_cfg = h.config.get("checkpointing", {
                 "model_save_format": "safetensors",
                 "save_consolidated": False,
@@ -416,7 +423,7 @@ class NemoRLBackend(TrainingBackend):
             await asyncio.to_thread(
                 h.policy.save_checkpoint,
                 weights_path=weights_path,
-                optimizer_path=optimizer_path,
+                optimizer_path=None,
                 checkpointing_cfg=checkpointing_cfg,
             )
 
@@ -548,7 +555,10 @@ def _init_nemo_rl_components(
     debug_train_only: bool,
 ):
     """
-    Initialize NeMo RL Policy, generation engine, cluster, tokenizer, and loss fn.
+    Initialize NeMo RL Policy, VllmGeneration, cluster, tokenizer, and loss fn.
+
+    In colocated mode (default), VllmGeneration must initialize FIRST to allocate
+    GPU memory for the vLLM engine, then Policy uses the remaining memory.
 
     This is a blocking function — must be called via asyncio.to_thread().
     """
@@ -556,7 +566,7 @@ def _init_nemo_rl_components(
     from nemo_rl.distributed.virtual_cluster import RayVirtualCluster
     from nemo_rl.models.policy.lm_policy import Policy
     from nemo_rl.algorithms.loss_functions import ClippedPGLossFn
-    from transformers import AutoTokenizer
+    from nemo_rl.algorithms.utils import get_tokenizer
 
     policy_config = config_dict["policy"]
     loss_fn_config = config_dict["loss_fn"]
@@ -573,11 +583,37 @@ def _init_nemo_rl_components(
         max_colocated_worker_groups=cluster_config.get("max_colocated_worker_groups", 2),
     )
 
-    # Load tokenizer
+    # Load tokenizer (use NeMo RL's utility which sets pad_token_id if absent)
     model_name = policy_config["model_name"]
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    tokenizer_config = {"name": model_name}
+    tokenizer = get_tokenizer(tokenizer_config)
 
-    # Create Policy
+    # Create loss function
+    loss_fn = ClippedPGLossFn(loss_fn_config)
+
+    # Initialize generation engine (vLLM) if not debug_train_only
+    policy_generation = None
+    if not debug_train_only:
+        generation_config = policy_config.get("generation")
+        if generation_config and generation_config.get("backend") == "vllm":
+            from nemo_rl.models.generation import configure_generation_config
+            from nemo_rl.models.generation.vllm import VllmGeneration
+
+            # Set model_name and pad_token_id on generation config (GRPO does this)
+            generation_config["model_name"] = model_name
+            generation_config["vllm_cfg"]["skip_tokenizer_init"] = True
+            generation_config = configure_generation_config(generation_config, tokenizer)
+
+            logger.info("Initializing VllmGeneration (colocated mode)...")
+            policy_generation = VllmGeneration(
+                cluster=cluster,
+                config=generation_config,
+                name_prefix="tinker_vllm",
+            )
+            policy_generation.finish_generation()
+            logger.info("VllmGeneration initialized successfully")
+
+    # Create Policy (after vLLM in colocated mode — uses remaining GPU memory)
     weights_path = checkpoint_path if checkpoint_path else None
     policy = Policy(
         cluster=cluster,
@@ -589,18 +625,22 @@ def _init_nemo_rl_components(
         init_reference_model=not debug_train_only,
     )
 
-    # Create loss function
-    loss_fn = ClippedPGLossFn(loss_fn_config)
+    # Prepare refit info — needed for weight sync between policy and generation
+    if policy_generation is not None:
+        state_dict_info = policy.prepare_refit_info()
+        policy_generation.prepare_refit_info(state_dict_info)
+        logger.info("Refit info prepared for weight sync")
 
-    # For inference, use the policy's built-in generation if not debug_train_only
-    policy_generation = None
-    if not debug_train_only:
-        # In colocated mode, the policy IS the generation engine
-        policy_generation = policy
+        # Do initial weight sync so generation has the correct weights
+        logger.info("Performing initial weight sync (refit)...")
+        _refit_policy_generation(policy, policy_generation, colocated_inference=True)
+        logger.info("Initial weight sync complete")
 
     logger.info(
-        "NeMo RL components initialized: model=%s, debug_train_only=%s",
+        "NeMo RL components initialized: model=%s, debug_train_only=%s, "
+        "generation=%s",
         model_name, debug_train_only,
+        type(policy_generation).__name__ if policy_generation else "None",
     )
 
     return policy, policy_generation, cluster, tokenizer, loss_fn
@@ -618,52 +658,42 @@ def _concatenate_batches(data_buffer: List) -> Any:
 
 def _refit_policy_generation(policy, policy_generation, colocated_inference: bool):
     """
-    Sync weights from training policy to inference engine.
+    Sync weights from training policy to inference engine (VllmGeneration).
 
     Follows the pattern from nemo_rl/algorithms/grpo.py:refit_policy_generation().
     """
+    import os
     import ray
 
     if colocated_inference:
         policy.offload_before_refit()
-        if hasattr(policy_generation, "prepare_for_generation"):
-            policy_generation.prepare_for_generation(tags=["weights"])
+        policy_generation.prepare_for_generation(tags=["weights"])
 
     try:
         if colocated_inference:
             # IPC ZMQ path for colocated inference
-            refit_buffer_size_gb = policy.cfg.get("refit_buffer_size_gb", None)
-            if refit_buffer_size_gb is not None:
-                buffer_size_bytes = int(refit_buffer_size_gb * (1024 ** 3))
-            else:
-                buffer_size_bytes = None
+            memory_ratio = float(os.getenv("NRL_REFIT_BUFFER_MEMORY_RATIO", "0.3"))
+            buffer_size_bytes = int(policy.get_free_memory_bytes() * memory_ratio)
 
             futures_train = policy.stream_weights_via_ipc_zmq(
                 buffer_size_bytes=buffer_size_bytes,
             )
-            if hasattr(policy_generation, "update_weights_via_ipc_zmq"):
-                futures_inference = policy_generation.update_weights_via_ipc_zmq()
-                ray.get(futures_train)
-                ray.get(futures_inference)
-            else:
-                ray.get(futures_train)
+            futures_inference = policy_generation.update_weights_via_ipc_zmq()
+            ray.get(futures_train)
+            ray.get(futures_inference)
         else:
             # Collective (NCCL) path for non-colocated inference
             futures_train = policy.broadcast_weights_for_collective()
-            if hasattr(policy_generation, "update_weights_from_collective"):
-                futures_inference = policy_generation.update_weights_from_collective()
-                ray.get(futures_train)
-                ray.get(futures_inference)
-            else:
-                ray.get(futures_train)
+            futures_inference = policy_generation.update_weights_from_collective()
+            ray.get(futures_train)
+            ray.get(futures_inference)
     except Exception as e:
         logger.error("Weight sync failed during refit: %s", e)
         raise
 
     if colocated_inference:
         policy.offload_after_refit()
-        if hasattr(policy_generation, "prepare_for_generation"):
-            policy_generation.prepare_for_generation(tags=["kv_cache"])
+        policy_generation.prepare_for_generation(tags=["kv_cache"])
 
 
 def _set_learning_rate(policy, learning_rate: float):
@@ -762,3 +792,42 @@ def _maybe_pad_batch(batch, dp_size: int, mbs: int):
             ])
 
     return batch
+
+
+def _extract_loss_fn_outputs(curr_logprobs, batched_data, original_size: int):
+    """Convert curr_logprobs [B, S-1] to per-sample loss_fn_outputs.
+
+    Uses token_mask to extract response-only logprobs matching Miles format.
+    Only produces outputs for the first ``original_size`` samples (skips padding).
+
+    Returns:
+        List of dicts: [{"logprobs": {"data": [...], "shape": [N], "dtype": "float32"}}, ...]
+    """
+    if curr_logprobs is None:
+        return []
+
+    import torch
+
+    token_mask = batched_data.get("token_mask") if hasattr(batched_data, "get") else None
+    loss_fn_outputs = []
+
+    for i in range(original_size):
+        lp_i = curr_logprobs[i]  # [S-1]
+
+        if token_mask is not None:
+            # token_mask is [B, S], curr_logprobs is [B, S-1].
+            # token_mask[:, 1:] aligns with logprobs (predict next token).
+            mask_i = token_mask[i, 1:]  # [S-1]
+            response_lp = lp_i[mask_i.bool()].cpu().tolist()
+        else:
+            response_lp = lp_i.cpu().tolist()
+
+        loss_fn_outputs.append({
+            "logprobs": {
+                "data": response_lp,
+                "shape": [len(response_lp)],
+                "dtype": "float32",
+            }
+        })
+
+    return loss_fn_outputs

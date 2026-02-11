@@ -69,6 +69,8 @@ echo "Source directories:"
 echo "  tinkercloud: $TINKERCLOUD_DIR"
 if [[ "$BACKEND" == "miles" ]]; then
     echo "  miles: $PARENT_DIR/miles"
+elif [[ "$BACKEND" == "nemo_rl" ]]; then
+    echo "  RL: $PARENT_DIR/RL"
 fi
 echo "  tinker_gmi: $PARENT_DIR/tinker_gmi"
 echo "  tinker-cookbook: $PARENT_DIR/tinker-cookbook"
@@ -77,6 +79,8 @@ echo "  tinker-cookbook: $PARENT_DIR/tinker-cookbook"
 REQUIRED_DIRS=("$PARENT_DIR/tinker_gmi" "$PARENT_DIR/tinker-cookbook")
 if [[ "$BACKEND" == "miles" ]]; then
     REQUIRED_DIRS+=("$PARENT_DIR/miles")
+elif [[ "$BACKEND" == "nemo_rl" ]]; then
+    REQUIRED_DIRS+=("$PARENT_DIR/RL")
 fi
 
 for dir in "${REQUIRED_DIRS[@]}"; do
@@ -99,10 +103,13 @@ RSYNC_EXCLUDES="--exclude=.git --exclude=__pycache__ --exclude=*.pyc --exclude=.
 echo "Copying tinkercloud..."
 rsync -a $RSYNC_EXCLUDES "$TINKERCLOUD_DIR/" "$BUILD_CONTEXT/"
 
-# Copy miles (only for miles backend)
+# Copy backend-specific repos
 if [[ "$BACKEND" == "miles" ]]; then
     echo "Copying miles..."
     rsync -a $RSYNC_EXCLUDES "$PARENT_DIR/miles/" "$BUILD_CONTEXT/miles/"
+elif [[ "$BACKEND" == "nemo_rl" ]]; then
+    echo "Copying RL (NeMo RL)..."
+    rsync -a $RSYNC_EXCLUDES "$PARENT_DIR/RL/" "$BUILD_CONTEXT/RL/"
 fi
 
 # Copy tinker_gmi

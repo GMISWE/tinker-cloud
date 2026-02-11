@@ -28,7 +28,9 @@ WORKDIR /app
 RUN pip install --no-cache-dir \
     python-multipart openai \
     opentelemetry-distro opentelemetry-exporter-otlp \
-    chz termcolor
+    chz termcolor \
+    pylatexenc sympy math-verify scipy cloudpickle blobfile \
+    "httpx[http2]"
 
 # ======================================== Copy tinkercloud API =============================================
 COPY training ./training
@@ -44,6 +46,11 @@ RUN chmod +x /entrypoint.sh /prepare_data.sh
 RUN mkdir -p /data/models /data/datasets /data/checkpoints /data/trajectories /data/metadata
 
 # ======================================== Copy Local Code (No Miles) =============================================
+
+# Overlay local NeMo RL over the base image's editable install at /opt/nemo-rl.
+# Base image has nemo-rl installed as: pip install -e /opt/nemo-rl
+# We copy our modified nemo_rl Python package over it (preserving setup.py, etc.).
+COPY RL/nemo_rl /opt/nemo-rl/nemo_rl
 
 # Copy tinker_gmi from local
 RUN rm -rf /workspace/tinker_gmi 2>/dev/null || true
