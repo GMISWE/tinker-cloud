@@ -280,9 +280,10 @@ class TestNemoRLDataConverter:
         assert result["input_ids"][0, 65:].sum().item() == 0
 
     def test_deferred_result_conversion(self, converter):
-        result = converter.backend_to_forward_backward_result(None, [])
+        result = converter.backend_to_forward_backward_result(None, [], loss_fn="importance_sampling")
         assert result["deferred"] is True
         assert result["metrics"] == {}
+        assert result["loss_fn_output_type"] == "importance_sampling"
 
 
 # ---------------------------------------------------------------------------
