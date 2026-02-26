@@ -165,7 +165,7 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
                 "alpha": lora_config.get("alpha", lora_config.get("rank", 8)),
                 "dropout": lora_config.get("dropout", 0.0),
                 "dropout_position": "pre",
-                "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"],
+                "target_modules": ["*.q_proj", "*.k_proj", "*.v_proj", "*.o_proj"],
                 "exclude_modules": [],
                 "lora_A_init": "kaiming",
             }

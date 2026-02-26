@@ -47,6 +47,7 @@ class NemoRLHandle(BackendHandle):
     created_at: str = ""
     training_run_id: str = ""
     debug_train_only: bool = False
+    loss_fn_name: str = ""               # String name from last forward_backward()
 
 
 class NemoRLBackend(TrainingBackend):
@@ -237,6 +238,8 @@ class NemoRLBackend(TrainingBackend):
                 # Buffer the data — training deferred to apply_optimizer_step()
                 h.data_buffer.append(batched_data)
                 buffer_len = len(h.data_buffer)
+                # Store loss_fn name for apply_optimizer_step() response
+                h.loss_fn_name = loss_fn
 
             logger.info(
                 "Buffered microbatch %d for model %s (%d samples)",
@@ -247,6 +250,7 @@ class NemoRLBackend(TrainingBackend):
             # CHK010: Deferred contract: empty metrics, deferred=True,
             # empty loss_fn_outputs. Real metrics available at optim_step.
             return {
+                "loss_fn_output_type": loss_fn,
                 "metrics": {},
                 "deferred": True,
                 "loss_fn_outputs": [],
@@ -338,6 +342,14 @@ class NemoRLBackend(TrainingBackend):
             if learning_rate is not None:
                 _set_learning_rate(h.policy, learning_rate)
 
+            # BUG-005 fix: NeMo RL requires prepare_for_training() before
+            # policy.train() to move model+optimizer from CPU→CUDA and set
+            # model.train(). Without this, the model stays on CPU after
+            # generation's offload_after_refit() and loss.backward() fails
+            # with "element 0 of tensors does not require grad".
+            logger.info("Preparing policy for training (CPU→CUDA + train mode)")
+            await asyncio.to_thread(h.policy.prepare_for_training)
+
             # Execute training — policy.train() does forward + backward + optimizer.step()
             train_result = await asyncio.to_thread(
                 h.policy.train,
@@ -357,7 +369,9 @@ class NemoRLBackend(TrainingBackend):
                 )
 
             # Normalize metrics to common schema
-            result = self.converter.backend_to_forward_backward_result(train_result, [])
+            result = self.converter.backend_to_forward_backward_result(
+                train_result, [], loss_fn=h.loss_fn_name,
+            )
 
             # Extract per-sample training logprobs from curr_logprobs [B, S-1].
             # curr_logprobs are computed on pre-optimizer weights (correct KL semantics).

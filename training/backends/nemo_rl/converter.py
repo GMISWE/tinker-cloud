@@ -174,6 +174,7 @@ class NemoRLDataConverter(DataConverter):
         self,
         result: Any,
         data: List[Dict],
+        loss_fn: str = "",
     ) -> Dict[str, Any]:
         """
         Convert NeMo RL training result to Tinker format.
@@ -186,6 +187,7 @@ class NemoRLDataConverter(DataConverter):
         if result is None:
             # Deferred result (buffering mode)
             return {
+                "loss_fn_output_type": loss_fn,
                 "loss": None,
                 "grad_norm": None,
                 "metrics": {},
@@ -222,6 +224,7 @@ class NemoRLDataConverter(DataConverter):
                     metrics[tinker_key] = _to_python_scalar(vals)
 
         return {
+            "loss_fn_output_type": loss_fn,
             "loss": loss,
             "grad_norm": grad_norm,
             "metrics": metrics,
