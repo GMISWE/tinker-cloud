@@ -1,0 +1,93 @@
+# OpenTinker-NeMo RL Development Image
+#
+# This image copies local code directly instead of cloning + patching.
+# Use this for rapid development iteration with the NeMo RL backend.
+#
+# Usage:
+#   cd tinkercloud
+#   docker build -t gmicloudai/tinkercloud:dev-nemo-rl -f docker/Dockerfile.dev.nemo_rl \
+#     --build-arg TINKER_GMI_PATH=../tinker_gmi \
+#     --build-arg TINKER_COOKBOOK_PATH=../tinker-cookbook \
+#     .
+#
+# Or use build_dev.sh:
+#   ./docker/build_dev.sh --backend nemo_rl
+
+ARG BASE_IMAGE=nvcr.io/nvidia/nemo-rl:v0.5.0
+FROM ${BASE_IMAGE}
+
+LABEL maintainer="GMI Cloud Team"
+LABEL description="Development build with NeMo RL backend"
+LABEL version="dev"
+LABEL backend="nemo_rl"
+
+# ======================================== Install Dependencies =============================================
+# NeMo RL base image already provides: ray 2.49.2, fastapi, uvicorn, pydantic,
+# tiktoken, torch, transformers, prometheus-client. Only install extras.
+WORKDIR /app
+RUN pip install --no-cache-dir \
+    python-multipart openai \
+    opentelemetry-distro opentelemetry-exporter-otlp \
+    chz termcolor \
+    pylatexenc sympy math-verify scipy cloudpickle blobfile \
+    "httpx[http2]"
+
+# ======================================== Copy tinkercloud API =============================================
+COPY training ./training
+
+# Copy startup scripts
+# Note: convert_model.sh is Miles-specific (HF->Megatron torch_dist format).
+# NeMo RL loads HuggingFace checkpoints directly — no conversion needed.
+COPY docker/entrypoint.nemo_rl.sh /entrypoint.sh
+COPY docker/prepare_data.sh /prepare_data.sh
+RUN chmod +x /entrypoint.sh /prepare_data.sh
+
+# Create data directories
+RUN mkdir -p /data/models /data/datasets /data/checkpoints /data/trajectories /data/metadata
+
+# ======================================== Copy Local Code (No Miles) =============================================
+
+# Overlay local NeMo RL over the base image's editable install at /opt/nemo-rl.
+# Base image has nemo-rl installed as: pip install -e /opt/nemo-rl
+# We copy our modified nemo_rl Python package over it (preserving setup.py, etc.).
+COPY RL/nemo_rl /opt/nemo-rl/nemo_rl
+
+# Copy tinker_gmi from local
+RUN rm -rf /workspace/tinker_gmi 2>/dev/null || true
+COPY tinker_gmi /workspace/tinker_gmi
+RUN cd /workspace/tinker_gmi && pip install -e . --no-deps
+
+# Copy tinker-cookbook from local
+RUN rm -rf /workspace/tinker-cookbook 2>/dev/null || true
+COPY tinker-cookbook /workspace/tinker-cookbook
+RUN cd /workspace/tinker-cookbook && pip install -e . --no-deps
+
+# ======================================== Environment =============================================
+# Training API
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH="/app:/workspace/nemo-rl:/workspace/tinker-cookbook" \
+    TOKENIZERS_PARALLELISM="false" \
+    TRAINING_HOST="0.0.0.0" \
+    TRAINING_PORT="8000" \
+    TINKER_API_KEY="slime-dev-key" \
+    TINKERCLOUD_BACKEND="nemo_rl" \
+    LOG_LEVEL="INFO"
+
+# GPU/NCCL
+ENV CUDA_DEVICE_MAX_CONNECTIONS="1" \
+    NCCL_NVLS_ENABLE="0" \
+    NCCL_DEBUG="INFO" \
+    NCCL_IB_DISABLE="0"
+
+# Ray
+ENV NUM_GPUS="4"
+
+# HuggingFace
+ENV HF_HOME="/data/models" \
+    HF_HUB_OFFLINE="0" \
+    TRANSFORMERS_OFFLINE="0"
+
+# Ports: 8000 (API), 8265 (Ray dashboard), 10001 (Ray client), 30000 (SGLang)
+EXPOSE 8000 8265 10001 30000
+
+ENTRYPOINT ["/entrypoint.sh"]

@@ -25,7 +25,7 @@ from fastapi.responses import JSONResponse
 
 # Import modules
 from .storage import FuturesStorage, MetadataStorage, SessionStorage
-from .config import get_config, TrainingConfig, StorageConfig
+from .config import get_config, TrainingConfig, StorageConfig, BackendConfig
 from .core import SlimeArgumentBuilder
 from .utils import APIKeyAuth
 
@@ -147,6 +147,20 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
         # Also clean legacy futures store
         runtime.futures_store.clear()
 
+        # Initialize backend
+        backend_type = config_obj.backend.backend_type
+        if backend_type == "miles":
+            logger.info("Backend selected: miles (default)")
+        else:
+            logger.info("Backend selected: %s", backend_type)
+
+        from .backends.factory import BackendFactory
+        backend = BackendFactory.create(
+            backend_type=backend_type,
+            backend_overrides=config_obj.backend.backend_overrides,
+        )
+        logger.info("Backend initialized: %s", backend_type)
+
         # Initialize builders and utilities
         slime_builder = SlimeArgumentBuilder()
         auth = APIKeyAuth(
@@ -160,15 +174,19 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
         application.state.session_storage = session_storage
         application.state.slime_builder = slime_builder
         application.state.auth = auth
+        application.state.backend = backend
+        application.state.backend_type = backend_type
 
-        # Initialize service singletons
+        # Initialize service singletons (services that depend on backend get it injected)
         from .services.model_service import ModelService
+        from .services.training_service import TrainingService
         from .services.checkpoint_service import CheckpointService
         from .services.sampling_service import SamplingService
         from .services.session_service import SessionService
 
-        application.state.model_service = ModelService()
-        application.state.checkpoint_service = CheckpointService()
+        application.state.model_service = ModelService(backend=backend)
+        application.state.training_service = TrainingService(backend=backend)
+        application.state.checkpoint_service = CheckpointService(backend=backend)
         application.state.sampling_service = SamplingService()
         # Initialize SessionService with storage for persistence
         application.state.session_service = SessionService(storage=session_storage)
@@ -242,10 +260,37 @@ async def general_exception_handler(request: Request, exc: Exception):
     )
 
 if __name__ == "__main__":
+    import argparse
     import uvicorn
+
+    parser = argparse.ArgumentParser(description="TinkerCloud Training API")
+    parser.add_argument(
+        "--backend",
+        choices=["miles", "nemo_rl"],
+        default=None,
+        help="Training backend (default: miles). Also settable via TINKERCLOUD_BACKEND env var.",
+    )
+    parser.add_argument("--host", default=None)
+    parser.add_argument("--port", type=int, default=None)
+    cli_args = parser.parse_args()
 
     # Get configuration
     config = get_config()
+
+    # CLI --backend flag takes precedence over env var / config default
+    if cli_args.backend:
+        config.backend.backend_type = cli_args.backend
+
+    if cli_args.host:
+        config.server.host = cli_args.host
+    if cli_args.port:
+        config.server.port = cli_args.port
+
+    from .config import set_config
+    set_config(config)
+
+    # Recreate app with updated config
+    app = create_app(config)
 
     # Run server
     uvicorn.run(
@@ -253,5 +298,5 @@ if __name__ == "__main__":
         host=config.server.host,
         port=config.server.port,
         log_level=config.server.log_level.lower(),
-        access_log=config.server.access_log
+        access_log=config.server.access_log,
     )

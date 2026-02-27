@@ -55,9 +55,12 @@ def generate_request_id() -> str:
     return f"req_{uuid.uuid4().hex[:16]}"
 
 
-def get_training_service() -> TrainingService:
-    """Dependency: Get training service instance"""
-    return TrainingService()
+def get_training_service(request: Request) -> TrainingService:
+    """Dependency: Get training service from app state."""
+    service = getattr(request.app.state, "training_service", None)
+    if service is None:
+        raise RuntimeError("TrainingService not initialized on app state")
+    return service
 
 
 def get_task_manager(
@@ -70,6 +73,7 @@ def get_task_manager(
 @router.post("/api/v1/forward", response_model=AsyncOperationResponse)
 async def forward(
     request: ForwardRequest,
+    http_request: Request = None,
     service: TrainingService = Depends(get_training_service),
     task_manager: TaskManager = Depends(get_task_manager),
     training_clients: Dict = Depends(get_training_clients)
@@ -93,16 +97,14 @@ async def forward(
 
     # Get client info
     client_info = training_clients[request.model_id]
-    train_group = client_info["train_group"]
 
     # Business logic wrapped in async task
     async def execute_forward():
         return await service.forward(
             model_id=request.model_id,
-            train_group=train_group,
             data=request.forward_input.data,
             loss_fn=request.forward_input.loss_fn,
-            client_info=client_info
+            client_info=client_info,
         )
 
     # Create background task with automatic error handling
@@ -123,6 +125,7 @@ async def forward(
 @router.post("/api/v1/forward_backward", response_model=AsyncOperationResponse)
 async def forward_backward(
     request: ForwardBackwardRequest,
+    http_request: Request = None,
     service: TrainingService = Depends(get_training_service),
     task_manager: TaskManager = Depends(get_task_manager),
     training_clients: Dict = Depends(get_training_clients)
@@ -144,18 +147,14 @@ async def forward_backward(
 
     # Get client info
     client_info = training_clients[request.model_id]
-    train_group = client_info["train_group"]
-    args = client_info["args"]
 
     # Business logic wrapped in async task
     async def execute_forward_backward():
         return await service.forward_backward(
             model_id=request.model_id,
-            train_group=train_group,
-            args=args,
             data=request.forward_backward_input.data,
             loss_fn=request.forward_backward_input.loss_fn,
-            client_info=client_info
+            client_info=client_info,
         )
 
     # Create background task
@@ -176,6 +175,7 @@ async def forward_backward(
 @router.post("/api/v1/optim_step", response_model=AsyncOperationResponse)
 async def optim_step(
     request: OptimStepRequest,
+    http_request: Request = None,
     service: TrainingService = Depends(get_training_service),
     task_manager: TaskManager = Depends(get_task_manager),
     training_clients: Dict = Depends(get_training_clients)
@@ -197,15 +197,13 @@ async def optim_step(
 
     # Get client info
     client_info = training_clients[request.model_id]
-    train_group = client_info["train_group"]
 
     # Business logic wrapped in async task
     async def execute_optim_step():
         return await service.apply_optimizer_step(
             model_id=request.model_id,
-            train_group=train_group,
             client_info=client_info,
-            adam_params=request.adam_params
+            adam_params=request.adam_params,
         )
 
     # Create background task
