@@ -177,6 +177,29 @@ class AuthConfig(BaseModel):
         return v
 
 
+class BackendConfig(BaseModel):
+    """Backend selection and configuration."""
+
+    backend_type: str = Field(
+        default_factory=lambda: os.getenv("TINKERCLOUD_BACKEND", "miles"),
+        description="Training backend: 'miles' or 'nemo_rl'"
+    )
+    backend_overrides: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Backend-specific configuration overrides"
+    )
+
+    @validator("backend_type")
+    def validate_backend_type(cls, v):
+        """Ensure backend type is supported."""
+        supported = ("miles", "nemo_rl")
+        if v not in supported:
+            raise ValueError(
+                f"Unsupported backend: {v!r}. Supported: {', '.join(supported)}"
+            )
+        return v
+
+
 class SlimeConfig(BaseModel):
     """Slime backend configuration."""
 
@@ -220,6 +243,10 @@ class TrainingConfig(BaseModel):
     auth: AuthConfig = Field(
         default_factory=AuthConfig,
         description="Authentication configuration"
+    )
+    backend: BackendConfig = Field(
+        default_factory=BackendConfig,
+        description="Backend selection and configuration"
     )
     slime: SlimeConfig = Field(
         default_factory=SlimeConfig,
