@@ -19,7 +19,7 @@
 #
 # Environment variables:
 #   BASE_URL         - TinkerCloud URL       (default: http://localhost:8000)
-#   API_KEY          - Tinker API key         (default: slime-dev-key)
+#   API_KEY          - Tinker API key         (default: tml-dev-key)
 #   MODEL_PATH       - HuggingFace model path (default: Qwen/Qwen2.5-0.5B)
 #   SEQ_LEN          - Sequence length        (default: 64)
 #   POLL_INTERVAL    - Seconds between polls  (default: 2)
@@ -29,7 +29,7 @@ set -euo pipefail
 
 # ---------- configuration ----------
 BASE_URL="${BASE_URL:-http://localhost:8000}"
-API_KEY="${API_KEY:-slime-dev-key}"
+API_KEY="${API_KEY:-tml-dev-key}"
 MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-0.5B}"
 SEQ_LEN="${SEQ_LEN:-16}"
 POLL_INTERVAL="${POLL_INTERVAL:-2}"

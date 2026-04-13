@@ -78,7 +78,8 @@ class SlimeArgumentBuilder:
 
         # Determine parallelism - use new unified auto-detection
         rlve_enabled = rlve_config and rlve_config.get("enabled", False)
-        num_gpus = int(os.environ.get("SLIME_NUM_GPUS", "4"))
+        from ..utils.model_config import detect_num_gpus
+        num_gpus = detect_num_gpus()
         if parallelism_config:
             num_gpus = parallelism_config.get("num_gpus", num_gpus)
 

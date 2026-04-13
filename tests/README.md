@@ -34,7 +34,7 @@ Integration tests for tinkercloud server running in Docker.
 
 ### Cleanup (always run before tests)
 ```bash
-TINKER_BASE_URL=http://localhost:8000 TINKER_API_KEY=slime-dev-key \
+TINKER_BASE_URL=http://localhost:8000 TINKER_API_KEY=tml-dev-key \
     python tests/cleanup_test_env.py
 ```
 
@@ -120,7 +120,7 @@ PYTHONPATH=/root/gavin/miles:/root/gavin/tinker-cookbook pytest tests/test_advan
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TINKER_BASE_URL` | `http://localhost:8000` | tinkercloud server URL |
-| `TINKER_API_KEY` | `slime-dev-key` | API key for authentication |
+| `TINKER_API_KEY` | `tml-dev-key` | API key for authentication |
 | `TEST_MODEL_PATH` | `/data/models/Qwen2.5-0.5B-Instruct` | Path to HF model |
 
 ## Test Files

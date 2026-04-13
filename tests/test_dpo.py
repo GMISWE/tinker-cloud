@@ -30,7 +30,7 @@ import sys
 # Test configuration
 DEFAULT_MODEL_PATH = "/data/models/Qwen2.5-0.5B-Instruct"
 DEFAULT_BASE_URL = "http://localhost:8000"
-DEFAULT_API_KEY = "slime-dev-key"
+DEFAULT_API_KEY = "tml-dev-key"
 
 
 def check_prerequisites():

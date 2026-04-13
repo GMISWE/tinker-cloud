@@ -74,6 +74,9 @@ elif [[ "$BACKEND" == "nemo_rl" ]]; then
 fi
 echo "  tinker_gmi: $PARENT_DIR/tinker_gmi"
 echo "  tinker-cookbook: $PARENT_DIR/tinker-cookbook"
+if [[ "$BACKEND" == "nemo_rl" ]]; then
+    echo "  Automodel: using base image version (not overlaid)"
+fi
 
 # Verify source directories exist
 REQUIRED_DIRS=("$PARENT_DIR/tinker_gmi" "$PARENT_DIR/tinker-cookbook")
@@ -81,6 +84,7 @@ if [[ "$BACKEND" == "miles" ]]; then
     REQUIRED_DIRS+=("$PARENT_DIR/miles")
 elif [[ "$BACKEND" == "nemo_rl" ]]; then
     REQUIRED_DIRS+=("$PARENT_DIR/RL")
+    # Automodel is NOT overlaid — base image version is used (pinned to its transformers)
 fi
 
 for dir in "${REQUIRED_DIRS[@]}"; do
@@ -110,6 +114,7 @@ if [[ "$BACKEND" == "miles" ]]; then
 elif [[ "$BACKEND" == "nemo_rl" ]]; then
     echo "Copying RL (NeMo RL)..."
     rsync -a $RSYNC_EXCLUDES "$PARENT_DIR/RL/" "$BUILD_CONTEXT/RL/"
+    # Automodel is NOT copied — base image version used (pinned to its transformers)
 fi
 
 # Copy tinker_gmi
@@ -126,7 +131,7 @@ ls -la "$BUILD_CONTEXT/"
 
 echo ""
 echo "=== Building Docker image ==="
-docker build -t "$IMAGE_TAG" -f "$BUILD_CONTEXT/$DOCKERFILE" "$BUILD_CONTEXT"
+docker build --network host -t "$IMAGE_TAG" -f "$BUILD_CONTEXT/$DOCKERFILE" "$BUILD_CONTEXT"
 
 echo ""
 echo "=== Build complete: $IMAGE_TAG ==="

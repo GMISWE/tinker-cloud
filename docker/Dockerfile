@@ -68,7 +68,7 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH="/app:/root/miles:/root/Megatron-LM" \
     TRAINING_HOST="0.0.0.0" \
     TRAINING_PORT="8000" \
-    TINKER_API_KEY="slime-dev-key" \
+    TINKER_API_KEY="tml-dev-key" \
     LOG_LEVEL="INFO"
 
 # Environment - GPU/NCCL

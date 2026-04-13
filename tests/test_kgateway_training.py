@@ -7,7 +7,7 @@ print("[DEBUG] Script started", flush=True)
 
 # Use environment variables if set, otherwise default to localhost
 base_url = os.environ.get("TINKER_BASE_URL", "http://localhost:8000")
-api_key = os.environ.get("TINKER_API_KEY", "slime-dev-key")
+api_key = os.environ.get("TINKER_API_KEY", "tml-dev-key")
 
 # Set the environment variables for tinker
 os.environ["TINKER_BASE_URL"] = base_url

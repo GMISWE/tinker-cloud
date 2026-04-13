@@ -36,7 +36,7 @@ class NemoRLHandle(BackendHandle):
     cluster: Any = None              # RayVirtualCluster
     config: Dict = field(default_factory=dict)   # Full config dict
     tokenizer: Any = None            # HuggingFace tokenizer
-    loss_fn: Any = None              # ClippedPGLossFn instance
+    loss_fn: Any = None              # ClippedPGLossFn instance (RL)
     data_buffer: List = field(default_factory=list)  # R9 buffering
     max_buffer_size: int = DEFAULT_MAX_BUFFER_SIZE  # CHK006: bound buffer growth
     _buffer_lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # CHK018: thread safety
@@ -48,6 +48,9 @@ class NemoRLHandle(BackendHandle):
     training_run_id: str = ""
     debug_train_only: bool = False
     loss_fn_name: str = ""               # String name from last forward_backward()
+    generation_state: str = "generation_ready"  # "generation_ready" | "training_ready"
+    _generation_state_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _training_lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # Serialize optim_step GPU lifecycle
 
 
 class NemoRLBackend(TrainingBackend):
@@ -157,16 +160,51 @@ class NemoRLBackend(TrainingBackend):
         data: List[Dict],
         loss_fn: str,
     ) -> Dict[str, Any]:
-        """Forward-only pass — compute logprobs without gradients."""
+        """Forward-only pass — compute logprobs without gradients.
+
+        After init+refit, training workers have offloaded weights to CPU.
+        Must sleep vLLM, move model to GPU, compute, then refit to restore.
+        """
         h: NemoRLHandle = handle  # type: ignore[assignment]
         try:
             # Convert data to NeMo RL format
             batched_data = self.converter.forward_to_backend(data, h.config)
 
+            # Pad for dp_size alignment (get_logprobs uses shard_by_batch_size)
+            dp_size = h.config.get("dp_size", 1)
+            mbs = h.config.get("policy", {}).get("train_micro_batch_size", 1)
+            batched_data = await asyncio.to_thread(
+                _maybe_pad_batch, batched_data, dp_size, mbs,
+            )
+
+            # Sleep vLLM to free GPU memory for training workers
+            if h.policy_generation is not None and h.colocated_inference:
+                await asyncio.to_thread(h.policy_generation.finish_generation)
+
+            # Move model CPU→CUDA for logprob computation.
+            # NOTE: NeMo RL's native algorithms use prepare_for_lp_inference()
+            # (eval mode + optimizer offload) before get_logprobs(). We use
+            # prepare_for_training() instead because in pipelined SFT, forward()
+            # may be called concurrently with apply_optimizer_step — calling
+            # prepare_for_lp_inference() would offload the optimizer while
+            # policy.train() is using it, causing a deadlock. The difference
+            # is minimal: model.train() vs model.eval() produces identical
+            # logprobs for LLMs without dropout.
+            await asyncio.to_thread(h.policy.prepare_for_training)
+
             # Compute logprobs via policy.get_logprobs()
             result = await asyncio.to_thread(h.policy.get_logprobs, batched_data)
 
-            return self.converter.backend_to_forward_result(result, data)
+            # Skip refit after forward(): this is a read-only eval pass (no weight
+            # updates), so inference weights are already in sync. Refitting here
+            # crashes because DTensor sharding metadata becomes stale after the
+            # CPU→CUDA transition in prepare_for_training (NCCL error in
+            # tensor.full_tensor() → redistribute). Refit only happens after
+            # apply_optimizer_step() which actually modifies weights.
+
+            return self.converter.backend_to_forward_result(
+                result, data, loss_fn=loss_fn,
+            )
 
         except BackendError:
             raise
@@ -200,11 +238,19 @@ class NemoRLBackend(TrainingBackend):
         """
         h: NemoRLHandle = handle  # type: ignore[assignment]
         try:
-            # Basic validation before buffering
+            # Empty data is a normal GRPO condition (all advantages zero in batch).
+            # Return a no-op deferred result — training skips this batch.
             if not data:
-                raise BackendError(
-                    "Empty data list", backend="nemo_rl", operation="forward_backward",
+                logger.warning(
+                    "forward_backward: empty data for %s — no-op (all advantages likely zero)",
+                    h.model_id,
                 )
+                return {
+                    "loss_fn_output_type": loss_fn,
+                    "metrics": {},
+                    "deferred": True,
+                    "loss_fn_outputs": [],
+                }
 
             # Convert data to NeMo RL BatchedDataDict (outside lock — CPU-bound)
             batched_data = self.converter.forward_backward_to_backend(
@@ -247,13 +293,37 @@ class NemoRLBackend(TrainingBackend):
             )
 
             # Return deferred result — no training metrics available yet.
-            # CHK010: Deferred contract: empty metrics, deferred=True,
-            # empty loss_fn_outputs. Real metrics available at optim_step.
+            # CHK010: Deferred contract: empty metrics, deferred=True.
+            # Real metrics available at optim_step.
+            # Populate loss_fn_outputs with zero-logprobs per datum so the
+            # SFT train loop's finish_batch can zip(logprobs, weights) without
+            # crashing. The actual NLL is computed by the NLL evaluator via
+            # the forward() path; these zeros are placeholders only.
+            placeholder_outputs = []
+            for datum in data:
+                # Handle both Pydantic ForwardBackwardDatum and plain dict
+                lfi = getattr(datum, "loss_fn_inputs", None) or (
+                    datum.get("loss_fn_inputs") if isinstance(datum, dict) else None
+                ) or {}
+                # Navigate weights → data to find length
+                weights = getattr(lfi, "weights", None) or (
+                    lfi.get("weights") if isinstance(lfi, dict) else None
+                )
+                if weights is not None:
+                    w_data = getattr(weights, "data", None) or (
+                        weights.get("data") if isinstance(weights, dict) else None
+                    )
+                    n = len(w_data) if w_data is not None else 0
+                else:
+                    n = 0
+                placeholder_outputs.append({
+                    "logprobs": {"data": [0.0] * n, "shape": [n], "dtype": "float32"},
+                })
             return {
                 "loss_fn_output_type": loss_fn,
                 "metrics": {},
                 "deferred": True,
-                "loss_fn_outputs": [],
+                "loss_fn_outputs": placeholder_outputs,
             }
 
         except BackendError:
@@ -292,11 +362,20 @@ class NemoRLBackend(TrainingBackend):
             # Snapshot and clear under the lock; concatenate outside it.
             async with h._buffer_lock:
                 if not h.data_buffer:
-                    raise BackendError(
-                        "No buffered data to optimize — call forward_backward() first",
-                        backend="nemo_rl",
-                        operation="apply_optimizer_step",
+                    # Empty buffer is normal when forward_backward received
+                    # empty data (GRPO all-zero advantages). No-op — no GPU work.
+                    logger.warning(
+                        "apply_optimizer_step: empty buffer for %s — no-op",
+                        h.model_id,
                     )
+                    return {
+                        "success": True,
+                        "grad_norm": 0.0,
+                        "learning_rates": [],
+                        "model_id": h.model_id,
+                        "metrics": {},
+                        "loss_fn_outputs": [],
+                    }
 
                 # Atomic swap: take ownership of buffer, give handle a fresh one.
                 # This ensures the buffer is cleared even if concatenation fails (CHK024).
@@ -342,31 +421,101 @@ class NemoRLBackend(TrainingBackend):
             if learning_rate is not None:
                 _set_learning_rate(h.policy, learning_rate)
 
-            # BUG-005 fix: NeMo RL requires prepare_for_training() before
-            # policy.train() to move model+optimizer from CPU→CUDA and set
-            # model.train(). Without this, the model stays on CPU after
-            # generation's offload_after_refit() and loss.backward() fails
-            # with "element 0 of tensors does not require grad".
-            logger.info("Preparing policy for training (CPU→CUDA + train mode)")
-            await asyncio.to_thread(h.policy.prepare_for_training)
+            # Serialize GPU lifecycle: sleep vLLM → train → refit.
+            # Pipelined SFT loops fire multiple optim_step calls concurrently;
+            # without this lock they race on the same Ray actors/GPU memory,
+            # causing "No backend type associated with device type cpu" during refit.
+            # The lock only gates GPU work — buffer drain + padding above run freely.
+            async with h._training_lock:
+                # Transition to training state — generation requests after this
+                # point will hit the safety net path in _ensure_generation_ready().
+                async with h._generation_state_lock:
+                    h.generation_state = "training_ready"
 
-            # Execute training — policy.train() does forward + backward + optimizer.step()
-            train_result = await asyncio.to_thread(
-                h.policy.train,
-                data=all_data,
-                loss_fn=h.loss_fn,
-                eval_mode=False,
-            )
+                try:
+                    # BUG-006 fix: In colocated mode, vLLM generation engine holds
+                    # model weights + KV cache on GPU after sampling. Must call
+                    # finish_generation() to sleep vLLM workers and free GPU memory
+                    # before loading the training model. Native NeMo RL does this
+                    # explicitly in grpo.py after generation completes (line 1352).
+                    if h.policy_generation is not None and h.colocated_inference:
+                        logger.info("Finishing generation (sleep vLLM to free GPU memory)")
+                        await asyncio.to_thread(h.policy_generation.finish_generation)
 
-            # Sync weights to inference engine
-            if h.policy_generation is not None and not h.debug_train_only:
-                logger.info("Refitting policy generation for %s", h.model_id)
-                await asyncio.to_thread(
-                    _refit_policy_generation,
-                    h.policy,
-                    h.policy_generation,
-                    h.colocated_inference,
-                )
+                    # BUG-005 fix: NeMo RL requires prepare_for_training() before
+                    # policy.train() to move model+optimizer from CPU→CUDA and set
+                    # model.train(). Without this, the model stays on CPU after
+                    # generation's offload_after_refit() and loss.backward() fails
+                    # with "element 0 of tensors does not require grad".
+                    logger.info("Preparing policy for training (CPU→CUDA + train mode)")
+                    await asyncio.to_thread(h.policy.prepare_for_training)
+
+                    # BUG-011 fix: For RL loss functions, recompute prev_logprobs
+                    # using DTensor forward pass (like native GRPO grpo.py:1530-1532).
+                    # vLLM generation logprobs differ from DTensor logprobs (different
+                    # precision/kernels), causing IS ratio ~0.003 instead of ~1.0.
+                    # By computing prev_logprobs here with the same DTensor path used
+                    # for curr_logprobs during training, the ratio starts at ~1.0.
+                    if h.loss_fn_name != "cross_entropy" and "prev_logprobs" in all_data:
+                        logger.info("Computing prev_logprobs via DTensor forward pass (BUG-011)")
+                        logprob_result = await asyncio.to_thread(
+                            h.policy.get_logprobs, all_data,
+                        )
+                        if hasattr(logprob_result, "get") and logprob_result.get("logprobs") is not None:
+                            all_data["prev_logprobs"] = logprob_result["logprobs"]
+                            logger.info("prev_logprobs replaced with DTensor-computed values")
+
+                    # Select loss function based on loss_fn_name from forward_backward()
+                    if h.loss_fn_name == "cross_entropy":
+                        from nemo_rl.algorithms.loss_functions import NLLLoss
+                        active_loss_fn = NLLLoss()
+                    else:
+                        active_loss_fn = h.loss_fn  # ClippedPGLossFn (RL)
+
+                    # Execute training — policy.train() does forward + backward + optimizer.step()
+                    # Pass gbs=actual batch size so NeMo RL shards correctly.
+                    # Without this, it defaults to train_global_batch_size from config
+                    # which may not match the recipe's batch size.
+                    train_result = await asyncio.to_thread(
+                        h.policy.train,
+                        data=all_data,
+                        loss_fn=active_loss_fn,
+                        eval_mode=False,
+                        gbs=all_data.size,
+                    )
+
+                    logger.info(
+                        "policy.train() result: loss=%s, grad_norm=%s, keys=%s, mb_metrics=%s",
+                        train_result.get("loss"), train_result.get("grad_norm"),
+                        list(train_result.keys()),
+                        {k: v for k, v in train_result.get("all_mb_metrics", {}).items()},
+                    )
+
+                    # Sync weights to inference engine
+                    if h.policy_generation is not None and not h.debug_train_only:
+                        logger.info("Refitting policy generation for %s", h.model_id)
+                        await asyncio.to_thread(
+                            _refit_policy_generation,
+                            h.policy,
+                            h.policy_generation,
+                            h.colocated_inference,
+                        )
+
+                    # Transition back to generation_ready — sampling can now
+                    # call generate() directly without offload/refit overhead.
+                    async with h._generation_state_lock:
+                        h.generation_state = "generation_ready"
+                finally:
+                    # If training failed before refit, reset state so sampling
+                    # doesn't get permanently stuck in training_ready.
+                    async with h._generation_state_lock:
+                        if h.generation_state == "training_ready":
+                            logger.warning(
+                                "apply_optimizer_step failed before refit for %s "
+                                "— resetting generation_state to generation_ready",
+                                h.model_id,
+                            )
+                            h.generation_state = "generation_ready"
 
             # Normalize metrics to common schema
             result = self.converter.backend_to_forward_backward_result(
@@ -408,6 +557,8 @@ class NemoRLBackend(TrainingBackend):
                     h.policy_generation,
                     h.colocated_inference,
                 )
+                async with h._generation_state_lock:
+                    h.generation_state = "generation_ready"
         except Exception as e:
             raise BackendError(
                 str(e), backend="nemo_rl", operation="update_inference_weights",
@@ -481,6 +632,8 @@ class NemoRLBackend(TrainingBackend):
                     h.policy_generation,
                     h.colocated_inference,
                 )
+                async with h._generation_state_lock:
+                    h.generation_state = "generation_ready"
 
             logger.info("NeMo RL checkpoint loaded from %s", checkpoint_path)
 
@@ -534,6 +687,58 @@ class NemoRLBackend(TrainingBackend):
             lp = output.get("logprobs", {})
             logprobs_list.append(lp.get("data", []))
         return logprobs_list
+
+
+# ---------------------------------------------------------------------------
+# Async helpers (called directly from async code)
+# ---------------------------------------------------------------------------
+
+
+async def _ensure_generation_ready(handle) -> None:
+    """Ensure the handle is ready for generation.
+
+    Fast path (normal case): generation_state is already "generation_ready"
+    after model init or after apply_optimizer_step refit — returns immediately.
+
+    Safety net: if "training_ready" (e.g. pipelined SFT eval while prior
+    optim_step is still running), wait for the training lock before refitting.
+    Attempting refit while policy.train() is active deadlocks because both
+    compete for the same Ray GPU workers.
+    """
+    async with handle._generation_state_lock:
+        if handle.generation_state == "generation_ready":
+            return
+
+    # Must wait for any in-progress training to complete before refitting.
+    # The _training_lock gates the GPU lifecycle: sleep vLLM → train → refit.
+    # Without this, refit calls ray.get() on GPU workers busy with policy.train(),
+    # causing a deadlock (BUG-010: pipelined SFT hang at eval boundary).
+    logger.info(
+        "Generation requested in training_ready state for %s — "
+        "waiting for in-progress training to complete",
+        handle.model_id,
+    )
+    async with handle._training_lock:
+        # Re-check: training may have completed and already set generation_ready
+        async with handle._generation_state_lock:
+            if handle.generation_state == "generation_ready":
+                return
+            logger.warning(
+                "Training completed but generation_state still training_ready "
+                "for %s — performing refit",
+                handle.model_id,
+            )
+
+        # Training has released GPU resources — safe to refit now
+        await asyncio.to_thread(
+            _refit_policy_generation,
+            handle.policy,
+            handle.policy_generation,
+            handle.colocated_inference,
+        )
+
+        async with handle._generation_state_lock:
+            handle.generation_state = "generation_ready"
 
 
 # ---------------------------------------------------------------------------
@@ -613,9 +818,33 @@ def _init_nemo_rl_components(
             from nemo_rl.models.generation import configure_generation_config
             from nemo_rl.models.generation.vllm import VllmGeneration
 
-            # Set model_name and pad_token_id on generation config (GRPO does this)
+            # Set model_name on generation config
             generation_config["model_name"] = model_name
-            generation_config["vllm_cfg"]["skip_tokenizer_init"] = True
+
+            # Set stop_strings BEFORE configure_generation_config() so it sees
+            # them and sets skip_tokenizer_init=False (vLLM needs the tokenizer
+            # to match text-based stop strings).
+            # Use stop_strings (not stop_token_ids) because NeMo RL vLLM sets
+            # include_stop_str_in_output=True for strings, so the stop token
+            # appears in the output. Renderers (e.g. Qwen3, Llama3) expect the
+            # stop token in the response for parse_response() to succeed.
+            # stop_token_ids would also stop generation but vLLM strips those
+            # from output, causing parse_success=False and format=0.
+            stop_strs = set()
+            for token_str in ["<|im_end|>", "<|eot_id|>", "<|end▁of▁sentence|>"]:
+                try:
+                    ids = tokenizer.encode(token_str, add_special_tokens=False)
+                    if len(ids) == 1:
+                        stop_strs.add(token_str)
+                except Exception:
+                    pass
+            if stop_strs:
+                generation_config["stop_strings"] = list(stop_strs)
+                logger.info("Set stop_strings from tokenizer: %s", list(stop_strs))
+
+            # configure_generation_config sets skip_tokenizer_init based on
+            # whether stop_strings is set: False if set (needed for text matching),
+            # True if not. Do NOT override skip_tokenizer_init manually.
             generation_config = configure_generation_config(generation_config, tokenizer)
 
             logger.info("Initializing VllmGeneration (colocated mode)...")
@@ -711,55 +940,19 @@ def _refit_policy_generation(policy, policy_generation, colocated_inference: boo
 
 
 def _set_learning_rate(policy, learning_rate: float):
-    """Set learning rate on the policy's optimizer.
-
-    NeMo RL workers don't expose a set_learning_rate RPC. Instead, we
-    use run_all_workers_single_data with a lambda that patches the
-    optimizer param_groups in-place.  If that also fails (API change),
-    log a warning rather than crashing the training step.
-    """
+    """Set learning rate on the policy's optimizer via worker RPC."""
     import ray
 
     try:
-        worker_group = policy.worker_group
-
-        # Try the direct method first (future NeMo RL versions may add it)
-        try:
-            futures = worker_group.run_all_workers_single_data(
-                "set_learning_rate",
-                learning_rate=learning_rate,
-            )
-            ray.get(futures)
-            return
-        except (AttributeError, ray.exceptions.RayTaskError):
-            pass
-
-        # Fallback: set LR via optimizer param_groups
-        def _set_lr_on_worker(worker, learning_rate):
-            if hasattr(worker, "optimizer") and worker.optimizer is not None:
-                for pg in worker.optimizer.param_groups:
-                    pg["lr"] = learning_rate
-
-        try:
-            futures = worker_group.run_all_workers_single_data(
-                _set_lr_on_worker,
-                learning_rate=learning_rate,
-            )
-            ray.get(futures)
-            return
-        except Exception:
-            pass
-
-        # If all else fails, just warn — the default LR from config will be used
-        logger.warning(
-            "Could not dynamically set learning rate to %s on NeMo RL workers. "
-            "Using default LR from policy config.",
-            learning_rate,
+        futures = policy.worker_group.run_all_workers_single_data(
+            "set_learning_rate",
+            learning_rate=learning_rate,
         )
-
+        ray.get(futures)
+        logger.info("Set learning rate to %s", learning_rate)
     except Exception as e:
         logger.warning(
-            "Failed to set learning rate to %s: %s. Continuing with default LR.",
+            "Could not set learning rate to %s: %s. Using default LR.",
             learning_rate, e,
         )
 
