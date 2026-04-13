@@ -31,7 +31,7 @@ if [ ! -d "$MODEL_PATH" ]; then
 fi
 
 # Check server is running
-if ! curl -s http://localhost:8000/health -H "X-API-Key: slime-dev-key" | grep -q "healthy"; then
+if ! curl -s http://localhost:8000/health -H "X-API-Key: tml-dev-key" | grep -q "healthy"; then
     echo "ERROR: tinkercloud server not running on localhost:8000"
     echo "Start with: cd /root/gavin/tinkercloud && python -m uvicorn training.api:app --host 0.0.0.0 --port 8000"
     exit 1
@@ -39,12 +39,12 @@ fi
 
 # Run cleanup first
 echo "Running cleanup..."
-TINKER_BASE_URL=http://localhost:8000 TINKER_API_KEY=slime-dev-key \
+TINKER_BASE_URL=http://localhost:8000 TINKER_API_KEY=tml-dev-key \
     python /root/gavin/tinkercloud/tests/cleanup_test_env.py 2>/dev/null || true
 
 # Run DPO training
 echo "Starting DPO training..."
-TINKER_API_KEY=slime-dev-key \
+TINKER_API_KEY=tml-dev-key \
 HF_DATASETS_OFFLINE=0 \
 HF_HUB_OFFLINE=0 \
 HF_DATASETS_CACHE=/data/datasets \

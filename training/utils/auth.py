@@ -116,7 +116,7 @@ class APIKeyAuth:
 # Helper function for backward compatibility
 def verify_api_key(
     x_api_key: Optional[str] = None,
-    valid_api_key: str = "slime-dev-key"
+    valid_api_key: str = "tml-dev-key"
 ) -> None:
     """
     Simple API key verification function.

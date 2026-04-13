@@ -1,8 +1,8 @@
 """
 NeMo RL data converter — converts Tinker Datum format to NeMo RL's
-BatchedDataDict[ClippedPGLossDataDict] format.
+BatchedDataDict format for both RL and SFT training.
 
-Field mapping (Tinker → NeMo RL):
+RL path (ClippedPGLossFn):
   tokens           → input_ids         [B, S]
   loss_masks       → token_mask        [B, S]
   advantages       → advantages        [B, S]
@@ -11,6 +11,12 @@ Field mapping (Tinker → NeMo RL):
   ref_log_probs    → reference_policy_logprobs [B, S]
   (computed)       → input_lengths     [B]
   (all ones)       → sample_mask       [B]
+
+SFT path (NLLLoss, loss_fn="cross_entropy"):
+  model_input.tokens + target_tokens[-1] → input_ids    [B, S]  (reconstructed)
+  [0.0] + weights                        → token_mask   [B, S]  (reconstructed)
+  (computed)                             → input_lengths [B]
+  (all ones)                             → sample_mask   [B]
 """
 import logging
 from typing import Any, Dict, List
@@ -72,12 +78,18 @@ class NemoRLDataConverter(DataConverter):
         """
         Convert Tinker data to NeMo RL BatchedDataDict for training.
 
-        Maps all fields needed by ClippedPGLossDataDict:
-        input_ids, advantages, prev_logprobs, generation_logprobs,
-        reference_policy_logprobs, token_mask, sample_mask, input_lengths.
+        Two paths:
+        - loss_fn == "cross_entropy" (SFT): Builds BatchedDataDict for NLLLoss
+          with reconstructed full sequence (input_ids, token_mask, sample_mask,
+          input_lengths). No RL-specific fields.
+        - Other loss_fn values (RL): Maps all fields needed by ClippedPGLossDataDict.
         """
         if not data:
             return self._empty_batched_data_dict()
+
+        # SFT path — reconstruct full sequence for NLLLoss
+        if loss_fn == "cross_entropy":
+            return self._forward_backward_sft(data)
 
         max_seq_len = _compute_max_seq_len(data)
         batch_size = len(data)
@@ -105,6 +117,12 @@ class NemoRLDataConverter(DataConverter):
             # Response-length fields need to be placed in the response portion
             response_length = int(masks.sum().item())
             prompt_length = seq_len - response_length
+
+            if i == 0:
+                logger.info(
+                    "RL converter: seq_len=%d, prompt_len=%d, resp_len=%d",
+                    seq_len, prompt_length, response_length,
+                )
 
             # Advantages (response-length → placed at response positions)
             adv = _extract_field(datum, "advantages", response_length)
@@ -139,18 +157,111 @@ class NemoRLDataConverter(DataConverter):
             "sample_mask": sample_mask,
         })
 
+    def _forward_backward_sft(self, data: List[Dict]) -> Any:
+        """Convert SFT data to NeMo RL BatchedDataDict for NLLLoss.
+
+        SFT datum provides (from datum_from_tokens_weights in tinker-cookbook):
+          model_input.tokens       = tokens[:-1]   (length N-1)
+          loss_fn_inputs["target_tokens"] = tokens[1:]    (length N-1)
+          loss_fn_inputs["weights"]       = weights[1:]   (length N-1)
+
+        NLLLoss expects:
+          input_ids  = full unshifted sequence [B, S]  (length N)
+          token_mask = full-length mask [B, S]          (NLLLoss slices [:, 1:])
+          sample_mask = [B]
+          input_lengths = [B]
+
+        Reconstruction:
+          input_ids  = concat(model_input.tokens, [target_tokens[-1]])  → length N
+          token_mask = concat([0.0], weights)                           → length N
+
+        After NLLLoss slices [:, 1:], token_mask becomes weights and
+        input_ids becomes target_tokens — correct alignment.
+        """
+        batch_size = len(data)
+
+        # Compute max reconstructed sequence length (N-1 input tokens + 1 = N)
+        max_seq_len = 0
+        for datum in data:
+            tokens = _extract_tokens(datum)
+            max_seq_len = max(max_seq_len, len(tokens) + 1)  # +1 for reconstruction
+
+        input_ids = torch.zeros(batch_size, max_seq_len, dtype=torch.long)
+        input_lengths = torch.zeros(batch_size, dtype=torch.long)
+        token_mask = torch.zeros(batch_size, max_seq_len, dtype=torch.float32)
+        sample_mask = torch.ones(batch_size, dtype=torch.float32)
+
+        for i, datum in enumerate(data):
+            # Extract model_input.tokens (length N-1)
+            input_tokens = _extract_tokens(datum)
+
+            # Extract target_tokens (length N-1) — need last element
+            target_tokens = _extract_sft_target_tokens(datum)
+
+            # Reconstruct full sequence: concat(input_tokens, [target_tokens[-1]])
+            if target_tokens is not None and len(target_tokens) > 0:
+                last_token = target_tokens[-1].unsqueeze(0)
+                full_tokens = torch.cat([input_tokens, last_token])
+            else:
+                # Malformed SFT datum — exclude from loss via sample_mask=0
+                full_tokens = input_tokens
+                sample_mask[i] = 0.0
+                logger.warning(
+                    "SFT datum %d: no target_tokens found, excluding from training", i,
+                )
+
+            seq_len = len(full_tokens)
+            input_ids[i, :seq_len] = full_tokens
+            input_lengths[i] = seq_len
+
+            # Extract weights (length N-1)
+            weights = _extract_sft_weights(datum)
+
+            # Reconstruct full mask: concat([0.0], weights) → length N
+            if weights is not None:
+                full_mask = torch.cat([torch.zeros(1, dtype=torch.float32), weights])
+            else:
+                # Fallback: mask entire response (all ones except first position)
+                full_mask = torch.ones(seq_len, dtype=torch.float32)
+                full_mask[0] = 0.0
+                logger.warning(
+                    "SFT datum %d: no weights found, using all-ones mask", i,
+                )
+
+            mask_len = min(len(full_mask), seq_len)
+            token_mask[i, :mask_len] = full_mask[:mask_len]
+
+        from nemo_rl.distributed.batched_data_dict import BatchedDataDict
+
+        logger.info(
+            "SFT conversion: batch_size=%d, max_seq_len=%d (reconstructed from N-1 input tokens)",
+            batch_size, max_seq_len,
+        )
+
+        return BatchedDataDict({
+            "input_ids": input_ids,
+            "input_lengths": input_lengths,
+            "token_mask": token_mask,
+            "sample_mask": sample_mask,
+        })
+
     def backend_to_forward_result(
         self,
         result: Any,
         data: List[Dict],
+        loss_fn: str = "",
     ) -> Dict[str, Any]:
         """
         Convert NeMo RL forward-only result to Tinker format.
 
         NeMo RL get_logprobs() returns BatchedDataDict with key "logprobs" [B, S].
+        Response must match ForwardBackwardOutput schema (shared by forward and
+        forward_backward on the SDK side).
         """
         logprobs_tensor = None
-        if isinstance(result, dict):
+        # BatchedDataDict inherits from UserDict (not dict), so use
+        # hasattr+get to handle both dict and UserDict results.
+        if hasattr(result, "get"):
             logprobs_tensor = result.get("logprobs", None)
         elif hasattr(result, "logprobs"):
             logprobs_tensor = result.logprobs
@@ -159,15 +270,31 @@ class NemoRLDataConverter(DataConverter):
         if logprobs_tensor is not None:
             for i in range(len(data)):
                 lp = logprobs_tensor[i].detach().cpu()
+                # Trim padded logprobs to actual sequence length
+                seq_len = len(_extract_tokens(data[i]))
+                lp = lp[:seq_len]
+                lp_list = lp.tolist()
                 loss_fn_outputs.append({
-                    "logprobs": {"data": lp.tolist()},
+                    "logprobs": {
+                        "data": lp_list,
+                        "shape": [len(lp_list)],
+                        "dtype": "float32",
+                    },
                 })
         else:
             for _ in data:
-                loss_fn_outputs.append({"logprobs": {"data": []}})
+                loss_fn_outputs.append({
+                    "logprobs": {
+                        "data": [],
+                        "shape": [0],
+                        "dtype": "float32",
+                    },
+                })
 
         return {
+            "loss_fn_output_type": loss_fn,
             "loss_fn_outputs": loss_fn_outputs,
+            "metrics": {},
         }
 
     def backend_to_forward_backward_result(
@@ -309,7 +436,11 @@ def _extract_tokens(datum) -> torch.Tensor:
 
 
 def _extract_loss_masks(datum, seq_len: int) -> torch.Tensor:
-    """Extract loss masks from datum, padded to seq_len."""
+    """Extract loss masks from datum, padded to seq_len.
+
+    Tries loss_fn_inputs["mask"] first, then datum.loss_masks / datum.loss_mask.
+    Returns all-ones if no mask found (requires "mask" to flow through SDK).
+    """
     masks = None
 
     # Try loss_fn_inputs["mask"] (Dict[str, TensorData] format)
@@ -387,13 +518,80 @@ def _extract_field(datum, field_name: str, expected_len: int):
     else:
         return None
 
-    # Truncate or pad to expected length
+    # Truncate or pad to expected length.
+    # The cookbook prepends zeros for prompt tokens, so full-sequence fields
+    # have structure [0, 0, ..., 0, val_0, val_1, ..., val_R].
+    # Take the LAST expected_len elements to get response-only values.
+    if expected_len == 0:
+        return torch.zeros(0, dtype=torch.float32)
     if len(t) >= expected_len:
-        return t[:expected_len]
+        return t[-expected_len:]
     else:
         padded = torch.zeros(expected_len, dtype=torch.float32)
         padded[:len(t)] = t
         return padded
+
+
+def _extract_sft_target_tokens(datum) -> torch.Tensor:
+    """Extract target_tokens from SFT datum's loss_fn_inputs.
+
+    SFT datums store target_tokens = tokens[1:] in loss_fn_inputs["target_tokens"].
+    Handles both Pydantic ForwardBackwardDatum and flat dict formats.
+
+    Returns:
+        torch.Tensor of token IDs (dtype=long), or None if not found.
+    """
+    loss_fn_inputs = _get_attr_or_key(datum, "loss_fn_inputs")
+    if isinstance(loss_fn_inputs, dict):
+        target_obj = loss_fn_inputs.get("target_tokens")
+        if target_obj is not None:
+            data = target_obj.data if hasattr(target_obj, "data") else target_obj
+            if isinstance(data, torch.Tensor):
+                return data.detach().cpu().long()
+            return torch.tensor(data, dtype=torch.long)
+
+    # Fall back to flat format
+    if isinstance(datum, dict):
+        value = datum.get("target_tokens")
+    else:
+        value = getattr(datum, "target_tokens", None)
+
+    if value is None:
+        return None
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().long()
+    return torch.tensor(value, dtype=torch.long)
+
+
+def _extract_sft_weights(datum) -> torch.Tensor:
+    """Extract weights from SFT datum's loss_fn_inputs.
+
+    SFT datums store weights = weights[1:] in loss_fn_inputs["weights"].
+    Handles both Pydantic ForwardBackwardDatum and flat dict formats.
+
+    Returns:
+        torch.Tensor of float weights, or None if not found.
+    """
+    loss_fn_inputs = _get_attr_or_key(datum, "loss_fn_inputs")
+    if isinstance(loss_fn_inputs, dict):
+        weights_obj = loss_fn_inputs.get("weights")
+        if weights_obj is not None:
+            data = weights_obj.data if hasattr(weights_obj, "data") else weights_obj
+            if isinstance(data, torch.Tensor):
+                return data.detach().cpu().float()
+            return torch.tensor(data, dtype=torch.float32)
+
+    # Fall back to flat format
+    if isinstance(datum, dict):
+        value = datum.get("weights")
+    else:
+        value = getattr(datum, "weights", None)
+
+    if value is None:
+        return None
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().float()
+    return torch.tensor(value, dtype=torch.float32)
 
 
 def _compute_max_seq_len(data: List) -> int:

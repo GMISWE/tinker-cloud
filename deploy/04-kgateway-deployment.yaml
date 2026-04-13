@@ -31,7 +31,7 @@ spec:
         - name: LOG_LEVEL
           value: INFO
         - name: TINKER_API_KEY
-          value: slime-dev-key
+          value: tml-dev-key
         - name: RAY_ADDRESS
           value: ray://miles-headless.miles-gmi-tinker:10001
         - name: CUDA_DEVICE_MAX_CONNECTIONS

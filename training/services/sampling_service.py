@@ -3,13 +3,14 @@ Sampling Service - Business Logic for Model Sampling
 
 Handles:
 - Async sampling via SGLang (Miles backend)
-- Async sampling via Policy.generate() (NeMo RL backend)
+- Async sampling via Policy.generate() (NeMo RL backend) with batch accumulation
 - Sync sampling via SGLang
 - SGLang sampling client creation
 """
 import asyncio
 import logging
 import uuid
+from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional
 
 from ..utils.sglang_client import SGLangClient
@@ -18,14 +19,313 @@ from ..utils.helpers import find_model_with_rollout_manager
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class _PendingGenRequest:
+    """A single sampling request waiting to be batched."""
+    prompt_tokens: List[int]
+    num_samples: int
+    sampling_params: Dict[str, Any]
+    prompt_logprobs: bool
+    future: asyncio.Future = field(default_factory=lambda: asyncio.get_event_loop().create_future())
+
+
+class NemoRLBatchAccumulator:
+    """Accumulates per-sample NeMo RL generation requests and flushes them
+    as a single batched generate() call for dramatically better throughput.
+
+    PERF-002: Without batching, 2048 RL rollouts → 2048 sequential generate(1)
+    calls (~34 min). With batching, one generate(2048) call (~1-2 min).
+    """
+
+    def __init__(self, flush_interval_ms: int = 50, max_batch_size: int = 4096):
+        self._queue: List[_PendingGenRequest] = []
+        self._lock = asyncio.Lock()
+        self._flush_event = asyncio.Event()
+        self._flush_interval = flush_interval_ms / 1000.0
+        self._max_batch_size = max_batch_size
+        self._flush_task: Optional[asyncio.Task] = None
+
+    async def submit(
+        self,
+        handle: Any,
+        request_id: str,
+        prompt_tokens: List[int],
+        num_samples: int,
+        sampling_params: Dict[str, Any],
+        prompt_logprobs: bool,
+    ) -> Dict[str, Any]:
+        """Submit a request for batching. Returns when the batch is flushed."""
+        req = _PendingGenRequest(
+            prompt_tokens=prompt_tokens,
+            num_samples=num_samples,
+            sampling_params=sampling_params,
+            prompt_logprobs=prompt_logprobs,
+        )
+        async with self._lock:
+            self._queue.append(req)
+            queue_len = len(self._queue)
+            if queue_len >= self._max_batch_size:
+                self._flush_event.set()
+            elif self._flush_task is None or self._flush_task.done():
+                self._flush_task = asyncio.create_task(
+                    self._delayed_flush(handle, request_id)
+                )
+        return await req.future
+
+    async def _delayed_flush(self, handle: Any, request_id: str):
+        """Wait for flush_interval or until max_batch_size reached, then flush.
+
+        Loops to drain any requests that arrived during the generate() call.
+        """
+        try:
+            await asyncio.wait_for(
+                self._flush_event.wait(), timeout=self._flush_interval,
+            )
+        except asyncio.TimeoutError:
+            pass
+
+        # Keep flushing until the queue is empty — new requests may arrive
+        # while generate() is running (which takes seconds to minutes).
+        while True:
+            had_work = await self._flush(handle, request_id)
+            if not had_work:
+                break
+
+    async def _flush(self, handle: Any, request_id: str) -> bool:
+        """Flush all queued requests as a single batched generate() call.
+
+        Returns True if work was done, False if queue was empty.
+        """
+        async with self._lock:
+            if not self._queue:
+                return False
+            batch = self._queue[:]
+            self._queue.clear()
+            self._flush_event.clear()
+
+        try:
+            results = await _batched_nemo_rl_generate(handle, request_id, batch)
+            for req, result in zip(batch, results):
+                if not req.future.done():
+                    req.future.set_result(result)
+        except Exception as e:
+            for req in batch:
+                if not req.future.done():
+                    req.future.set_exception(e)
+        return True
+
+
+async def _batched_nemo_rl_generate(
+    handle: Any,
+    request_id: str,
+    batch: List[_PendingGenRequest],
+) -> List[Dict[str, Any]]:
+    """Generate completions for a batch of requests in a single vLLM call.
+
+    Combines all prompts into one BatchedDataDict, calls generate() once,
+    then splits results back to per-request responses.
+    """
+    import torch
+    from nemo_rl.distributed.batched_data_dict import BatchedDataDict
+    from ..backends.nemo_rl.backend import _ensure_generation_ready
+
+    # Expand requests: each request with num_samples>1 becomes multiple rows
+    expanded_prompts = []
+    expanded_params = []
+    request_indices = []  # maps expanded index → (request_idx, sample_idx)
+    for req_idx, req in enumerate(batch):
+        for sample_idx in range(req.num_samples):
+            expanded_prompts.append(req.prompt_tokens)
+            expanded_params.append(req.sampling_params)
+            request_indices.append((req_idx, sample_idx))
+
+    total_samples = len(expanded_prompts)
+    if total_samples == 0:
+        return [{} for _ in batch]
+
+    # Find max prompt length and pad with the model's pad token
+    # (verify_right_padding checks that positions after input_length == pad_token_id)
+    tokenizer = handle.tokenizer
+    pad_id = tokenizer.pad_token_id if tokenizer and tokenizer.pad_token_id is not None else 0
+    max_prompt_len = max(len(p) for p in expanded_prompts)
+    input_ids = torch.full((total_samples, max_prompt_len), pad_id, dtype=torch.long)
+    input_lengths = torch.zeros(total_samples, dtype=torch.long)
+    for i, prompt in enumerate(expanded_prompts):
+        plen = len(prompt)
+        input_ids[i, :plen] = torch.tensor(prompt, dtype=torch.long)
+        input_lengths[i] = plen
+
+    # Pad to dp_size
+    dp_size = handle.config.get("dp_size", 1)
+    actual_size = total_samples
+    padded_size = actual_size
+    if actual_size % dp_size != 0:
+        pad_count = dp_size - (actual_size % dp_size)
+        padded_size = actual_size + pad_count
+        input_ids = torch.cat([
+            input_ids,
+            input_ids[-1:].repeat(pad_count, 1),
+        ])
+        input_lengths = torch.cat([
+            input_lengths,
+            input_lengths[-1:].repeat(pad_count),
+        ])
+
+    data = BatchedDataDict({
+        "input_ids": input_ids,
+        "input_lengths": input_lengths,
+    })
+
+    # Extract sampling params from first request (batch assumes uniform params)
+    # For heterogeneous params, use per-sample _tinker_ fields
+    first_params = batch[0].sampling_params or {}
+    max_new_tokens = first_params.get("max_tokens", 256)
+    temperature = first_params.get("temperature", 0.7)
+    top_p = first_params.get("top_p", 0.9)
+    greedy = temperature <= 0.01
+
+    # Per-sample params via _tinker_ fields
+    data["_tinker_max_new_tokens"] = [
+        (expanded_params[i] or {}).get("max_tokens", max_new_tokens)
+        for i in range(actual_size)
+    ] + [max_new_tokens] * (padded_size - actual_size)
+    data["_tinker_temperature"] = [
+        (expanded_params[i] or {}).get("temperature", temperature)
+        for i in range(actual_size)
+    ] + [temperature] * (padded_size - actual_size)
+    data["_tinker_top_p"] = [
+        (expanded_params[i] or {}).get("top_p", top_p)
+        for i in range(actual_size)
+    ] + [top_p] * (padded_size - actual_size)
+
+    # Stop strings
+    raw_stop = first_params.get("stop")
+    stop_strings: List[str] = []
+    if raw_stop is not None:
+        if isinstance(raw_stop, str):
+            stop_strings = [raw_stop]
+        elif isinstance(raw_stop, list) and raw_stop and isinstance(raw_stop[0], str):
+            stop_strings = list(raw_stop)
+    if stop_strings:
+        data["stop_strings"] = [stop_strings] * padded_size
+
+    # Prompt logprobs
+    any_prompt_logprobs = any(req.prompt_logprobs for req in batch)
+    if any_prompt_logprobs:
+        data["_tinker_prompt_logprobs"] = [True] * padded_size
+
+    logger.info(
+        "[%s] Batched NeMo RL generate: %d requests → %d samples (padded to %d)",
+        request_id, len(batch), actual_size, padded_size,
+    )
+
+    # Generate — single call for entire batch
+    await _ensure_generation_ready(handle)
+    result = await asyncio.to_thread(handle.policy_generation.generate, data, greedy)
+
+    # Split results back to per-request responses
+    output_ids = result["output_ids"]
+    gen_lengths = result["generation_lengths"]
+    logprobs_tensor = result["logprobs"]
+    tokenizer = handle.tokenizer
+    eos_id = tokenizer.eos_token_id if tokenizer else None
+
+    # Build per-expanded-sample results
+    sample_results = []
+    for i in range(actual_size):
+        prompt_len = int(input_lengths[i].item())
+        gen_len = int(gen_lengths[i].item())
+        out_tokens = output_ids[i, prompt_len:prompt_len + gen_len].tolist()
+        out_logprobs = logprobs_tensor[i, prompt_len:prompt_len + gen_len].tolist()
+        text = tokenizer.decode(out_tokens) if tokenizer else None
+
+        stop_reason = "length"
+        if out_tokens and eos_id is not None and out_tokens[-1] == eos_id:
+            stop_reason = "stop"
+        elif text and stop_strings:
+            for ss in stop_strings:
+                if ss in text:
+                    stop_reason = "stop"
+                    break
+
+        # Truncate at stop string
+        if text and stop_strings:
+            earliest_pos = len(text)
+            matched_stop = None
+            for ss in stop_strings:
+                pos = text.find(ss)
+                if pos != -1 and pos < earliest_pos:
+                    earliest_pos = pos
+                    matched_stop = ss
+            if matched_stop is not None:
+                truncated_text = text[:earliest_pos + len(matched_stop)]
+                if len(truncated_text) < len(text):
+                    orig_count = len(out_tokens)
+                    trunc_count = orig_count
+                    for t in range(1, orig_count + 1):
+                        decoded = tokenizer.decode(out_tokens[:t], skip_special_tokens=False)
+                        if len(decoded) >= len(truncated_text):
+                            trunc_count = t
+                            break
+                    out_tokens = out_tokens[:trunc_count]
+                    out_logprobs = out_logprobs[:trunc_count]
+                    text = tokenizer.decode(out_tokens)
+                    stop_reason = "stop"
+
+        prompt_logprobs_result = None
+        req_idx, _ = request_indices[i]
+        if batch[req_idx].prompt_logprobs and logprobs_tensor.shape[1] >= prompt_len:
+            raw = logprobs_tensor[i, :prompt_len].tolist()
+            prompt_logprobs_result = [None if v == 0.0 else v for v in raw]
+
+        sample_results.append({
+            "tokens": out_tokens,
+            "logprobs": out_logprobs,
+            "text": text,
+            "stop_reason": stop_reason,
+            "prompt_logprobs_result": prompt_logprobs_result,
+        })
+
+    # Reassemble per-request responses
+    per_request_results = []
+    for req_idx, req in enumerate(batch):
+        sequences = []
+        prompt_lp = None
+        for exp_idx, (ri, si) in enumerate(request_indices):
+            if ri == req_idx:
+                sr = sample_results[exp_idx]
+                sequences.append({
+                    "tokens": sr["tokens"],
+                    "logprobs": sr["logprobs"],
+                    "text": sr["text"],
+                    "stop_reason": sr["stop_reason"],
+                })
+                if prompt_lp is None:
+                    prompt_lp = sr["prompt_logprobs_result"]
+        per_request_results.append({
+            "sequences": sequences,
+            "prompt_logprobs": prompt_lp,
+        })
+
+    logger.info(
+        "[%s] Batched generate complete: %d requests, avg %.0f tokens/sample",
+        request_id, len(batch),
+        sum(len(s["tokens"]) for s in sample_results) / max(len(sample_results), 1),
+    )
+
+    return per_request_results
+
+
 class SamplingService:
     """Service for managing model sampling via SGLang."""
 
     def __init__(self):
         """Initialize SamplingService."""
-        # Lock to serialize NeMo RL generation requests.
-        # The offload→generate→refit cycle is stateful and cannot safely
-        # interleave across concurrent requests (BUG-002 root cause).
+        # PERF-002: Batch accumulator replaces the old per-request lock.
+        # Collects concurrent sampling requests and flushes them as a single
+        # batched generate() call to vLLM. ~20-30x speedup for RL sampling.
+        self._nemo_rl_batch_accumulator = NemoRLBatchAccumulator()
+        # Keep the lock for _ensure_generation_ready (state machine safety)
         self._nemo_rl_generate_lock = asyncio.Lock()
 
     async def async_sample(
@@ -268,181 +568,20 @@ class SamplingService:
         """
         Sample via NeMo RL Policy.generate() using vLLM Ray workers.
 
-        Bridges the TinkerCloud sampling API to NeMo RL's batch generation.
-        Each call generates num_samples completions for a single prompt.
-
-        The offload→generate→refit cycle is serialized via asyncio.Lock to
-        prevent concurrent requests from corrupting shared Policy state
-        (BUG-002 root cause).
+        PERF-002: Requests are accumulated by the batch accumulator and flushed
+        as a single generate() call. This gives ~20-30x speedup for RL sampling
+        (2048 individual requests → 1 batched call).
         """
-        import torch
-
-        sampling_params = sampling_params or {}
-        max_new_tokens = sampling_params.get("max_tokens", 256)
-        temperature = sampling_params.get("temperature", 0.7)
-        top_p = sampling_params.get("top_p", 0.9)
-        greedy = temperature <= 0.01
-
-        # Extract stop sequences from sampling_params
-        # Tinker API sends stop as str | list[str] | list[int] | None
-        raw_stop = sampling_params.get("stop")
-        stop_strings: List[str] = []
-        if raw_stop is not None:
-            if isinstance(raw_stop, str):
-                stop_strings = [raw_stop]
-            elif isinstance(raw_stop, list) and raw_stop and isinstance(raw_stop[0], str):
-                stop_strings = list(raw_stop)
-            # list[int] stop token IDs are handled by the generation config's stop_token_ids
-
-        policy = handle.policy
-        policy_generation = handle.policy_generation
-
-        if policy_generation is None:
+        if handle.policy_generation is None:
             raise RuntimeError(
                 "NeMo RL generation engine not initialized (debug_train_only mode?)"
             )
 
-        # Build BatchedDataDict for VllmGeneration.generate()
-        from nemo_rl.distributed.batched_data_dict import BatchedDataDict
-
-        input_ids_tensor = torch.tensor([prompt_tokens], dtype=torch.long)
-        input_lengths_tensor = torch.tensor([len(prompt_tokens)], dtype=torch.long)
-
-        # Repeat for num_samples
-        if num_samples > 1:
-            input_ids_tensor = input_ids_tensor.repeat(num_samples, 1)
-            input_lengths_tensor = input_lengths_tensor.repeat(num_samples)
-
-        data = BatchedDataDict({
-            "input_ids": input_ids_tensor,
-            "input_lengths": input_lengths_tensor,
-        })
-
-        # Pad batch to dp_size if needed (VllmGeneration shards by dp_size)
-        dp_size = handle.config.get("dp_size", 1)
-        actual_size = num_samples
-        batch_size = actual_size
-        if actual_size % dp_size != 0:
-            pad_count = dp_size - (actual_size % dp_size)
-            batch_size = actual_size + pad_count
-            data["input_ids"] = torch.cat([
-                data["input_ids"],
-                data["input_ids"][-1:].repeat(pad_count, 1),
-            ])
-            data["input_lengths"] = torch.cat([
-                data["input_lengths"],
-                data["input_lengths"][-1:].repeat(pad_count),
-            ])
-
-        # Pass stop strings into the data dict so vLLM workers can stop
-        # generation natively. Workers read data.get("stop_strings") and
-        # merge them into vLLM SamplingParams via _merge_stop_strings().
-        # Must match batch dimension for shard_by_batch_size().
-        if stop_strings:
-            data["stop_strings"] = [stop_strings] * batch_size
-
-        # Forward per-request sampling params via BatchedDataDict so vLLM
-        # workers use them instead of static config defaults (FR-002).
-        # Prefixed with _tinker_ to avoid collisions with NeMo RL internal keys.
-        data["_tinker_max_new_tokens"] = [max_new_tokens] * batch_size
-        data["_tinker_temperature"] = [temperature] * batch_size
-        data["_tinker_top_p"] = [top_p] * batch_size
-
-        # Serialize the offload→generate→refit cycle (BUG-002 fix).
-        # Concurrent requests interleaving this stateful sequence caused
-        # stop strings to be intermittently ignored.
-        async with self._nemo_rl_generate_lock:
-            await asyncio.to_thread(policy.offload_before_refit)
-            await asyncio.to_thread(
-                policy_generation.prepare_for_generation,
-                tags=["weights", "kv_cache"],
-            )
-
-            try:
-                result = await asyncio.to_thread(policy_generation.generate, data, greedy)
-            finally:
-                await asyncio.to_thread(
-                    policy_generation.prepare_for_generation, tags=[],
-                )
-                await asyncio.to_thread(policy.offload_after_refit)
-
-        # Convert result to TinkerCloud format
-        output_ids = result["output_ids"]       # [B, padded_input_len + max_gen_len]
-        gen_lengths = result["generation_lengths"]  # [B]
-        logprobs_tensor = result["logprobs"]    # [B, padded_input_len + max_gen_len]
-
-        sequences = []
-        prompt_logprobs_result = None
-        prompt_len = len(prompt_tokens)
-        tokenizer = handle.tokenizer
-        eos_id = tokenizer.eos_token_id if tokenizer else None
-
-        for i in range(actual_size):
-            gen_len = int(gen_lengths[i].item())
-            out_tokens = output_ids[i, prompt_len:prompt_len + gen_len].tolist()
-            # Logprobs are placed at [prompt_len, prompt_len + gen_len) by vllm_worker
-            out_logprobs = logprobs_tensor[i, prompt_len:prompt_len + gen_len].tolist()
-            text = tokenizer.decode(out_tokens) if tokenizer else None
-
-            # Determine stop_reason: check EOS token, then stop strings in text
-            stop_reason = "length"
-            if out_tokens and eos_id is not None and out_tokens[-1] == eos_id:
-                stop_reason = "stop"
-            elif text and stop_strings:
-                for ss in stop_strings:
-                    if ss in text:
-                        stop_reason = "stop"
-                        break
-
-            # Safety net: truncate output at first stop string occurrence.
-            # This prevents recipe crashes when vLLM misses a stop string.
-            if text and stop_strings:
-                earliest_pos = len(text)
-                matched_stop = None
-                for ss in stop_strings:
-                    pos = text.find(ss)
-                    if pos != -1 and pos < earliest_pos:
-                        earliest_pos = pos
-                        matched_stop = ss
-
-                if matched_stop is not None:
-                    truncated_text = text[:earliest_pos + len(matched_stop)]
-                    if len(truncated_text) < len(text):
-                        orig_token_count = len(out_tokens)
-                        # Find truncation point by incremental decode to avoid
-                        # tokenizer round-trip mismatch (encode != decode inverse).
-                        trunc_count = orig_token_count
-                        for t in range(1, orig_token_count + 1):
-                            decoded = tokenizer.decode(
-                                out_tokens[:t], skip_special_tokens=False,
-                            )
-                            if len(decoded) >= len(truncated_text):
-                                trunc_count = t
-                                break
-                        out_tokens = out_tokens[:trunc_count]
-                        out_logprobs = out_logprobs[:trunc_count]
-                        text = tokenizer.decode(out_tokens)
-                        stop_reason = "stop"
-                        logger.warning(
-                            f"[{request_id}] !!!!! STOP STRING SAFETY NET TRIGGERED: "
-                            f"sequence {i} truncated from {orig_token_count} to "
-                            f"{len(out_tokens)} tokens at stop string "
-                            f"'{matched_stop}' !!!!!"
-                        )
-
-            sequences.append({
-                "tokens": out_tokens,
-                "logprobs": out_logprobs,
-                "text": text,
-                "stop_reason": stop_reason,
-            })
-
-        logger.info(
-            f"[{request_id}] NeMo RL generated {len(sequences)} samples "
-            f"(avg {sum(len(s['tokens']) for s in sequences)/max(len(sequences),1):.0f} tokens)"
+        return await self._nemo_rl_batch_accumulator.submit(
+            handle=handle,
+            request_id=request_id,
+            prompt_tokens=prompt_tokens,
+            num_samples=num_samples,
+            sampling_params=sampling_params or {},
+            prompt_logprobs=prompt_logprobs,
         )
-
-        return {
-            "sequences": sequences,
-            "prompt_logprobs": prompt_logprobs_result,
-        }

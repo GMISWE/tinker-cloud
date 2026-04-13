@@ -9,7 +9,7 @@ import httpx
 
 # Configuration - use environment variables or defaults for local testing
 GMI_URL = os.getenv("GMI_BASE_URL", "http://localhost:8001")
-API_KEY = os.getenv("GMI_API_KEY", "slime-dev-key")
+API_KEY = os.getenv("GMI_API_KEY", "tml-dev-key")
 
 print("=" * 80)
 print("GMI Wrapper - Test 0: Health Check")
