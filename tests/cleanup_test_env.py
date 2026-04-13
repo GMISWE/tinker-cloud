@@ -15,7 +15,7 @@ Usage:
 
 Environment variables:
     GMI_BASE_URL - API URL (default: http://localhost:8001)
-    GMI_API_KEY - API key (default: slime-dev-key)
+    GMI_API_KEY - API key (default: tml-dev-key)
 """
 import requests
 import os
@@ -23,7 +23,7 @@ import sys
 import time
 
 base_url = os.environ.get("GMI_BASE_URL", "http://localhost:8001")
-api_key = os.environ.get("GMI_API_KEY", "slime-dev-key")
+api_key = os.environ.get("GMI_API_KEY", "tml-dev-key")
 headers = {"X-API-Key": api_key, "Content-Type": "application/json"}
 
 print("=" * 80)

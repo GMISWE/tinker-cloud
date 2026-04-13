@@ -154,7 +154,7 @@ class AuthConfig(BaseModel):
     """Authentication configuration."""
 
     api_key: str = Field(
-        default_factory=lambda: os.getenv("TINKER_API_KEY", "slime-dev-key"),
+        default_factory=lambda: os.getenv("TINKER_API_KEY", "tml-dev-key"),
         description="API key for authentication"
     )
     api_key_header: str = Field(
@@ -169,7 +169,7 @@ class AuthConfig(BaseModel):
     @validator("api_key")
     def validate_api_key(cls, v):
         """Ensure API key is not empty in production."""
-        if not v or v == "slime-dev-key":
+        if not v or v == "tml-dev-key":
             env = os.getenv("ENV", "development")
             if env == "production":
                 raise ValueError("Production requires a secure API key")

@@ -16,6 +16,7 @@ from .helpers import (
     merge_configs,
 )
 from .model_config import (
+    detect_num_gpus,
     load_model_config,
     estimate_model_params,
     get_parallelism_config,
@@ -38,6 +39,7 @@ __all__ = [
     "parse_lora_config",
     "merge_configs",
     # Model config
+    "detect_num_gpus",
     "load_model_config",
     "estimate_model_params",
     "get_parallelism_config",

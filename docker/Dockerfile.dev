@@ -80,7 +80,7 @@ ENV PYTHONUNBUFFERED=1 \
     TOKENIZERS_PARALLELISM="false" \
     TRAINING_HOST="0.0.0.0" \
     TRAINING_PORT="8000" \
-    TINKER_API_KEY="slime-dev-key" \
+    TINKER_API_KEY="tml-dev-key" \
     TINKERCLOUD_BACKEND="miles" \
     LOG_LEVEL="INFO"
 

@@ -30,7 +30,7 @@ from tinker import types
 
 # Configuration
 TINKER_BASE_URL = os.getenv("TINKER_BASE_URL", "http://kgateway-training.slime-gmi:8000")
-TINKER_API_KEY = os.getenv("TINKER_API_KEY", "slime-dev-key")
+TINKER_API_KEY = os.getenv("TINKER_API_KEY", "tml-dev-key")
 BASE_MODEL = "/data/models/Qwen2.5-0.5B-Instruct_torch_dist"
 
 

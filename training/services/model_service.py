@@ -10,14 +10,13 @@ All model lifecycle operations delegate to the TrainingBackend instance.
 """
 import asyncio
 import logging
-import os
 import ray
 from datetime import datetime
 from typing import Dict, Any, Optional
 
 from ..backends.base import TrainingBackend, BackendHandle
 from ..storage import MetadataStorage
-from ..utils.model_config import extract_model_name, detect_architecture
+from ..utils.model_config import extract_model_name, detect_architecture, detect_num_gpus
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +53,7 @@ class ModelService:
         """
         logger.info("[%s] Creating model %s", request_id, model_id)
 
-        num_gpus = int(os.environ.get("SLIME_NUM_GPUS", "4"))
+        num_gpus = detect_num_gpus()
         if parallelism_config:
             num_gpus = parallelism_config.get("num_gpus", num_gpus)
 

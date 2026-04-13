@@ -24,7 +24,7 @@ This directory contains test datasets used for validating the kgateway Training 
 **Test Command**:
 ```bash
 kubectl exec -n slime-gmi slime-training-0 -- bash -c \
-  "export TINKER_API_KEY=slime-dev-key && \
+  "export TINKER_API_KEY=tml-dev-key && \
    cd /tmp/tinker-cookbook && \
    python3 -u tinker_cookbook/recipes/rl_basic.py \
      base_url=http://kgateway-training.slime-gmi:8000 \
