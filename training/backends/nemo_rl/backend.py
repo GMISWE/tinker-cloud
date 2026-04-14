@@ -41,6 +41,7 @@ class NemoRLHandle(BackendHandle):
     max_buffer_size: int = DEFAULT_MAX_BUFFER_SIZE  # CHK006: bound buffer growth
     _buffer_lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # CHK018: thread safety
     hf_path: str = ""
+    image_preprocessor: Any = None   # ImagePreprocessor (VLM only)
     colocated_inference: bool = True
     rlve_config: Optional[Dict[str, Any]] = None
     wandb_config: Optional[Dict[str, Any]] = None
@@ -144,6 +145,23 @@ class NemoRLBackend(TrainingBackend):
                 debug_train_only=debug_train_only,
             )
 
+
+            # Detect VLM via config (cheap — only reads config.json)
+            try:
+                from transformers import AutoConfig
+                cfg = AutoConfig.from_pretrained(hf_path, trust_remote_code=True)
+                is_vlm = (
+                    hasattr(cfg, "vision_config")
+                    or "VL" in cfg.__class__.__name__
+                    or "Vision" in cfg.__class__.__name__
+                )
+                if is_vlm:
+                    from .image_utils import ImagePreprocessor
+                    handle.image_preprocessor = ImagePreprocessor(hf_path)
+                    logger.info("[%s] VLM detected: %s", request_id, cfg.__class__.__name__)
+            except Exception as e:
+                logger.debug("[%s] VLM detection skipped: %s", request_id, e)
+
             logger.info("[%s] NeMo RL model %s created successfully", request_id, model_id)
             return handle
 
@@ -174,7 +192,7 @@ class NemoRLBackend(TrainingBackend):
             dp_size = h.config.get("dp_size", 1)
             mbs = h.config.get("policy", {}).get("train_micro_batch_size", 1)
             batched_data = await asyncio.to_thread(
-                _maybe_pad_batch, batched_data, dp_size, mbs,
+                _maybe_pad_batch, batched_data, dp_size, mbs, h.image_preprocessor,
             )
 
             # Sleep vLLM to free GPU memory for training workers
@@ -255,6 +273,7 @@ class NemoRLBackend(TrainingBackend):
             # Convert data to NeMo RL BatchedDataDict (outside lock — CPU-bound)
             batched_data = self.converter.forward_backward_to_backend(
                 data, loss_fn, h.config,
+                image_preprocessor=h.image_preprocessor,
             )
 
             # CHK018: Acquire lock for buffer access (concurrent requests)
@@ -403,7 +422,7 @@ class NemoRLBackend(TrainingBackend):
             dp_size = h.config.get("dp_size", 1)
             mbs = h.config.get("policy", {}).get("train_micro_batch_size", 1)
             all_data = await asyncio.to_thread(
-                _maybe_pad_batch, all_data, dp_size, mbs,
+                _maybe_pad_batch, all_data, dp_size, mbs, h.image_preprocessor,
             )
             if all_data.size != original_size:
                 logger.info(
@@ -957,7 +976,7 @@ def _set_learning_rate(policy, learning_rate: float):
         )
 
 
-def _maybe_pad_batch(batch, dp_size: int, mbs: int):
+def _maybe_pad_batch(batch, dp_size: int, mbs: int, image_preprocessor=None):
     """Pad batch to next multiple of mbs * dp_size.
 
     NeMo RL's shard_by_batch_size() asserts batch_size % dp_size == 0.
@@ -973,31 +992,26 @@ def _maybe_pad_batch(batch, dp_size: int, mbs: int):
     if min_padding <= 0:
         return batch
 
-    batch["input_ids"] = torch.cat([
-        batch["input_ids"],
-        batch["input_ids"][-1].unsqueeze(0).repeat(min_padding, 1),
-    ])
-    batch["input_lengths"] = torch.cat([
-        batch["input_lengths"],
-        batch["input_lengths"][-1].unsqueeze(0).repeat(min_padding),
-    ])
-    if "token_mask" in batch:
-        batch["token_mask"] = torch.cat([
-            batch["token_mask"],
-            batch["token_mask"][-1].unsqueeze(0).repeat(min_padding, 1),
-        ])
-    batch["sample_mask"] = torch.cat([
-        batch["sample_mask"],
-        torch.zeros_like(batch["sample_mask"][-1]).unsqueeze(0).repeat(min_padding),
-    ])
-    # Pad all remaining 2D tensor fields that NeMo RL may access during sharding
-    for key in ("advantages", "prev_logprobs", "generation_logprobs", "reference_policy_logprobs"):
+    # Most fields pad by repeating the last sample (1D or 2D)
+    for key in ("input_ids", "input_lengths", "token_mask",
+                "advantages", "prev_logprobs", "generation_logprobs", "reference_policy_logprobs"):
         if key in batch:
-            batch[key] = torch.cat([
-                batch[key],
-                batch[key][-1].unsqueeze(0).repeat(min_padding, 1),
-            ])
+            t = batch[key]
+            batch[key] = torch.cat([t, t[-1:].expand(min_padding, *t.shape[1:])])
 
+    # sample_mask is zero-padded so padded samples don't contribute to loss
+    sm = batch["sample_mask"]
+    batch["sample_mask"] = torch.cat([sm, torch.zeros(min_padding, dtype=sm.dtype, device=sm.device)])
+
+    # Pad PackedTensor multimodal fields with None entries (VLM only)
+    if image_preprocessor is not None:
+        from nemo_rl.data.multimodal_utils import PackedTensor
+        for key in image_preprocessor.multimodal_keys:
+            if key in batch.data:
+                batch[key] = PackedTensor(
+                    batch[key].tensors + [None] * min_padding,
+                    batch[key].dim_to_pack,
+                )
     return batch
 
 
