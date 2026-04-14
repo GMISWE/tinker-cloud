@@ -325,6 +325,16 @@ class ModelInputChunk(BaseModel):
     format: Optional[str] = Field(default=None, description="Image format: png/jpeg")
     expected_tokens: Optional[int] = Field(default=None, description="Expected token count")
 
+    @model_validator(mode='after')
+    def infer_image_type(self):
+        # Defensive: older SDK versions use model_dump(exclude_unset=True) which
+        # strips ImageChunk.type (default value never explicitly set). Infer
+        # type from presence of image-only fields so server works with either
+        # well-behaved or buggy clients.
+        if self.data is not None and self.type == "encoded_text":
+            self.type = "image"
+        return self
+
 
 
 
