@@ -180,12 +180,24 @@ class NemoRLDataConverter(DataConverter):
         input_ids becomes target_tokens — correct alignment.
         """
         batch_size = len(data)
+        image_token_id = (
+            image_preprocessor.image_token_id if image_preprocessor is not None else None
+        )
 
-        # Compute max reconstructed sequence length (N-1 input tokens + 1 = N)
+        # Compute max reconstructed sequence length.
+        # For VLM, expand chunks to include image placeholder tokens
+        # (<|image_pad|>=151655 for Qwen3-VL) at each image position.
+        # For text-only, fall back to the text-chunk concatenation.
+        def _full_input_tokens(datum):
+            if image_token_id is not None:
+                expanded = _expand_chunks_to_full_sequence(datum, image_token_id)
+                if len(expanded) > 0:
+                    return expanded
+            return _extract_tokens(datum)
+
         max_seq_len = 0
         for datum in data:
-            tokens = _extract_tokens(datum)
-            max_seq_len = max(max_seq_len, len(tokens) + 1)  # +1 for reconstruction
+            max_seq_len = max(max_seq_len, len(_full_input_tokens(datum)) + 1)
 
         input_ids = torch.zeros(batch_size, max_seq_len, dtype=torch.long)
         input_lengths = torch.zeros(batch_size, dtype=torch.long)
@@ -193,10 +205,10 @@ class NemoRLDataConverter(DataConverter):
         sample_mask = torch.ones(batch_size, dtype=torch.float32)
 
         for i, datum in enumerate(data):
-            # Extract model_input.tokens (length N-1)
-            input_tokens = _extract_tokens(datum)
+            # Get full input sequence (with image_pad tokens inserted for VLM)
+            input_tokens = _full_input_tokens(datum)
 
-            # Extract target_tokens (length N-1) — need last element
+            # Extract target_tokens — same length as input_tokens shifted by 1
             target_tokens = _extract_sft_target_tokens(datum)
 
             # Reconstruct full sequence: concat(input_tokens, [target_tokens[-1]])
@@ -204,7 +216,6 @@ class NemoRLDataConverter(DataConverter):
                 last_token = target_tokens[-1].unsqueeze(0)
                 full_tokens = torch.cat([input_tokens, last_token])
             else:
-                # Malformed SFT datum — exclude from loss via sample_mask=0
                 full_tokens = input_tokens
                 sample_mask[i] = 0.0
                 logger.warning(
@@ -266,8 +277,6 @@ class NemoRLDataConverter(DataConverter):
                 for key, tensors_list in multimodal_fields.items():
                     dim = get_dim_to_pack_along(image_preprocessor.processor, key)
                     batch_dict[key] = PackedTensor(tensors_list, dim_to_pack=dim)
-
-                logger.info("Packed %d multimodal keys into BatchedDataDict", len(multimodal_fields))
 
         return BatchedDataDict(batch_dict)
 
@@ -478,6 +487,32 @@ def _extract_tokens(datum) -> torch.Tensor:
     if isinstance(tokens, torch.Tensor):
         return tokens.detach().cpu().long()
     return torch.tensor(tokens, dtype=torch.long)
+
+
+def _expand_chunks_to_full_sequence(datum, image_token_id: int) -> torch.Tensor:
+    """Expand model_input.chunks into a dense token sequence.
+
+    Text chunks contribute their tokens directly. Image chunks contribute
+    `expected_tokens` copies of `image_token_id` (e.g. <|image_pad|>=151655
+    for Qwen3-VL). The resulting sequence matches the full expanded sequence
+    that the cookbook used to compute target_tokens and weights.
+    """
+    model_input = _get_attr_or_key(datum, "model_input")
+    if model_input is None:
+        return torch.empty(0, dtype=torch.long)
+    chunks = _get_attr_or_key(model_input, "chunks") or []
+    all_tokens: list = []
+    for chunk in chunks:
+        ctype = _get_attr_or_key(chunk, "type")
+        if ctype == "image":
+            n = _get_attr_or_key(chunk, "expected_tokens") or 0
+            all_tokens.extend([image_token_id] * int(n))
+        else:
+            tokens = _get_attr_or_key(chunk, "tokens") or []
+            if isinstance(tokens, torch.Tensor):
+                tokens = tokens.tolist()
+            all_tokens.extend(tokens)
+    return torch.tensor(all_tokens, dtype=torch.long)
 
 
 def _extract_images(datum) -> list:

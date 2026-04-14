@@ -26,6 +26,14 @@ class ImagePreprocessor:
             self._multimodal_keys = get_multimodal_keys_from_processor(self.processor)
             logger.info("Multimodal keys for %s: %s", self.hf_path, self._multimodal_keys)
         return self._multimodal_keys
+
+    @property
+    def image_token_id(self) -> int:
+        """Token ID used as placeholder for each image patch (e.g. <|image_pad|>)."""
+        image_token = getattr(self.processor, "image_token", None)
+        if image_token is None:
+            raise ValueError(f"Processor for {self.hf_path} has no image_token")
+        return self.processor.tokenizer.convert_tokens_to_ids(image_token)
     
     def process_images(self, image_bytes_list: List[bytes]) -> Dict[str, torch.Tensor]:
         if not image_bytes_list:
