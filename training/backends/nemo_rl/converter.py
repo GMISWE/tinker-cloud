@@ -74,6 +74,7 @@ class NemoRLDataConverter(DataConverter):
         data: List[Dict],
         loss_fn: str,
         args: Any,
+        image_preprocessor=None,
     ) -> Any:
         """
         Convert Tinker data to NeMo RL BatchedDataDict for training.
@@ -89,7 +90,7 @@ class NemoRLDataConverter(DataConverter):
 
         # SFT path — reconstruct full sequence for NLLLoss
         if loss_fn == "cross_entropy":
-            return self._forward_backward_sft(data)
+            return self._forward_backward_sft(data, image_preprocessor)
 
         max_seq_len = _compute_max_seq_len(data)
         batch_size = len(data)
@@ -157,7 +158,7 @@ class NemoRLDataConverter(DataConverter):
             "sample_mask": sample_mask,
         })
 
-    def _forward_backward_sft(self, data: List[Dict]) -> Any:
+    def _forward_backward_sft(self, data: List[Dict], image_preprocessor=None) -> Any:
         """Convert SFT data to NeMo RL BatchedDataDict for NLLLoss.
 
         SFT datum provides (from datum_from_tokens_weights in tinker-cookbook):
@@ -238,12 +239,38 @@ class NemoRLDataConverter(DataConverter):
             batch_size, max_seq_len,
         )
 
-        return BatchedDataDict({
+
+        batch_dict = {
             "input_ids": input_ids,
             "input_lengths": input_lengths,
             "token_mask": token_mask,
             "sample_mask": sample_mask,
-        })
+        }
+
+        if image_preprocessor is not None:
+            has_images = any(_extract_images(datum) for datum in data)
+            if has_images:
+                from nemo_rl.data.multimodal_utils import PackedTensor, get_dim_to_pack_along
+
+                multimodal_fields = {key: [] for key in image_preprocessor.multimodal_keys}
+                for datum in data:
+                    images = _extract_images(datum)
+                    if images:
+                        processed = image_preprocessor.process_images(images)
+                        for key in image_preprocessor.multimodal_keys:
+                            multimodal_fields[key].append(processed.get(key))
+                    else:
+                        for key in image_preprocessor.multimodal_keys:
+                            multimodal_fields[key].append(None)
+
+                for key, tensors_list in multimodal_fields.items():
+                    dim = get_dim_to_pack_along(image_preprocessor.processor, key)
+                    batch_dict[key] = PackedTensor(tensors_list, dim_to_pack=dim)
+
+                logger.info("Packed %d multimodal keys into BatchedDataDict", len(multimodal_fields))
+
+        return BatchedDataDict(batch_dict)
+
 
     def backend_to_forward_result(
         self,
@@ -401,14 +428,32 @@ def _extract_tokens(datum) -> torch.Tensor:
     # Try nested model_input first (Pydantic ForwardBackwardDatum format)
     model_input = _get_attr_or_key(datum, "model_input")
     if model_input is not None:
-        # Try chunks format: model_input.chunks[0].tokens
         chunks = _get_attr_or_key(model_input, "chunks")
         if chunks:
-            tokens = _get_attr_or_key(chunks[0], "tokens")
-            if tokens is not None:
-                if isinstance(tokens, torch.Tensor):
-                    return tokens.detach().cpu().long()
-                return torch.tensor(tokens, dtype=torch.long)
+            # Fast path: text-only models have a single text chunk
+            if len(chunks) == 1:
+                tokens = _get_attr_or_key(chunks[0], "tokens")
+                if tokens is not None:
+                    if isinstance(tokens, torch.Tensor):
+                        return tokens.detach().cpu().long()
+                    return torch.tensor(tokens, dtype=torch.long)
+            else:
+                # Multi-chunk path: VLM with interleaved text/image chunks.
+                # Concatenate tokens from all text chunks; skip image chunks
+                # (their placeholder tokens are already in adjacent text chunks).
+                all_tokens = []
+                for chunk in chunks:
+                    chunk_type = _get_attr_or_key(chunk, "type")
+                    if chunk_type == "image":
+                        continue
+                    tokens = _get_attr_or_key(chunk, "tokens")
+                    if tokens is not None:
+                        if isinstance(tokens, torch.Tensor):
+                            all_tokens.append(tokens.detach().cpu().long())
+                        else:
+                            all_tokens.append(torch.tensor(tokens, dtype=torch.long))
+                if all_tokens:
+                    return torch.cat(all_tokens)
 
         # Try direct tokens: model_input.tokens
         tokens = _get_attr_or_key(model_input, "tokens")
@@ -433,6 +478,35 @@ def _extract_tokens(datum) -> torch.Tensor:
     if isinstance(tokens, torch.Tensor):
         return tokens.detach().cpu().long()
     return torch.tensor(tokens, dtype=torch.long)
+
+
+def _extract_images(datum) -> list:
+    """Extract image bytes from datum's model_input chunks.
+
+    Returns list of decoded image bytes (one per ImageChunk).
+    Returns empty list if no images.
+    """
+    import base64
+
+    model_input = _get_attr_or_key(datum, "model_input")
+    if model_input is None:
+        return []
+
+    chunks = _get_attr_or_key(model_input, "chunks")
+    if not chunks:
+        return []
+
+    images = []
+    for chunk in chunks:
+        chunk_type = _get_attr_or_key(chunk, "type")
+        if chunk_type == "image":
+            data = _get_attr_or_key(chunk, "data")
+            if data is not None:
+                if isinstance(data, str):
+                    images.append(base64.b64decode(data))
+                elif isinstance(data, bytes):
+                    images.append(data)
+    return images
 
 
 def _extract_loss_masks(datum, seq_len: int) -> torch.Tensor:

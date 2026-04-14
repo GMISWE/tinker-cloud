@@ -316,9 +316,16 @@ class SFTLossFnInputs(LossFnInputs):
 
 
 class ModelInputChunk(BaseModel):
-    """Chunk in model input."""
-    tokens: List[int] = Field(..., description="Token IDs")
-    type: str = Field(default="encoded_text", description="Chunk type")
+    """Chunk in model input - text or image."""
+    type: str = Field(default="encoded_text", description="Chunk type: encoded_text or image")
+    # text fields (used when type == "encoded_text")
+    tokens: Optional[List[int]] = Field(default=None, description="Token IDs")
+    # image fields (used when type == "image")
+    data: Optional[str] = Field(default=None, description="Base64-encoded image bytes")
+    format: Optional[str] = Field(default=None, description="Image format: png/jpeg")
+    expected_tokens: Optional[int] = Field(default=None, description="Expected token count")
+
+
 
 
 class ModelInput(BaseModel):

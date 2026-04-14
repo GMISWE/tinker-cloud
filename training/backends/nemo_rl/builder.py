@@ -51,6 +51,21 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
 
         hf_path = base_model
 
+        # Detect VLM via config (cheap — only reads config.json)
+        is_vlm = False
+        try:
+            from transformers import AutoConfig
+            cfg = AutoConfig.from_pretrained(hf_path, trust_remote_code=True)
+            is_vlm = (
+                hasattr(cfg, "vision_config")
+                or "VL" in cfg.__class__.__name__
+                or "Vision" in cfg.__class__.__name__
+            )
+            if is_vlm:
+                logger.info("VLM detected: %s — enforcing sequence_packing=False, cp_size=1", cfg.__class__.__name__)
+        except Exception as e:
+            logger.debug("VLM detection skipped: %s", e)
+
         # Warn about Miles-only RLVE server-side features
         if rlve_config and rlve_config.get("enabled", False):
             miles_only_keys = [
@@ -76,6 +91,13 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
             tp_size = parallelism.get("tensor_parallel", 1)
             pp_size = parallelism.get("pipeline_parallel", 1)
             cp_size = parallelism.get("context_parallel", 1)
+            if is_vlm and cp_size > 1:
+                logger.warning(
+                    "VLM models require cp_size=1 (NeMo RL workers assert empty "
+                    "multimodal_kwargs when CP > 1). Overriding cp_size=%d -> 1.",
+                    cp_size,
+                )
+                cp_size = 1
             model_parallel = tp_size * pp_size * cp_size
             dp_size = max(1, num_gpus // model_parallel)
 
