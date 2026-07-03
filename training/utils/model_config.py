@@ -12,6 +12,66 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger(__name__)
 
 
+def detect_num_gpus() -> int:
+    """
+    Auto-detect the number of available GPUs.
+
+    Resolution order:
+    1. NUM_GPUS env var (canonical, backend-agnostic)
+    2. SLIME_NUM_GPUS env var (legacy Miles compat)
+    3. Ray cluster GPU resources (if Ray is initialized)
+    4. nvidia-smi device count
+    5. Fallback to 1
+
+    Returns:
+        Number of GPUs available.
+    """
+    # 1. Canonical env var
+    num_gpus_env = os.getenv("NUM_GPUS")
+    if num_gpus_env:
+        n = int(num_gpus_env)
+        logger.info("GPU count from NUM_GPUS env: %d", n)
+        return n
+
+    # 2. Legacy env var
+    slime_env = os.getenv("SLIME_NUM_GPUS")
+    if slime_env:
+        n = int(slime_env)
+        logger.info("GPU count from SLIME_NUM_GPUS env: %d", n)
+        return n
+
+    # 3. Ray cluster resources
+    try:
+        import ray
+        if ray.is_initialized():
+            resources = ray.cluster_resources()
+            n = int(resources.get("GPU", 0))
+            if n > 0:
+                logger.info("GPU count from Ray cluster: %d", n)
+                return n
+    except Exception:
+        pass
+
+    # 4. nvidia-smi
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            n = len(result.stdout.strip().splitlines())
+            if n > 0:
+                logger.info("GPU count from nvidia-smi: %d", n)
+                return n
+    except Exception:
+        pass
+
+    # 5. Fallback
+    logger.warning("Could not detect GPUs, defaulting to 1")
+    return 1
+
+
 def load_model_config(base_model: str) -> Dict[str, Any]:
     """
     Load HuggingFace model config from base_model path.
@@ -128,7 +188,7 @@ def get_parallelism_config(
     # 1. Environment defaults
     default_tp = int(os.getenv("SLIME_DEFAULT_TP", "1"))
     default_pp = int(os.getenv("SLIME_DEFAULT_PP", "1"))
-    default_num_gpus = int(os.getenv("SLIME_NUM_GPUS", "4"))
+    default_num_gpus = detect_num_gpus()
 
     # 2. Auto-detect based on model size (if env not explicitly set)
     if default_tp == 1:

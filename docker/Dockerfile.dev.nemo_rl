@@ -52,6 +52,10 @@ RUN mkdir -p /data/models /data/datasets /data/checkpoints /data/trajectories /d
 # We copy our modified nemo_rl Python package over it (preserving setup.py, etc.).
 COPY RL/nemo_rl /opt/nemo-rl/nemo_rl
 
+# Automodel: use the base image's version (compatible with its transformers).
+# Our local Automodel submodule may be ahead and require a newer transformers
+# than the base image's pre-built Ray worker venvs provide.
+
 # Copy tinker_gmi from local
 RUN rm -rf /workspace/tinker_gmi 2>/dev/null || true
 COPY tinker_gmi /workspace/tinker_gmi
@@ -60,7 +64,7 @@ RUN cd /workspace/tinker_gmi && pip install -e . --no-deps
 # Copy tinker-cookbook from local
 RUN rm -rf /workspace/tinker-cookbook 2>/dev/null || true
 COPY tinker-cookbook /workspace/tinker-cookbook
-RUN cd /workspace/tinker-cookbook && pip install -e . --no-deps
+RUN cd /workspace/tinker-cookbook && SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0.dev0 pip install -e . --no-deps
 
 # ======================================== Environment =============================================
 # Training API
@@ -69,7 +73,7 @@ ENV PYTHONUNBUFFERED=1 \
     TOKENIZERS_PARALLELISM="false" \
     TRAINING_HOST="0.0.0.0" \
     TRAINING_PORT="8000" \
-    TINKER_API_KEY="slime-dev-key" \
+    TINKER_API_KEY="tml-dev-key" \
     TINKERCLOUD_BACKEND="nemo_rl" \
     LOG_LEVEL="INFO"
 
@@ -79,8 +83,8 @@ ENV CUDA_DEVICE_MAX_CONNECTIONS="1" \
     NCCL_DEBUG="INFO" \
     NCCL_IB_DISABLE="0"
 
-# Ray
-ENV NUM_GPUS="4"
+# Ray — NUM_GPUS auto-detected by entrypoint if not set
+# ENV NUM_GPUS="4"
 
 # HuggingFace
 ENV HF_HOME="/data/models" \

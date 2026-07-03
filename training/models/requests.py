@@ -13,7 +13,7 @@ class LoraConfig(BaseModel):
     """LoRA (Low-Rank Adaptation) configuration."""
 
     rank: int = Field(default=0, ge=0, description="LoRA rank (0 = no LoRA)")
-    alpha: int = Field(default=0, ge=0, description="LoRA alpha parameter")
+    alpha: Optional[int] = Field(default=None, ge=0, description="LoRA alpha parameter (defaults to rank if not set)")
     dropout: float = Field(default=0.0, ge=0.0, le=1.0, description="LoRA dropout rate")
     seed: Optional[int] = Field(default=None, description="Random seed for LoRA")
     train_unembed: bool = Field(default=True, description="Train unembedding layer")
@@ -26,7 +26,7 @@ class ParallelismConfig(BaseModel):
 
     tensor_parallel_size: int = Field(default=1, ge=1, le=8, description="Tensor parallelism degree")
     pipeline_parallel_size: int = Field(default=1, ge=1, le=8, description="Pipeline parallelism degree")
-    num_gpus: int = Field(default=4, ge=1, le=32, description="Total number of GPUs")
+    num_gpus: Optional[int] = Field(default=None, ge=1, le=128, description="Total number of GPUs (auto-detected if not set)")
 
 
 class RLVEConfig(BaseModel):
@@ -316,9 +316,26 @@ class SFTLossFnInputs(LossFnInputs):
 
 
 class ModelInputChunk(BaseModel):
-    """Chunk in model input."""
-    tokens: List[int] = Field(..., description="Token IDs")
-    type: str = Field(default="encoded_text", description="Chunk type")
+    """Chunk in model input - text or image."""
+    type: str = Field(default="encoded_text", description="Chunk type: encoded_text or image")
+    # text fields (used when type == "encoded_text")
+    tokens: Optional[List[int]] = Field(default=None, description="Token IDs")
+    # image fields (used when type == "image")
+    data: Optional[str] = Field(default=None, description="Base64-encoded image bytes")
+    format: Optional[str] = Field(default=None, description="Image format: png/jpeg")
+    expected_tokens: Optional[int] = Field(default=None, description="Expected token count")
+
+    @model_validator(mode='after')
+    def infer_image_type(self):
+        # Defensive: older SDK versions use model_dump(exclude_unset=True) which
+        # strips ImageChunk.type (default value never explicitly set). Infer
+        # type from presence of image-only fields so server works with either
+        # well-behaved or buggy clients.
+        if self.data is not None and self.type == "encoded_text":
+            self.type = "image"
+        return self
+
+
 
 
 class ModelInput(BaseModel):
@@ -369,7 +386,10 @@ class PromptInput(BaseModel):
     def get_tokens(self) -> List[int]:
         """Extract tokens from whichever format was provided."""
         if self.chunks:
-            return self.chunks[0].tokens
+            tokens = []
+            for chunk in self.chunks:
+                tokens.extend(chunk.tokens)
+            return tokens
         elif self.tokens:
             return self.tokens
         elif self.input_ids:

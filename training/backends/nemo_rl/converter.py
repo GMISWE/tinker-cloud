@@ -1,16 +1,26 @@
 """
 NeMo RL data converter — converts Tinker Datum format to NeMo RL's
-BatchedDataDict[ClippedPGLossDataDict] format.
+BatchedDataDict format for both RL and SFT training.
 
-Field mapping (Tinker → NeMo RL):
-  tokens           → input_ids         [B, S]
-  loss_masks       → token_mask        [B, S]
-  advantages       → advantages        [B, S]
-  log_probs        → prev_logprobs     [B, S]
-  rollout_log_probs→ generation_logprobs[B, S]
-  ref_log_probs    → reference_policy_logprobs [B, S]
-  (computed)       → input_lengths     [B]
-  (all ones)       → sample_mask       [B]
+RL path (ClippedPGLossFn):
+  model_input.tokens + target_tokens[-1] → input_ids  [B, S]  (reconstructed)
+  mask (right-aligned)                   → token_mask [B, S]
+  advantages (right-aligned)             → advantages [B, S]
+  log_probs (right-aligned)              → prev_logprobs [B, S]
+  rollout_log_probs (right-aligned)      → generation_logprobs [B, S]
+  ref_log_probs (right-aligned)          → reference_policy_logprobs [B, S]
+  (computed)                             → input_lengths [B]
+  (all ones)                             → sample_mask   [B]
+
+  Position convention: NeMo RL losses slice [B, S] fields [:, 1:], so
+  position p must describe target token x_p. Alignment details and the
+  wire/flat layout cases: specs/001-dual-backend-support/bugs/BUG-012.
+
+SFT path (NLLLoss, loss_fn="cross_entropy"):
+  model_input.tokens + target_tokens[-1] → input_ids    [B, S]  (reconstructed)
+  [0.0] + weights                        → token_mask   [B, S]  (reconstructed)
+  (computed)                             → input_lengths [B]
+  (all ones)                             → sample_mask   [B]
 """
 import logging
 from typing import Any, Dict, List
@@ -33,23 +43,26 @@ class NemoRLDataConverter(DataConverter):
         """
         Convert Tinker data to NeMo RL format for forward-only pass.
 
-        Only includes fields needed for logprob computation:
-        input_ids, input_lengths, token_mask.
+        Only includes fields needed for logprob computation (input_ids,
+        input_lengths, token_mask) plus sample_mask for dp-size padding.
+        Datums with target_tokens are reconstructed to the full sequence;
+        backend_to_forward_result() drops position 0 to keep alignment.
         """
         if not data:
             return self._empty_batched_data_dict()
 
-        max_seq_len = _compute_max_seq_len(data)
+        full_tokens_B = [_full_sequence_tokens(datum) for datum in data]
+        max_seq_len = max(len(t) for t in full_tokens_B)
         batch_size = len(data)
 
         input_ids = torch.zeros(batch_size, max_seq_len, dtype=torch.long)
         input_lengths = torch.zeros(batch_size, dtype=torch.long)
         token_mask = torch.zeros(batch_size, max_seq_len, dtype=torch.float32)
+        sample_mask = torch.ones(batch_size, dtype=torch.float32)
 
-        for i, datum in enumerate(data):
-            tokens = _extract_tokens(datum)
-            seq_len = len(tokens)
-            input_ids[i, :seq_len] = tokens
+        for i, (datum, full_tokens) in enumerate(zip(data, full_tokens_B)):
+            seq_len = len(full_tokens)
+            input_ids[i, :seq_len] = full_tokens
             input_lengths[i] = seq_len
 
             masks = _extract_loss_masks(datum, seq_len)
@@ -61,6 +74,7 @@ class NemoRLDataConverter(DataConverter):
             "input_ids": input_ids,
             "input_lengths": input_lengths,
             "token_mask": token_mask,
+            "sample_mask": sample_mask,
         })
 
     def forward_backward_to_backend(
@@ -68,18 +82,27 @@ class NemoRLDataConverter(DataConverter):
         data: List[Dict],
         loss_fn: str,
         args: Any,
+        image_preprocessor=None,
     ) -> Any:
         """
         Convert Tinker data to NeMo RL BatchedDataDict for training.
 
-        Maps all fields needed by ClippedPGLossDataDict:
-        input_ids, advantages, prev_logprobs, generation_logprobs,
-        reference_policy_logprobs, token_mask, sample_mask, input_lengths.
+        Two paths:
+        - loss_fn == "cross_entropy" (SFT): Builds BatchedDataDict for NLLLoss
+          with reconstructed full sequence (input_ids, token_mask, sample_mask,
+          input_lengths). No RL-specific fields.
+        - Other loss_fn values (RL): Maps all fields needed by ClippedPGLossDataDict.
         """
         if not data:
             return self._empty_batched_data_dict()
 
-        max_seq_len = _compute_max_seq_len(data)
+        # SFT path — reconstruct full sequence for NLLLoss
+        if loss_fn == "cross_entropy":
+            return self._forward_backward_sft(data, image_preprocessor)
+
+        full_tokens_B = [_full_sequence_tokens(datum) for datum in data]
+
+        max_seq_len = max((len(t) for t in full_tokens_B), default=0)
         batch_size = len(data)
 
         # Initialize tensors with padding (zeros)
@@ -92,39 +115,29 @@ class NemoRLDataConverter(DataConverter):
         reference_policy_logprobs = torch.zeros(batch_size, max_seq_len, dtype=torch.float32)
         sample_mask = torch.ones(batch_size, dtype=torch.float32)
 
-        for i, datum in enumerate(data):
-            tokens = _extract_tokens(datum)
-            seq_len = len(tokens)
-            input_ids[i, :seq_len] = tokens
+        for i, (datum, full_tokens) in enumerate(zip(data, full_tokens_B)):
+            seq_len = len(full_tokens)
+            input_ids[i, :seq_len] = full_tokens
             input_lengths[i] = seq_len
 
-            # Loss masks → token_mask (full sequence length, 0 for prompt, 1 for response)
             masks = _extract_loss_masks(datum, seq_len)
             token_mask[i, :seq_len] = masks
 
-            # Response-length fields need to be placed in the response portion
-            response_length = int(masks.sum().item())
-            prompt_length = seq_len - response_length
+            if i == 0:
+                logger.info(
+                    "RL converter: seq_len=%d, masked_positions=%d",
+                    seq_len, int(masks.sum().item()),
+                )
 
-            # Advantages (response-length → placed at response positions)
-            adv = _extract_field(datum, "advantages", response_length)
-            if adv is not None:
-                advantages[i, prompt_length:seq_len] = adv
-
-            # Prev logprobs (log_probs from behavior policy)
-            lp = _extract_field(datum, "log_probs", response_length)
-            if lp is not None:
-                prev_logprobs[i, prompt_length:seq_len] = lp
-
-            # Generation logprobs (rollout_log_probs from SGLang sampling)
-            rlp = _extract_field(datum, "rollout_log_probs", response_length)
-            if rlp is not None:
-                generation_logprobs[i, prompt_length:seq_len] = rlp
-
-            # Reference policy logprobs
-            ref_lp = _extract_field(datum, "ref_log_probs", response_length)
-            if ref_lp is not None:
-                reference_policy_logprobs[i, prompt_length:seq_len] = ref_lp
+            for field_name, dest in (
+                ("advantages", advantages),
+                ("log_probs", prev_logprobs),
+                ("rollout_log_probs", generation_logprobs),
+                ("ref_log_probs", reference_policy_logprobs),
+            ):
+                values = _extract_field(datum, field_name)
+                if values is not None:
+                    _place_right_aligned(dest[i], values, seq_len)
 
         from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 
@@ -139,18 +152,146 @@ class NemoRLDataConverter(DataConverter):
             "sample_mask": sample_mask,
         })
 
+    def _forward_backward_sft(self, data: List[Dict], image_preprocessor=None) -> Any:
+        """Convert SFT data to NeMo RL BatchedDataDict for NLLLoss.
+
+        SFT datum provides (from datum_from_tokens_weights in tinker-cookbook):
+          model_input.tokens       = tokens[:-1]   (length N-1)
+          loss_fn_inputs["target_tokens"] = tokens[1:]    (length N-1)
+          loss_fn_inputs["weights"]       = weights[1:]   (length N-1)
+
+        NLLLoss expects:
+          input_ids  = full unshifted sequence [B, S]  (length N)
+          token_mask = full-length mask [B, S]          (NLLLoss slices [:, 1:])
+          sample_mask = [B]
+          input_lengths = [B]
+
+        Reconstruction:
+          input_ids  = concat(model_input.tokens, [target_tokens[-1]])  → length N
+          token_mask = concat([0.0], weights)                           → length N
+
+        After NLLLoss slices [:, 1:], token_mask becomes weights and
+        input_ids becomes target_tokens — correct alignment.
+        """
+        batch_size = len(data)
+        image_token_id = (
+            image_preprocessor.image_token_id if image_preprocessor is not None else None
+        )
+
+        # Compute max reconstructed sequence length.
+        # For VLM, expand chunks to include image placeholder tokens
+        # (<|image_pad|>=151655 for Qwen3-VL) at each image position.
+        # For text-only, fall back to the text-chunk concatenation.
+        def _full_input_tokens(datum):
+            if image_token_id is not None:
+                expanded = _expand_chunks_to_full_sequence(datum, image_token_id)
+                if len(expanded) > 0:
+                    return expanded
+            return _extract_tokens(datum)
+
+        max_seq_len = 0
+        for datum in data:
+            max_seq_len = max(max_seq_len, len(_full_input_tokens(datum)) + 1)
+
+        input_ids = torch.zeros(batch_size, max_seq_len, dtype=torch.long)
+        input_lengths = torch.zeros(batch_size, dtype=torch.long)
+        token_mask = torch.zeros(batch_size, max_seq_len, dtype=torch.float32)
+        sample_mask = torch.ones(batch_size, dtype=torch.float32)
+
+        for i, datum in enumerate(data):
+            # Get full input sequence (with image_pad tokens inserted for VLM)
+            input_tokens = _full_input_tokens(datum)
+
+            # Extract target_tokens — same length as input_tokens shifted by 1
+            target_tokens = _extract_target_tokens(datum)
+
+            # Reconstruct full sequence: concat(input_tokens, [target_tokens[-1]])
+            if target_tokens is not None and len(target_tokens) > 0:
+                last_token = target_tokens[-1].unsqueeze(0)
+                full_tokens = torch.cat([input_tokens, last_token])
+            else:
+                full_tokens = input_tokens
+                sample_mask[i] = 0.0
+                logger.warning(
+                    "SFT datum %d: no target_tokens found, excluding from training", i,
+                )
+
+            seq_len = len(full_tokens)
+            input_ids[i, :seq_len] = full_tokens
+            input_lengths[i] = seq_len
+
+            # Extract weights (length N-1)
+            weights = _extract_sft_weights(datum)
+
+            # Reconstruct full mask: concat([0.0], weights) → length N
+            if weights is not None:
+                full_mask = torch.cat([torch.zeros(1, dtype=torch.float32), weights])
+            else:
+                # Fallback: mask entire response (all ones except first position)
+                full_mask = torch.ones(seq_len, dtype=torch.float32)
+                full_mask[0] = 0.0
+                logger.warning(
+                    "SFT datum %d: no weights found, using all-ones mask", i,
+                )
+
+            mask_len = min(len(full_mask), seq_len)
+            token_mask[i, :mask_len] = full_mask[:mask_len]
+
+        from nemo_rl.distributed.batched_data_dict import BatchedDataDict
+
+        logger.info(
+            "SFT conversion: batch_size=%d, max_seq_len=%d (reconstructed from N-1 input tokens)",
+            batch_size, max_seq_len,
+        )
+
+
+        batch_dict = {
+            "input_ids": input_ids,
+            "input_lengths": input_lengths,
+            "token_mask": token_mask,
+            "sample_mask": sample_mask,
+        }
+
+        if image_preprocessor is not None:
+            has_images = any(_extract_images(datum) for datum in data)
+            if has_images:
+                from nemo_rl.data.multimodal_utils import PackedTensor, get_dim_to_pack_along
+
+                multimodal_fields = {key: [] for key in image_preprocessor.multimodal_keys}
+                for datum in data:
+                    images = _extract_images(datum)
+                    if images:
+                        processed = image_preprocessor.process_images(images)
+                        for key in image_preprocessor.multimodal_keys:
+                            multimodal_fields[key].append(processed.get(key))
+                    else:
+                        for key in image_preprocessor.multimodal_keys:
+                            multimodal_fields[key].append(None)
+
+                for key, tensors_list in multimodal_fields.items():
+                    dim = get_dim_to_pack_along(image_preprocessor.processor, key)
+                    batch_dict[key] = PackedTensor(tensors_list, dim_to_pack=dim)
+
+        return BatchedDataDict(batch_dict)
+
+
     def backend_to_forward_result(
         self,
         result: Any,
         data: List[Dict],
+        loss_fn: str = "",
     ) -> Dict[str, Any]:
         """
         Convert NeMo RL forward-only result to Tinker format.
 
         NeMo RL get_logprobs() returns BatchedDataDict with key "logprobs" [B, S].
+        Response must match ForwardBackwardOutput schema (shared by forward and
+        forward_backward on the SDK side).
         """
         logprobs_tensor = None
-        if isinstance(result, dict):
+        # BatchedDataDict inherits from UserDict (not dict), so use
+        # hasattr+get to handle both dict and UserDict results.
+        if hasattr(result, "get"):
             logprobs_tensor = result.get("logprobs", None)
         elif hasattr(result, "logprobs"):
             logprobs_tensor = result.logprobs
@@ -159,15 +300,35 @@ class NemoRLDataConverter(DataConverter):
         if logprobs_tensor is not None:
             for i in range(len(data)):
                 lp = logprobs_tensor[i].detach().cpu()
+                tokens_len = len(_extract_tokens(data[i]))
+                target_tokens = _extract_target_tokens(data[i])
+                if target_tokens is not None and len(target_tokens) > 0:
+                    # lp[1:] element k = logprob of target_tokens[k]
+                    lp = lp[1:tokens_len + 1]
+                else:
+                    lp = lp[:tokens_len]
+                lp_list = lp.tolist()
                 loss_fn_outputs.append({
-                    "logprobs": {"data": lp.tolist()},
+                    "logprobs": {
+                        "data": lp_list,
+                        "shape": [len(lp_list)],
+                        "dtype": "float32",
+                    },
                 })
         else:
             for _ in data:
-                loss_fn_outputs.append({"logprobs": {"data": []}})
+                loss_fn_outputs.append({
+                    "logprobs": {
+                        "data": [],
+                        "shape": [0],
+                        "dtype": "float32",
+                    },
+                })
 
         return {
+            "loss_fn_output_type": loss_fn,
             "loss_fn_outputs": loss_fn_outputs,
+            "metrics": {},
         }
 
     def backend_to_forward_backward_result(
@@ -274,14 +435,32 @@ def _extract_tokens(datum) -> torch.Tensor:
     # Try nested model_input first (Pydantic ForwardBackwardDatum format)
     model_input = _get_attr_or_key(datum, "model_input")
     if model_input is not None:
-        # Try chunks format: model_input.chunks[0].tokens
         chunks = _get_attr_or_key(model_input, "chunks")
         if chunks:
-            tokens = _get_attr_or_key(chunks[0], "tokens")
-            if tokens is not None:
-                if isinstance(tokens, torch.Tensor):
-                    return tokens.detach().cpu().long()
-                return torch.tensor(tokens, dtype=torch.long)
+            # Fast path: text-only models have a single text chunk
+            if len(chunks) == 1:
+                tokens = _get_attr_or_key(chunks[0], "tokens")
+                if tokens is not None:
+                    if isinstance(tokens, torch.Tensor):
+                        return tokens.detach().cpu().long()
+                    return torch.tensor(tokens, dtype=torch.long)
+            else:
+                # Multi-chunk path: VLM with interleaved text/image chunks.
+                # Concatenate tokens from all text chunks; skip image chunks
+                # (their placeholder tokens are already in adjacent text chunks).
+                all_tokens = []
+                for chunk in chunks:
+                    chunk_type = _get_attr_or_key(chunk, "type")
+                    if chunk_type == "image":
+                        continue
+                    tokens = _get_attr_or_key(chunk, "tokens")
+                    if tokens is not None:
+                        if isinstance(tokens, torch.Tensor):
+                            all_tokens.append(tokens.detach().cpu().long())
+                        else:
+                            all_tokens.append(torch.tensor(tokens, dtype=torch.long))
+                if all_tokens:
+                    return torch.cat(all_tokens)
 
         # Try direct tokens: model_input.tokens
         tokens = _get_attr_or_key(model_input, "tokens")
@@ -308,8 +487,67 @@ def _extract_tokens(datum) -> torch.Tensor:
     return torch.tensor(tokens, dtype=torch.long)
 
 
+def _expand_chunks_to_full_sequence(datum, image_token_id: int) -> torch.Tensor:
+    """Expand model_input.chunks into a dense token sequence.
+
+    Text chunks contribute their tokens directly. Image chunks contribute
+    `expected_tokens` copies of `image_token_id` (e.g. <|image_pad|>=151655
+    for Qwen3-VL). The resulting sequence matches the full expanded sequence
+    that the cookbook used to compute target_tokens and weights.
+    """
+    model_input = _get_attr_or_key(datum, "model_input")
+    if model_input is None:
+        return torch.empty(0, dtype=torch.long)
+    chunks = _get_attr_or_key(model_input, "chunks") or []
+    all_tokens: list = []
+    for chunk in chunks:
+        ctype = _get_attr_or_key(chunk, "type")
+        if ctype == "image":
+            n = _get_attr_or_key(chunk, "expected_tokens") or 0
+            all_tokens.extend([image_token_id] * int(n))
+        else:
+            tokens = _get_attr_or_key(chunk, "tokens") or []
+            if isinstance(tokens, torch.Tensor):
+                tokens = tokens.tolist()
+            all_tokens.extend(tokens)
+    return torch.tensor(all_tokens, dtype=torch.long)
+
+
+def _extract_images(datum) -> list:
+    """Extract image bytes from datum's model_input chunks.
+
+    Returns list of decoded image bytes (one per ImageChunk).
+    Returns empty list if no images.
+    """
+    import base64
+
+    model_input = _get_attr_or_key(datum, "model_input")
+    if model_input is None:
+        return []
+
+    chunks = _get_attr_or_key(model_input, "chunks")
+    if not chunks:
+        return []
+
+    images = []
+    for chunk in chunks:
+        chunk_type = _get_attr_or_key(chunk, "type")
+        if chunk_type == "image":
+            data = _get_attr_or_key(chunk, "data")
+            if data is not None:
+                if isinstance(data, str):
+                    images.append(base64.b64decode(data))
+                elif isinstance(data, bytes):
+                    images.append(data)
+    return images
+
+
 def _extract_loss_masks(datum, seq_len: int) -> torch.Tensor:
-    """Extract loss masks from datum, padded to seq_len."""
+    """Extract loss masks from datum, padded to seq_len.
+
+    Tries loss_fn_inputs["mask"] first, then datum.loss_masks / datum.loss_mask.
+    Returns all-ones if no mask found (requires "mask" to flow through SDK).
+    """
     masks = None
 
     # Try loss_fn_inputs["mask"] (Dict[str, TensorData] format)
@@ -353,8 +591,26 @@ _FIELD_NAME_MAP = {
 }
 
 
-def _extract_field(datum, field_name: str, expected_len: int):
-    """Extract a response-length tensor field from datum.
+def _full_sequence_tokens(datum) -> torch.Tensor:
+    """Full unshifted sequence: appends target_tokens[-1] when the datum is
+    pre-shifted (wire format); flat datums already carry the full sequence."""
+    tokens = _extract_tokens(datum)
+    target_tokens = _extract_target_tokens(datum)
+    if target_tokens is not None and len(target_tokens) > 0:
+        return torch.cat([tokens, target_tokens[-1:]])
+    return tokens
+
+
+def _place_right_aligned(row: torch.Tensor, values: torch.Tensor, seq_len: int) -> None:
+    """Write a 1-D field into row[:seq_len], aligned to the sequence end, so
+    position p holds the value for target token x_p (BUG-012)."""
+    n = min(len(values), seq_len)
+    if n > 0:
+        row[seq_len - n:seq_len] = values[-n:]
+
+
+def _extract_field(datum, field_name: str):
+    """Extract a per-token tensor field from datum (unresized).
 
     Handles both:
       - Pydantic ForwardBackwardDatum: datum.loss_fn_inputs[sdk_key].data
@@ -381,25 +637,72 @@ def _extract_field(datum, field_name: str, expected_len: int):
         return None
 
     if isinstance(value, torch.Tensor):
-        t = value.detach().cpu().float()
-    elif isinstance(value, (list, tuple)):
-        t = torch.tensor(value, dtype=torch.float32)
+        return value.detach().cpu().float()
+    if isinstance(value, (list, tuple)):
+        return torch.tensor(value, dtype=torch.float32)
+    return None
+
+
+def _extract_target_tokens(datum) -> torch.Tensor:
+    """Extract target_tokens from datum's loss_fn_inputs.
+
+    Wire-format datums (SFT and RL) store target_tokens = tokens[1:] in
+    loss_fn_inputs["target_tokens"].
+    Handles both Pydantic ForwardBackwardDatum and flat dict formats.
+
+    Returns:
+        torch.Tensor of token IDs (dtype=long), or None if not found.
+    """
+    loss_fn_inputs = _get_attr_or_key(datum, "loss_fn_inputs")
+    if isinstance(loss_fn_inputs, dict):
+        target_obj = loss_fn_inputs.get("target_tokens")
+        if target_obj is not None:
+            data = target_obj.data if hasattr(target_obj, "data") else target_obj
+            if isinstance(data, torch.Tensor):
+                return data.detach().cpu().long()
+            return torch.tensor(data, dtype=torch.long)
+
+    # Fall back to flat format
+    if isinstance(datum, dict):
+        value = datum.get("target_tokens")
     else:
+        value = getattr(datum, "target_tokens", None)
+
+    if value is None:
         return None
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().long()
+    return torch.tensor(value, dtype=torch.long)
 
-    # Truncate or pad to expected length
-    if len(t) >= expected_len:
-        return t[:expected_len]
+
+def _extract_sft_weights(datum) -> torch.Tensor:
+    """Extract weights from SFT datum's loss_fn_inputs.
+
+    SFT datums store weights = weights[1:] in loss_fn_inputs["weights"].
+    Handles both Pydantic ForwardBackwardDatum and flat dict formats.
+
+    Returns:
+        torch.Tensor of float weights, or None if not found.
+    """
+    loss_fn_inputs = _get_attr_or_key(datum, "loss_fn_inputs")
+    if isinstance(loss_fn_inputs, dict):
+        weights_obj = loss_fn_inputs.get("weights")
+        if weights_obj is not None:
+            data = weights_obj.data if hasattr(weights_obj, "data") else weights_obj
+            if isinstance(data, torch.Tensor):
+                return data.detach().cpu().float()
+            return torch.tensor(data, dtype=torch.float32)
+
+    # Fall back to flat format
+    if isinstance(datum, dict):
+        value = datum.get("weights")
     else:
-        padded = torch.zeros(expected_len, dtype=torch.float32)
-        padded[:len(t)] = t
-        return padded
+        value = getattr(datum, "weights", None)
+
+    if value is None:
+        return None
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().float()
+    return torch.tensor(value, dtype=torch.float32)
 
 
-def _compute_max_seq_len(data: List) -> int:
-    """Compute maximum sequence length across all data samples."""
-    max_len = 0
-    for datum in data:
-        tokens = _extract_tokens(datum)
-        max_len = max(max_len, len(tokens))
-    return max_len

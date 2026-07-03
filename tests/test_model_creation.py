@@ -10,7 +10,7 @@ import httpx
 
 # Configuration - use environment variables or defaults for local testing
 GMI_URL = os.getenv("GMI_BASE_URL", "http://localhost:8001")
-API_KEY = os.getenv("GMI_API_KEY", "slime-dev-key")
+API_KEY = os.getenv("GMI_API_KEY", "tml-dev-key")
 MODEL_PATH = os.getenv("MODEL_PATH", "/data/models/Qwen2.5-0.5B-Instruct_torch_dist")
 headers = {"X-API-Key": API_KEY, "Content-Type": "application/json"}
 

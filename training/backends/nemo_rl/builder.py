@@ -8,6 +8,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from ..base import ArgumentBuilder
+from ...utils.model_config import detect_num_gpus
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,7 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
     def build_args(
         self,
         base_model: str,
-        num_gpus: int = 4,
+        num_gpus: int = 0,  # 0 = auto-detect
         lora_config: Optional[Dict[str, Any]] = None,
         parallelism: Optional[Dict[str, Any]] = None,
         rl_config: Optional[Dict[str, Any]] = None,
@@ -38,6 +39,10 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
             - "loss_fn": ClippedPGLossConfig dict
             - "cluster": cluster config (bundle_ct_per_node_list, etc.)
         """
+        if num_gpus <= 0:
+            num_gpus = detect_num_gpus()
+            logger.info("Auto-detected %d GPUs for NeMo RL config", num_gpus)
+
         debug_train_only = kwargs.get("debug_train_only", False)
         max_batch_size = kwargs.get("max_batch_size", 4096)
         max_seq_len = kwargs.get("max_seq_len", 2048)
@@ -45,6 +50,21 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
         wandb_config = kwargs.get("wandb_config")
 
         hf_path = base_model
+
+        # Detect VLM via config (cheap — only reads config.json)
+        is_vlm = False
+        try:
+            from transformers import AutoConfig
+            cfg = AutoConfig.from_pretrained(hf_path, trust_remote_code=True)
+            is_vlm = (
+                hasattr(cfg, "vision_config")
+                or "VL" in cfg.__class__.__name__
+                or "Vision" in cfg.__class__.__name__
+            )
+            if is_vlm:
+                logger.info("VLM detected: %s — enforcing sequence_packing=False, cp_size=1", cfg.__class__.__name__)
+        except Exception as e:
+            logger.debug("VLM detection skipped: %s", e)
 
         # Warn about Miles-only RLVE server-side features
         if rlve_config and rlve_config.get("enabled", False):
@@ -71,14 +91,23 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
             tp_size = parallelism.get("tensor_parallel", 1)
             pp_size = parallelism.get("pipeline_parallel", 1)
             cp_size = parallelism.get("context_parallel", 1)
+            if is_vlm and cp_size > 1:
+                logger.warning(
+                    "VLM models require cp_size=1 (NeMo RL workers assert empty "
+                    "multimodal_kwargs when CP > 1). Overriding cp_size=%d -> 1.",
+                    cp_size,
+                )
+                cp_size = 1
             model_parallel = tp_size * pp_size * cp_size
             dp_size = max(1, num_gpus // model_parallel)
 
         # Micro-batch size calculation
         # NeMo RL train_global_batch_size = total samples per train() call
         # train_micro_batch_size = samples per GPU per forward/backward pass
+        # MBS=1 minimizes activation memory (NeMo RL convention: 78/91 configs use 1)
+        # Gradient accumulation steps = GBS / (MBS * DP) bridges the gap
         train_global_batch_size = max_batch_size
-        train_micro_batch_size = max(1, train_global_batch_size // dp_size)
+        train_micro_batch_size = 1
 
         # Policy config (maps to NeMo RL PolicyConfig TypedDict)
         policy_config = {
@@ -162,7 +191,7 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
             policy_config["dtensor_cfg"]["lora_cfg"] = {
                 "enabled": True,
                 "dim": lora_config.get("rank", 8),
-                "alpha": lora_config.get("alpha", lora_config.get("rank", 8)),
+                "alpha": lora_config.get("alpha") or lora_config.get("rank", 8),
                 "dropout": lora_config.get("dropout", 0.0),
                 "dropout_position": "pre",
                 "target_modules": ["*.q_proj", "*.k_proj", "*.v_proj", "*.o_proj"],

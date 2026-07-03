@@ -55,7 +55,7 @@ app = create_app(config)
 Common env vars:
 - `TRAINING_HOST` / `TRAINING_PORT` — server binding (defaults `0.0.0.0:8000`)
 - `KGATEWAY_LOG_LEVEL` — logging level (default `INFO`)
-- `TINKER_API_KEY` — API key (default `slime-dev-key`, override in production)
+- `TINKER_API_KEY` — API key (default `tml-dev-key`, override in production)
 - `SUPPORTED_MODELS` — JSON list consumed by `/api/v1/get_server_capabilities`
 - `METADATA_DIR`, `FUTURES_DB_NAME` — storage overrides
 - `RAY_ADDRESS`, `RAY_NAMESPACE` — Ray connection info
@@ -90,7 +90,7 @@ Run E2E tests using Tinker client:
 cd /tmp/tmux-tmp/tinker_gmi/tests_integration/e2e_tinker_api
 
 export TINKER_BASE_URL=http://localhost:8000
-export TINKER_API_KEY=slime-dev-key
+export TINKER_API_KEY=tml-dev-key
 
 python test_tinker_gmi_wrapper.py
 ```
