@@ -58,6 +58,24 @@ python -m tinker_cookbook.recipes.math_rl.train \
 '
 ```
 
+## Verified tinker-cookbook Recipes (NeMo RL backend)
+
+Validated end-to-end against this server with each recipe's README hyperparameters.
+
+| Recipe | Type | Model | Verdict |
+|---|---|---|---|
+| math_rl (arithmetic) | RL/GRPO | Llama-3.2-1B | **Pass** — correct 0.74 → 1.00 in 4 batches, stable through 21 |
+| rl_basic | RL | Llama-3.2-1B | **Pass** — loss/reward healthy from batch 0 |
+| rl_loop | RL (sync) | Qwen2.5-0.5B | **Pass** — 130+ batches, reward 0.0 → 0.5 |
+| multiplayer/guess_number | multi-turn RL | Qwen3-4B-Instruct | **Pass** — reward 0.32 → 0.43 over 6 batches |
+| preference/shorter | pairwise-preference RL | Qwen3-4B-Instruct | **Pass** — ac_tokens/turn 63.5 → 36.6 by step 22 (target: significant drop by 40) |
+| sl_basic | SFT | Llama-3.2-1B | **Pass** — 13+ steps, loss decreasing, grad_norm stable |
+| sl_loop | SFT (sync) | Qwen2.5-0.5B | **Pass** — 27+ steps, checkpointing OK |
+| chat_sl (no_robots) | SFT (async) | Qwen3-8B-Base | **Pass** — test/nll 1.871 → 1.800 by step 20 (recipe ref: 1.788 @ 140) |
+| preference/dpo | DPO | Llama-3.2-1B | **Pass** (mechanics) — 34 steps error-free, gradients flowing; loss ~ln(2) flat in 34 steps at documented lr=1e-5, longer run needed for convergence verdict |
+
+Full status for all 23 recipe entries, bugs, and gaps: `specs/002-nemorl-recipe-testing/compatibility-matrix.md` in the monorepo.
+
 ## Configuration
 
 | Variable | Purpose | Default |
