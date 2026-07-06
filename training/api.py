@@ -187,7 +187,7 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
         application.state.model_service = ModelService(backend=backend)
         application.state.training_service = TrainingService(backend=backend)
         application.state.checkpoint_service = CheckpointService(backend=backend)
-        application.state.sampling_service = SamplingService()
+        application.state.sampling_service = SamplingService(backend=backend)
         # Initialize SessionService with storage for persistence
         application.state.session_service = SessionService(storage=session_storage)
 

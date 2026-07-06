@@ -239,6 +239,58 @@ class TrainingBackend(ABC):
         """
         ...
 
+    @abstractmethod
+    async def sample(
+        self,
+        handle: BackendHandle,
+        request_id: str,
+        prompt_tokens: List[int],
+        num_samples: int,
+        sampling_params: Optional[Dict[str, Any]] = None,
+        prompt_logprobs: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Generate num_samples completions for one prompt via the backend's
+        inference engine.
+
+        Backend behavior:
+        - Miles: per-sample HTTP calls to the SGLang router.
+        - NeMo RL: requests are batch-accumulated and flushed as a single
+          Policy.generate() call (PERF-002).
+
+        Returns:
+            {
+                "sequences": [
+                    {"tokens": [...], "logprobs": [...],
+                     "text": Optional[str], "stop_reason": "stop" | "length"},
+                    ...
+                ],
+                "prompt_logprobs": Optional[List],  # [None, lp1, ...] when requested
+            }
+
+        Raises:
+            BackendError: If the inference engine is unavailable.
+        """
+        ...
+
+    @abstractmethod
+    async def prepare_for_generation(
+        self,
+        handle: BackendHandle,
+    ) -> None:
+        """
+        Ensure the inference engine is ready to serve sampling requests.
+
+        Backend behavior:
+        - Miles: validates the SGLang router is available (no state change).
+        - NeMo RL: safety-net refit + wake if the engine was left in
+          training state (fast no-op when already generation-ready).
+
+        Raises:
+            BackendError: If the engine cannot be made ready.
+        """
+        ...
+
 
 class UnsupportedFeatureError(BackendError):
     """Raised when a backend-specific feature is requested on the wrong backend."""
