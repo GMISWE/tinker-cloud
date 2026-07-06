@@ -135,12 +135,53 @@ class TestTrainingBackendABC:
             "create_model", "forward", "forward_backward",
             "apply_optimizer_step", "update_inference_weights",
             "save_checkpoint", "load_checkpoint", "delete_model",
-            "get_logprobs",
+            "get_logprobs", "sample", "prepare_for_generation",
         ]
         for method_name in required:
             assert hasattr(TrainingBackend, method_name), (
                 f"TrainingBackend missing required method: {method_name}"
             )
+
+
+class TestSamplingContract:
+    """Test sample()/prepare_for_generation() error contracts (no GPU needed)."""
+
+    def test_miles_sample_without_router_raises(self):
+        from tinkercloud.training.backends.miles.backend import MilesBackend, MilesHandle
+        backend = MilesBackend()
+        handle = MilesHandle(model_id="test", backend_type="miles")
+        with pytest.raises(BackendError, match="router not available"):
+            asyncio.run(backend.sample(handle, "req-1", [1, 2, 3], num_samples=1))
+
+    def test_miles_prepare_without_router_raises(self):
+        from tinkercloud.training.backends.miles.backend import MilesBackend, MilesHandle
+        backend = MilesBackend()
+        handle = MilesHandle(model_id="test", backend_type="miles")
+        with pytest.raises(BackendError, match="router not available"):
+            asyncio.run(backend.prepare_for_generation(handle))
+
+    def test_nemo_rl_sample_without_generation_raises(self):
+        from tinkercloud.training.backends.nemo_rl.backend import NemoRLBackend, NemoRLHandle
+        backend = NemoRLBackend()
+        handle = NemoRLHandle(model_id="test", backend_type="nemo_rl")
+        with pytest.raises(BackendError, match="generation engine not initialized"):
+            asyncio.run(backend.sample(handle, "req-1", [1, 2, 3], num_samples=1))
+
+    def test_nemo_rl_prepare_without_generation_raises(self):
+        from tinkercloud.training.backends.nemo_rl.backend import NemoRLBackend, NemoRLHandle
+        backend = NemoRLBackend()
+        handle = NemoRLHandle(model_id="test", backend_type="nemo_rl")
+        with pytest.raises(BackendError, match="generation engine not initialized"):
+            asyncio.run(backend.prepare_for_generation(handle))
+
+    def test_nemo_rl_delete_model_drops_accumulator(self):
+        from tinkercloud.training.backends.nemo_rl.backend import NemoRLBackend, NemoRLHandle
+        from tinkercloud.training.backends.nemo_rl.generation import NemoRLBatchAccumulator
+        backend = NemoRLBackend()
+        handle = NemoRLHandle(model_id="test", backend_type="nemo_rl")
+        backend._batch_accumulators["test"] = NemoRLBatchAccumulator()
+        asyncio.run(backend.delete_model(handle))
+        assert "test" not in backend._batch_accumulators
 
 
 # ---------------------------------------------------------------------------

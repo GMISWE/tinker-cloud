@@ -522,3 +522,54 @@ class MilesBackend(TrainingBackend):
             lp = output.get("logprobs", {})
             logprobs_list.append(lp.get("data", []))
         return logprobs_list
+
+    async def sample(
+        self,
+        handle: BackendHandle,
+        request_id: str,
+        prompt_tokens: List[int],
+        num_samples: int,
+        sampling_params: Optional[Dict[str, Any]] = None,
+        prompt_logprobs: bool = False,
+    ) -> Dict[str, Any]:
+        """Sample via per-request HTTP calls to the SGLang router."""
+        from ...utils.sglang_client import SGLangClient
+
+        h: MilesHandle = handle  # type: ignore[assignment]
+        if not h.router_ip or not h.router_port:
+            raise BackendError(
+                "SGLang router not available",
+                backend="miles", operation="sample",
+            )
+        client = SGLangClient(base_url=f"http://{h.router_ip}:{h.router_port}")
+
+        sequences = []
+        prompt_logprobs_result = None
+        for _ in range(num_samples):
+            result = await client.generate(
+                input_ids=prompt_tokens,
+                sampling_params=sampling_params or {},
+                prompt_logprobs=prompt_logprobs,
+            )
+            sequences.append({
+                "tokens": result["tokens"],
+                "logprobs": result["logprobs"],
+                "text": result.get("text"),
+                "stop_reason": result.get("stop_reason", "length"),
+            })
+            if prompt_logprobs and prompt_logprobs_result is None:
+                prompt_logprobs_result = result.get("prompt_logprobs")
+
+        return {
+            "sequences": sequences,
+            "prompt_logprobs": prompt_logprobs_result,
+        }
+
+    async def prepare_for_generation(self, handle: BackendHandle) -> None:
+        """SGLang router is always live for Miles — just validate it exists."""
+        h: MilesHandle = handle  # type: ignore[assignment]
+        if not h.router_ip or not h.router_port:
+            raise BackendError(
+                "SGLang router not available",
+                backend="miles", operation="prepare_for_generation",
+            )

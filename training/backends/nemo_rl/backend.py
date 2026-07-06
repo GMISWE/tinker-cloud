@@ -15,9 +15,12 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from ..base import BackendError, BackendHandle, TrainingBackend
+
+if TYPE_CHECKING:
+    from .generation import NemoRLBatchAccumulator
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +69,8 @@ class NemoRLBackend(TrainingBackend):
         self.overrides = overrides or {}
         self._converter = None
         self._builder = None
+        # PERF-002: per-model batch accumulators for sample()
+        self._batch_accumulators: Dict[str, "NemoRLBatchAccumulator"] = {}
 
     @property
     def converter(self):
@@ -687,6 +692,8 @@ class NemoRLBackend(TrainingBackend):
                 except Exception:
                     pass  # Generation may share resources with policy
 
+            self._batch_accumulators.pop(h.model_id, None)
+
             logger.info("NeMo RL model %s deleted", h.model_id)
 
         except Exception as e:
@@ -706,6 +713,50 @@ class NemoRLBackend(TrainingBackend):
             lp = output.get("logprobs", {})
             logprobs_list.append(lp.get("data", []))
         return logprobs_list
+
+    async def sample(
+        self,
+        handle: BackendHandle,
+        request_id: str,
+        prompt_tokens: List[int],
+        num_samples: int,
+        sampling_params: Optional[Dict[str, Any]] = None,
+        prompt_logprobs: bool = False,
+    ) -> Dict[str, Any]:
+        """Sample via Policy.generate() on vLLM Ray workers.
+
+        PERF-002: requests are batch-accumulated per model and flushed as a
+        single generate() call (~20-30x speedup for RL rollouts).
+        """
+        from .generation import NemoRLBatchAccumulator
+
+        h: NemoRLHandle = handle  # type: ignore[assignment]
+        if h.policy_generation is None:
+            raise BackendError(
+                "generation engine not initialized (debug_train_only mode?)",
+                backend="nemo_rl", operation="sample",
+            )
+        accumulator = self._batch_accumulators.setdefault(
+            h.model_id, NemoRLBatchAccumulator()
+        )
+        return await accumulator.submit(
+            handle=h,
+            request_id=request_id,
+            prompt_tokens=prompt_tokens,
+            num_samples=num_samples,
+            sampling_params=sampling_params or {},
+            prompt_logprobs=prompt_logprobs,
+        )
+
+    async def prepare_for_generation(self, handle: BackendHandle) -> None:
+        """Safety-net refit + wake if the engine was left in training state."""
+        h: NemoRLHandle = handle  # type: ignore[assignment]
+        if h.policy_generation is None:
+            raise BackendError(
+                "generation engine not initialized (debug_train_only mode?)",
+                backend="nemo_rl", operation="prepare_for_generation",
+            )
+        await _ensure_generation_ready(h)
 
 
 # ---------------------------------------------------------------------------
