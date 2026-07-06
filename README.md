@@ -68,7 +68,7 @@ Validated end-to-end against this server with each recipe's README hyperparamete
 | rl_basic | RL | Llama-3.2-1B | **Pass** — loss/reward healthy from batch 0 |
 | rl_loop | RL (sync) | Qwen2.5-0.5B | **Pass** — 130+ batches, reward 0.0 → 0.5 |
 | multiplayer/guess_number | multi-turn RL | Qwen3-4B-Instruct | **Pass** — reward 0.32 → 0.43 over 6 batches |
-| preference/shorter | pairwise-preference RL | Qwen3-4B-Instruct | **Pass** — ac_tokens/turn 63.5 → 36.6 by step 22 (target: significant drop by 40) |
+| preference/shorter | pairwise-preference RL | Qwen3-4B-Instruct | **Pass** — ac_tokens/turn 63.5 → 24.7 by step 31 (target: significant drop by 40) |
 | sl_basic | SFT | Llama-3.2-1B | **Pass** — 13+ steps, loss decreasing, grad_norm stable |
 | sl_loop | SFT (sync) | Qwen2.5-0.5B | **Pass** — 27+ steps, checkpointing OK |
 | chat_sl (no_robots) | SFT (async) | Qwen3-8B-Base | **Pass** — test/nll 1.871 → 1.800 by step 20 (recipe ref: 1.788 @ 140) |
