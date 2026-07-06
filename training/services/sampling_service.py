@@ -276,7 +276,8 @@ async def _batched_nemo_rl_generate(
         req_idx, _ = request_indices[i]
         if batch[req_idx].prompt_logprobs and logprobs_tensor.shape[1] >= prompt_len:
             raw = logprobs_tensor[i, :prompt_len].tolist()
-            prompt_logprobs_result = [None if v == 0.0 else v for v in raw]
+            # Only position 0 has no logprob; interior values are real (BUG-013)
+            prompt_logprobs_result = [None] + raw[1:] if raw else []
 
         sample_results.append({
             "tokens": out_tokens,
