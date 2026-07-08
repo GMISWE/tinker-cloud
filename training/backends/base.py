@@ -62,9 +62,18 @@ class TrainingBackend(ABC):
         max_seq_len: int = 2048,
         rlve_config: Optional[Dict[str, Any]] = None,
         wandb_config: Optional[Dict[str, Any]] = None,
+        objective: str = "language_modeling",
+        num_labels: Optional[int] = None,
+        head_config: Optional[Dict[str, Any]] = None,
     ) -> BackendHandle:
         """
         Initialize training actors and inference engine.
+
+        The objective axis (feature 004) is additive: language_modeling is the
+        default and leaves the existing causal path unchanged. LM-only backends
+        (Miles, NeMo RL) must reject classification objectives with a
+        BackendError; classification backends (Automodel, Megatron-Bridge)
+        require num_labels. See specs/004-bionemo-classification/plan.md.
 
         Returns:
             BackendHandle with backend-specific state.

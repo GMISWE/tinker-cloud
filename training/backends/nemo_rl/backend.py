@@ -102,7 +102,16 @@ class NemoRLBackend(TrainingBackend):
         max_seq_len: int = 2048,
         rlve_config: Optional[Dict[str, Any]] = None,
         wandb_config: Optional[Dict[str, Any]] = None,
+        objective: str = "language_modeling",
+        num_labels: Optional[int] = None,
+        head_config: Optional[Dict[str, Any]] = None,
     ) -> NemoRLHandle:
+        if objective != "language_modeling":
+            raise BackendError(
+                f"NeMo RL is a language-modeling backend; objective {objective!r} "
+                f"requires a classification backend (automodel / megatron_bridge)",
+                backend="nemo_rl", operation="create_model",
+            )
         try:
             logger.info("[%s] Creating NeMo RL model %s", request_id, model_id)
 
