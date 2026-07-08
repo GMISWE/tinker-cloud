@@ -1,7 +1,7 @@
 """Extract mean-pooled Evo2-1B features per sequence by monkeypatching the
 bionemo predict_step. Faithful frozen-backbone representation for the CS2 head.
 Reuses bionemo.evo2.run.predict machinery; only pools token_logits on-device."""
-import argparse, torch
+import argparse, functools, torch
 from pathlib import Path
 import bionemo.evo2.run.predict as P
 from megatron.core import parallel_state
@@ -29,7 +29,12 @@ if __name__ == "__main__":
     ap.add_argument("--output-dir", required=True)
     ap.add_argument("--devices", type=int, default=1)
     ap.add_argument("--mbs", type=int, default=8)
+    ap.add_argument("--lora-ckpt", default=None, help="LoRA adapter checkpoint dir (optional)")
+    ap.add_argument("--lora-dim", type=int, default=16, help="must match training --lora-dim")
+    ap.add_argument("--lora-alpha", type=int, default=32, help="must match training --lora-alpha")
     a = ap.parse_args()
+    if a.lora_ckpt:  # predict()'s Evo2LoRA defaults to dim=32; force the trained rank
+        P.Evo2LoRA = functools.partial(P.Evo2LoRA, dim=a.lora_dim, alpha=a.lora_alpha)
     P.predict(
         num_nodes=1, devices=a.devices, fasta_path=Path(a.fasta), ckpt_dir=Path(a.ckpt_dir),
         tensor_parallel_size=1, pipeline_model_parallel_size=1, context_parallel_size=1,
@@ -38,5 +43,5 @@ if __name__ == "__main__":
         output_log_prob_seqs=False, log_prob_collapse_option="mean", prepend_bos=False,
         no_sequence_parallel=True, hybrid_override_pattern=None,
         seq_len_interpolation_factor=None, num_layers=None, files_per_subdir=100000,
-        write_interval="epoch", lora_checkpoint_path=None,
+        write_interval="epoch", lora_checkpoint_path=Path(a.lora_ckpt) if a.lora_ckpt else None,
     )
