@@ -111,6 +111,20 @@ def test_empty_batch():
     assert batch["labels"].numel() == 0
 
 
+def test_forward_only_without_labels_omits_labels():
+    """Forward-only inputs may carry no labels — the batch must still build
+    (input_ids/attention_mask only), not IndexError on the seq-cls path."""
+    conv = ClassificationDataConverter()
+    data = [
+        {"model_input": {"tokens": [5, 6, 7]}, "loss_fn_inputs": {}},
+        {"model_input": {"tokens": [8, 9]}, "loss_fn_inputs": {}},
+    ]
+    batch = conv.forward_to_backend(data, {"objective": "sequence_classification"})
+    assert "labels" not in batch
+    assert tuple(batch["input_ids"].shape) == (2, 3)
+    assert batch["attention_mask"][1].tolist() == [1, 1, 0]
+
+
 # --- generation methods not supported --------------------------------------
 
 _BACKENDS = [

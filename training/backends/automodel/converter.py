@@ -55,6 +55,17 @@ class ClassificationDataConverter(DataConverter):
 
         input_ids = torch.zeros(batch_size, max_seq_len, dtype=torch.long)
         attention_mask = torch.zeros(batch_size, max_seq_len, dtype=torch.long)
+        for i, tokens in enumerate(tokens_B):
+            seq_len = len(tokens)
+            input_ids[i, :seq_len] = tokens
+            attention_mask[i, :seq_len] = 1
+
+        batch = {"input_ids": input_ids, "attention_mask": attention_mask}
+
+        # Forward-only inputs may carry no labels — emit input_ids/attention_mask
+        # only so a logits pass doesn't require a labels tensor.
+        if not any(lbl.numel() > 0 for lbl in labels_B):
+            return batch
 
         token_cls = _is_token_classification(args, tokens_B, labels_B)
         if token_cls:
@@ -65,21 +76,17 @@ class ClassificationDataConverter(DataConverter):
             labels = torch.zeros(batch_size, dtype=torch.long)
 
         for i, (tokens, lbl) in enumerate(zip(tokens_B, labels_B)):
-            seq_len = len(tokens)
-            input_ids[i, :seq_len] = tokens
-            attention_mask[i, :seq_len] = 1
+            if lbl.numel() == 0:
+                continue
             if token_cls:
-                n = min(len(lbl), seq_len)
+                n = min(len(lbl), len(tokens))
                 labels[i, :n] = lbl[:n]
             else:
                 # seq-cls: single class id (scalar or length-1 tensor).
                 labels[i] = lbl.reshape(-1)[0]
 
-        return {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "labels": labels,
-        }
+        batch["labels"] = labels
+        return batch
 
     def backend_to_forward_result(
         self, result: Any, data: List[Dict],
