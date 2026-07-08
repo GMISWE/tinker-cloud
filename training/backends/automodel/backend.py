@@ -164,6 +164,11 @@ class AutomodelBackend(TrainingBackend):
         tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
 
         model = _apply_lora(model, objective, lora_config, hc)
+        if hc.get("freeze_base"):
+            # Linear-probe / head-only baseline: train only the classification
+            # head, freeze the encoder. (plan.md CS2 head-only ablation.)
+            for name, p in model.named_parameters():
+                p.requires_grad = "classifier" in name or "score" in name
         model.to(device)
         model.train()
 
