@@ -17,44 +17,55 @@ Tinker Client --> FastAPI --> BackendFactory --> Miles or NeMo RL --> Ray + Mega
 
 ## Quickstart (NeMo RL)
 
-### 1. Build
+### 1. Deploy
 
-From the monorepo root (parent of `tinker-cloud/`, `RL/`, `tinker_gmi/`, `tinker-cookbook/`):
+One command via `scripts/deploy_tinkercloud.sh` — clones the four repos
+(tinker-cloud, RL, tinker_gmi, tinker-cookbook) at pinned refs, creates the
+pod/container, installs the code, starts Ray and the API server, and
+health-checks it:
 
 ```bash
-cd tinker-cloud
-./docker/build_dev.sh --backend nemo_rl
+# Onto a Kubernetes GPU cluster
+HF_TOKEN_FILE=~/.hf_token ./scripts/deploy_tinkercloud.sh --source git --target k8s
+
+# Onto a docker GPU box
+HF_TOKEN_FILE=~/.hf_token ./scripts/deploy_tinkercloud.sh --source git --target docker
+
+# Redeploy code + restart the server on an existing pod/container
+./scripts/deploy_tinkercloud.sh --source git --code-only
 ```
 
-### 2. Run
+Both targets run the same in-container setup (`scripts/lib/setup_container.sh`),
+so k8s and docker deployments cannot drift. (Developers working in the
+tinker-nemorl monorepo can pass `--source dev` to bundle their local working
+trees, uncommitted changes included.)
+
+Common knobs (env vars):
+
+| Var | Meaning |
+|---|---|
+| `HF_TOKEN_FILE` | Local file with the HuggingFace token (required on first deploy) |
+| `GPUS` | GPUs to request / declare to Ray (default 4) |
+| `IMAGE` | Base image (default `nvcr.io/nvidia/nemo-rl:v0.5.0`) |
+| `TINKER_CLOUD_REF`, `RL_REF`, `TINKER_GMI_REF`, `COOKBOOK_REF` | Pinned git refs, default `main` (`*_REPO` to override URLs) |
+| `KUBECONFIG`, `NS`, `POD`, `NODE` | k8s target placement: kubeconfig path, namespace, pod name, node name |
+| `CONTAINER`, `DATA_DIR`, `DOCKER` | docker target: container name, host data dir mounted at `/data`, docker command (`DOCKER="sg docker -c"` if your shell lacks the docker group) |
+
+k8s note: `GPUS` must fit the node's *unallocated* `nvidia.com/gpu` (idle pods
+still hold their allocation), or kubelet rejects the pod.
+
+### 2. Run a recipe
 
 ```bash
-docker run -d --name tinkercloud-nemo-rl \
-  --gpus all \
-  -v /path/to/models:/data/models \
-  --network host \
-  --shm-size=16g \
-  -e ALLOW_PARTIAL_BATCHES=true \
-  -e NCCL_NVLS_ENABLE=1 \
-  -e NCCL_SHM_DISABLE=1 \
-  -e NCCL_IGNORE_DISABLED_P2P=1 \
-  gmicloudai/tinkercloud:dev-nemo-rl
-```
-
-The entrypoint starts Ray (auto-detects GPUs) and the training API on port 8000.
-
-### 3. Run a recipe
-
-```bash
-docker exec -d tinkercloud-nemo-rl bash -c '
+# docker target (k8s: same command via kubectl -n <namespace> exec <pod> -- bash -c '...')
+docker exec -d tinkercloud-nemorl bash -c '
+export TINKER_API_KEY=tml-dev-key TINKER_BASE_URL=http://localhost:8000
 python -m tinker_cookbook.recipes.math_rl.train \
-  model_name=/data/models/Llama-3.2-1B \
-  base_url=http://localhost:8000 \
-  group_size=4 \
-  groups_per_batch=100 \
+  model_name=meta-llama/Llama-3.2-1B \
+  group_size=16 \
+  groups_per_batch=8 \
   learning_rate=1e-4 \
-  lora_rank=32 \
-  log_path=/tmp/math_rl
+  log_path=/data/trajectories/math_rl
 '
 ```
 
