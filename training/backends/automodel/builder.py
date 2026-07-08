@@ -33,12 +33,30 @@ class AutomodelArgumentBuilder(ArgumentBuilder):
     ) -> Any:
         """Return (config_dict, hf_path) for a classification model.
 
-        Classification has no generation engine (plan.md:112) — the create
-        path must NOT stand up vLLM/SGLang for this objective.
+        Classification has no generation engine (plan.md) — the create path
+        must NOT stand up vLLM/SGLang for this objective. AutomodelBackend
+        loads HF `AutoModelFor*Classification` directly; this builder resolves
+        the LoRA/head knobs into a plain config dict for logging/metadata.
         """
-        # TODO(004-P2): assemble NeMoAutoModelForSequenceClassification config
-        # (num_labels, head_config, PEFT LoRA targets). See train_seq_cls.py.
-        raise NotImplementedError(
-            "AutomodelArgumentBuilder.build_args is a scaffold stub. "
-            "Implement per specs/004-bionemo-classification/plan.md (P2 backend)."
-        )
+        head_config = kwargs.get("head_config") or {}
+        num_labels = kwargs.get("num_labels")
+        objective = kwargs.get("objective", "sequence_classification")
+        lora = lora_config or {}
+        rank = lora.get("rank", 0)
+
+        config = {
+            "base_model": base_model,
+            "objective": objective,
+            "num_labels": num_labels,
+            "torch_dtype": head_config.get("torch_dtype", "float32"),
+            "learning_rate": head_config.get("learning_rate", 1e-4),
+            "lora": {
+                "rank": rank,
+                "alpha": lora.get("alpha") or (2 * rank),
+                "dropout": lora.get("dropout", 0.0),
+                "target_modules": head_config.get("target_modules"),
+            } if rank else None,
+        }
+        config.update(self.overrides)
+        # hf_path == base_model: HF resolves the checkpoint from the model id.
+        return config, base_model

@@ -44,6 +44,9 @@ class ModelService:
         training_runs_metadata: Dict[str, Dict[str, Any]],
         rlve_config: Optional[Dict[str, Any]] = None,
         wandb_config: Optional[Dict[str, Any]] = None,
+        objective: str = "language_modeling",
+        num_labels: Optional[int] = None,
+        head_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Create a new training model via the backend abstraction.
@@ -57,12 +60,9 @@ class ModelService:
         if parallelism_config:
             num_gpus = parallelism_config.get("num_gpus", num_gpus)
 
-        # TODO(004-P2): thread objective/num_labels/head_config (CreateModelRequest,
-        # requests.py) through create_model() into the automodel/megatron_bridge
-        # backends. Router (routers/models.py:152) + this service signature must
-        # forward them; classification backends default to sequence_classification
-        # until wired. See specs/004-bionemo-classification/plan.md.
-        # Delegate to backend
+        # Delegate to backend. The objective axis (feature 004) is forwarded so
+        # classification backends can stand up a classification head; LM-only
+        # backends reject non-LM objectives. See specs/004-bionemo-classification.
         handle = await self.backend.create_model(
             model_id=model_id,
             request_id=request_id,
@@ -76,6 +76,9 @@ class ModelService:
             max_seq_len=max_seq_len,
             rlve_config=rlve_config,
             wandb_config=wandb_config,
+            objective=objective,
+            num_labels=num_labels,
+            head_config=head_config,
         )
 
         # Save metadata
@@ -89,6 +92,8 @@ class ModelService:
             "lora_config": lora_config,
             "rlve_config": rlve_config,
             "wandb_config": wandb_config,
+            "objective": objective,
+            "num_labels": num_labels,
             "created_at": datetime.now().isoformat(),
             "checkpoint_path": checkpoint_path,
             "model_owner": "kgateway-user",
