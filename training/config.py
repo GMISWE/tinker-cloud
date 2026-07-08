@@ -182,7 +182,7 @@ class BackendConfig(BaseModel):
 
     backend_type: str = Field(
         default_factory=lambda: os.getenv("TINKERCLOUD_BACKEND", "miles"),
-        description="Training backend: 'miles' or 'nemo_rl'"
+        description="Training backend: 'miles', 'nemo_rl', 'automodel', or 'megatron_bridge'"
     )
     backend_overrides: Dict[str, Any] = Field(
         default_factory=dict,
@@ -192,7 +192,7 @@ class BackendConfig(BaseModel):
     @validator("backend_type")
     def validate_backend_type(cls, v):
         """Ensure backend type is supported."""
-        supported = ("miles", "nemo_rl")
+        supported = ("miles", "nemo_rl", "automodel", "megatron_bridge")
         if v not in supported:
             raise ValueError(
                 f"Unsupported backend: {v!r}. Supported: {', '.join(supported)}"
