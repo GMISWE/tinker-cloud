@@ -14,6 +14,7 @@ language_modeling objective.
 
 See specs/004-bionemo-classification/plan.md.
 """
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -47,6 +48,10 @@ class AutomodelHandle(BackendHandle):
     config: Dict = field(default_factory=dict)
     data_buffer: List = field(default_factory=list)
     created_at: str = ""
+    # Per-MODEL lock: the fb/optim race is within one model's params+optimizer,
+    # so serialize per handle (not per backend — that would needlessly block
+    # unrelated models/sessions from training concurrently).
+    lock: Any = field(default_factory=asyncio.Lock)
 
 
 class AutomodelBackend(TrainingBackend):
@@ -202,7 +207,8 @@ class AutomodelBackend(TrainingBackend):
         batch = self.converter.forward_to_backend(
             data, {"objective": h.objective},
         )
-        result = await asyncio.to_thread(self._forward_only, h, batch)
+        async with h.lock:
+            result = await asyncio.to_thread(self._forward_only, h, batch)
         return self.converter.backend_to_forward_result(result, data)
 
     def _forward_only(self, h: AutomodelHandle, batch) -> Dict[str, Any]:
@@ -229,7 +235,8 @@ class AutomodelBackend(TrainingBackend):
             "Automodel forward_backward: %d samples, input_ids=%s",
             len(data), tuple(batch["input_ids"].shape),
         )
-        result = await asyncio.to_thread(self._forward_backward, h, batch)
+        async with h.lock:
+            result = await asyncio.to_thread(self._forward_backward, h, batch)
         return self.converter.backend_to_forward_backward_result(result, data)
 
     def _forward_backward(self, h: AutomodelHandle, batch) -> Dict[str, Any]:
@@ -246,9 +253,9 @@ class AutomodelBackend(TrainingBackend):
         self, handle: BackendHandle, learning_rate: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Optimizer step over accumulated grads, then zero them."""
-        import asyncio
         h: AutomodelHandle = handle  # type: ignore[assignment]
-        return await asyncio.to_thread(self._optimizer_step, h, learning_rate)
+        async with h.lock:
+            return await asyncio.to_thread(self._optimizer_step, h, learning_rate)
 
     def _optimizer_step(
         self, h: AutomodelHandle, learning_rate: Optional[float],

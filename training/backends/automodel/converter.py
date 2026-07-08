@@ -91,27 +91,43 @@ class ClassificationDataConverter(DataConverter):
     def backend_to_forward_result(
         self, result: Any, data: List[Dict],
     ) -> Dict[str, Any]:
-        """Convert classification forward result (logits) to Tinker format."""
+        """Convert classification forward result (logits) to the SDK's
+        ForwardBackwardOutput shape: loss_fn_outputs[i]["logits"] is a
+        TensorData dict ({data, shape, dtype}) of per-position class logits."""
         logits = result.get("logits") if hasattr(result, "get") else result
         outputs = []
         if logits is not None:
             for i in range(len(data)):
-                row = logits[i].detach().cpu()
-                outputs.append({"logits": row.tolist()})
-        return {"loss_fn_outputs": outputs, "metrics": {}}
+                row = logits[i].detach().cpu().float()      # [S, C]
+                outputs.append({"logits": {
+                    "data": row.flatten().tolist(),
+                    "shape": list(row.shape),
+                    "dtype": "float32",
+                }})
+        return {
+            "loss_fn_output_type": "classification",
+            "loss_fn_outputs": outputs,
+            "metrics": {},
+        }
 
     def backend_to_forward_backward_result(
         self, result: Any, data: List[Dict],
     ) -> Dict[str, Any]:
-        """Convert classification training result (loss/metrics) to Tinker format."""
+        """Convert classification training result to the SDK's
+        ForwardBackwardOutput shape. metrics stays EMPTY: the SDK combiner
+        weights metrics by len(loss_fn_outputs) (0 here) and would zero-divide
+        on a non-empty metrics dict. `loss` is kept as an extra key (SDK ignores
+        it) for the raw-HTTP path."""
         if result is None:
-            return {"loss": None, "metrics": {}, "deferred": True, "loss_fn_outputs": []}
+            return {"loss": None, "loss_fn_output_type": "classification_ce",
+                    "loss_fn_outputs": [], "metrics": {}, "deferred": True}
         loss = _to_python_scalar(result.get("loss", 0.0))
         return {
             "loss": loss,
-            "metrics": {"total_loss": loss},
-            "deferred": False,
+            "loss_fn_output_type": "classification_ce",
             "loss_fn_outputs": [],
+            "metrics": {},
+            "deferred": False,
         }
 
 
