@@ -114,6 +114,12 @@ class CreateModelRequest(BaseModel):
     rlve_config: Optional[RLVEConfig] = Field(default=None, description="RLVE training configuration")
     wandb_config: Optional[WandbConfig] = Field(default=None, description="Wandb logging configuration")
 
+    # Objective axis (feature 004). Defaults keep the language-modeling path unchanged.
+    # See specs/004-bionemo-classification/plan.md.
+    objective: str = Field(default="language_modeling", description="language_modeling | sequence_classification | token_classification")
+    num_labels: Optional[int] = Field(default=None, description="Number of classes (classification objectives only)")
+    head_config: Optional[Dict[str, Any]] = Field(default=None, description="Classification head config (classification objectives only)")
+
 
 class DeleteModelRequest(BaseModel):
     """Request to delete a training client."""

@@ -21,7 +21,7 @@ class BackendFactory:
         Instantiate the training backend for the given type.
 
         Args:
-            backend_type: "miles" or "nemo_rl"
+            backend_type: "miles", "nemo_rl", "automodel", or "megatron_bridge"
             backend_overrides: Optional backend-specific config overrides.
 
         Returns:
@@ -42,8 +42,18 @@ class BackendFactory:
             logger.info("Creating NeMo RL backend")
             return NemoRLBackend(overrides)
 
+        elif backend_type == "automodel":
+            from .automodel.backend import AutomodelBackend
+            logger.info("Creating Automodel classification backend")
+            return AutomodelBackend(overrides)
+
+        elif backend_type == "megatron_bridge":
+            from .megatron_bridge.backend import MegatronBridgeBackend
+            logger.info("Creating Megatron-Bridge classification backend")
+            return MegatronBridgeBackend(overrides)
+
         else:
             raise ValueError(
                 f"Unknown backend: {backend_type!r}. "
-                f"Supported backends: miles, nemo_rl"
+                f"Supported backends: miles, nemo_rl, automodel, megatron_bridge"
             )

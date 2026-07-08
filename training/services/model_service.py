@@ -57,6 +57,11 @@ class ModelService:
         if parallelism_config:
             num_gpus = parallelism_config.get("num_gpus", num_gpus)
 
+        # TODO(004-P2): thread objective/num_labels/head_config (CreateModelRequest,
+        # requests.py) through create_model() into the automodel/megatron_bridge
+        # backends. Router (routers/models.py:152) + this service signature must
+        # forward them; classification backends default to sequence_classification
+        # until wired. See specs/004-bionemo-classification/plan.md.
         # Delegate to backend
         handle = await self.backend.create_model(
             model_id=model_id,
