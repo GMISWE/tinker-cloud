@@ -1,21 +1,23 @@
 #!/usr/bin/env bash
 # One-key deploy of a TinkerCloud dev environment (k8s pod or docker container).
 #
-#   deploy_tinkercloud.sh [--profile nemo_rl|bionemo] [--source dev|git] \
-#                         [--target k8s|docker] [--code-only]
+#   deploy_tinkercloud.sh [--profile nemo_rl|bionemo|megatron_bridge] \
+#                         [--source dev|git] [--target k8s|docker] [--code-only]
 #
-# Profiles (cased by BASE IMAGE — the two images ship incompatible stacks)
+# Profiles (cased by BASE IMAGE — the images ship incompatible stacks)
 #   nemo_rl  (default) NeMo RL server backend. Image nvcr.io/nvidia/nemo-rl:*.
 #            Overlays RL/nemo_rl, starts a Ray head + `python3 -m training`
 #            (TINKERCLOUD_BACKEND=nemo_rl), health-checks :8000. GPUS=4, master-02.
-#   bionemo  Faithful Evo2 env (feature 004 P5). Image
-#            nvcr.io/nvidia/clara/bionemo-framework:* — ships hyena Megatron-LM +
-#            TE + bionemo.evo2 + NeMo2 (NO nemo_rl). Deploys the training code
-#            (megatron_bridge backend) + scripts/evo2/ helpers; does NOT overlay
-#            nemo_rl, start Ray, or run the server (no working evo2 server yet).
-#            GPUS=2, master-03. See specs/004-bionemo-classification/P5-RESULTS.md.
-#   Per-profile defaults (IMAGE, GPUS, NODE, BACKEND, image tag) are overridable
-#   by the same-named env vars.
+#   bionemo  cu12 NeMo2 exploration env (feature 004 P5). Image
+#            nvcr.io/nvidia/clara/bionemo-framework:* — hyena Megatron-LM + TE +
+#            bionemo.evo2 + NeMo2. Env only (code + scripts/evo2 helpers, no server).
+#   megatron_bridge  cu13 recipe env (feature 004 P5, the FAITHFUL Evo2 classifier).
+#            Image nvcr.io/nvidia/pytorch:26.04-py3. Builds the bionemo-recipes
+#            evo2_megatron recipe (megatron-bridge v0.4.1) so the megatron_bridge
+#            backend can import megatron.bridge + evo2_classifier. Env only until
+#            that backend lands (stubs today). GPUS=2, master-03.
+#   Per-profile defaults (IMAGE, GPUS, NODE, BACKEND) are overridable by env vars.
+#   See specs/004-bionemo-classification/P5-TINKER-BACKEND.md.
 #
 # Sources
 #   dev  (default when run inside the tinker-nemorl monorepo)
@@ -66,13 +68,23 @@ case "$PROFILE" in
     RUN_SERVER=1 ;;   # Ray head + `python3 -m training` + health check
   bionemo)
     IMAGE="${IMAGE:-nvcr.io/nvidia/clara/bionemo-framework:2.7.1}"
-    BACKEND="${BACKEND:-megatron_bridge}"
+    BACKEND="${BACKEND:-automodel}"
     GPUS="${GPUS:-2}"
     NODE="${NODE:-master-03}"
     POD="${POD:-bionemo-evo2-p5}"
     CONTAINER="${CONTAINER:-bionemo-evo2-p5}"
-    RUN_SERVER=0 ;;   # env only: deploy code + evo2 helpers, no server
-  *) echo "unknown --profile $PROFILE (want: nemo_rl | bionemo)"; exit 1 ;;
+    RUN_SERVER=0 ;;   # env only (cu12 NeMo2 exploration env): code + evo2 helpers
+  megatron_bridge)
+    # cu13 recipe env: builds bionemo-recipes evo2_megatron (megatron-bridge) so
+    # the megatron_bridge backend can import megatron.bridge + the Evo2 classifier.
+    IMAGE="${IMAGE:-nvcr.io/nvidia/pytorch:26.04-py3}"
+    BACKEND="${BACKEND:-megatron_bridge}"
+    GPUS="${GPUS:-2}"
+    NODE="${NODE:-master-03}"
+    POD="${POD:-evo2-recipe}"
+    CONTAINER="${CONTAINER:-evo2-recipe}"
+    RUN_SERVER=0 ;;   # env only until the megatron_bridge backend lands (stubs today)
+  *) echo "unknown --profile $PROFILE (want: nemo_rl | bionemo | megatron_bridge)"; exit 1 ;;
 esac
 
 # --- shared config (IMAGE/GPUS/NODE/POD/CONTAINER/BACKEND set per-profile) --
@@ -185,6 +197,11 @@ else
   EX "pkill -f 'python3 -m trainin[g]' || true; sleep 8" || true
 fi
 
+# the megatron_bridge profile also bundles the bionemo-recipes evo2 recipe (built
+# in-container). dev/monorepo only (submodule); git mode not supported for it.
+EXTRA_TAR_PATHS=""
+[ "$PROFILE" = megatron_bridge ] && EXTRA_TAR_PATHS="bionemo-recipes/recipes/evo2_megatron"
+
 # --- 2. gather code ---------------------------------------------------------
 echo "==> [2/6] gathering code (source=$SOURCE)"
 if [ "$SOURCE" = dev ]; then
@@ -193,8 +210,12 @@ if [ "$SOURCE" = dev ]; then
   for d in tinker-cloud RL tinker_gmi tinker-cookbook; do
     [ -d "$MONOREPO/$d" ] || { echo "ERROR: $MONOREPO/$d missing (dev mode needs the monorepo)"; exit 1; }
   done
+  if [ -n "$EXTRA_TAR_PATHS" ] && [ ! -d "$MONOREPO/$EXTRA_TAR_PATHS" ]; then
+    echo "ERROR: $MONOREPO/$EXTRA_TAR_PATHS missing (megatron_bridge needs the bionemo-recipes submodule: git submodule update --init bionemo-recipes)"; exit 1
+  fi
   SRC="$MONOREPO"
 elif [ "$SOURCE" = git ]; then
+  [ -n "$EXTRA_TAR_PATHS" ] && { echo "ERROR: --profile megatron_bridge needs --source dev (bionemo-recipes submodule)"; exit 1; }
   echo "    cloning: tinker-cloud@$TINKER_CLOUD_REF RL@$RL_REF tinker_gmi@$TINKER_GMI_REF tinker-cookbook@$COOKBOOK_REF"
   git clone -q --depth 1 --branch "$TINKER_CLOUD_REF" "$TINKER_CLOUD_REPO" "$TMP/src/tinker-cloud"
   git clone -q --depth 1 --branch "$RL_REF"           "$RL_REPO"           "$TMP/src/RL"
@@ -206,11 +227,12 @@ else
 fi
 tar -C "$SRC" -czf "$TMP/code.tar.gz" \
   --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
-  --exclude='tinker-cookbook/attic' \
+  --exclude='.venv' --exclude='tinker-cookbook/attic' \
   tinker-cloud/training tinker-cloud/tests tinker-cloud/scripts/evo2 \
   RL/nemo_rl \
   tinker_gmi/src tinker_gmi/pyproject.toml tinker_gmi/README.md \
-  tinker-cookbook/tinker_cookbook tinker-cookbook/pyproject.toml tinker-cookbook/README.md
+  tinker-cookbook/tinker_cookbook tinker-cookbook/pyproject.toml tinker-cookbook/README.md \
+  $EXTRA_TAR_PATHS
 echo "    bundle: $(du -h "$TMP/code.tar.gz" | cut -f1)"
 
 # --- 3. copy in --------------------------------------------------------------
