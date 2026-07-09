@@ -5,12 +5,46 @@ create_model args to NeMo RL PolicyConfig dict.
 Returns (config_dict, hf_path) similar to MilesArgumentBuilder.
 """
 import logging
+import os
 from typing import Any, Dict, Optional
 
 from ..base import ArgumentBuilder
 from ...utils.model_config import detect_num_gpus
 
 logger = logging.getLogger(__name__)
+
+# Default upper bound on the model-derived sequence length. Sizing the policy
+# and vLLM engine to a model's *full* native context (often 128K+) would waste
+# KV-cache/activation memory, so we cap the auto-derived value here. Operators
+# can raise it (Explicit Configuration) for long-context runs.
+_DEFAULT_MAX_SEQ_LEN_CAP = 32768
+
+# HF config attributes that report a model's max context window, in priority order.
+_MAX_POSITIONS_ATTRS = (
+    "max_position_embeddings",
+    "n_positions",
+    "max_sequence_length",
+    "seq_length",
+    "model_max_length",
+)
+
+
+def _read_model_max_positions(cfg: Any) -> Optional[int]:
+    """Best-effort read of a model's native context window from its HF config.
+
+    Falls back to a nested text_config (VLMs / composite configs). Returns None
+    when no sane positive value is found.
+    """
+    candidates = [cfg]
+    text_cfg = getattr(cfg, "text_config", None)
+    if text_cfg is not None:
+        candidates.append(text_cfg)
+    for c in candidates:
+        for attr in _MAX_POSITIONS_ATTRS:
+            val = getattr(c, attr, None)
+            if isinstance(val, int) and 0 < val < 10_000_000:
+                return val
+    return None
 
 
 class NemoRLArgumentBuilder(ArgumentBuilder):
@@ -45,13 +79,19 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
 
         debug_train_only = kwargs.get("debug_train_only", False)
         max_batch_size = kwargs.get("max_batch_size", 4096)
-        max_seq_len = kwargs.get("max_seq_len", 2048)
+        # The client sends max_seq_len=2048 by default (upstream Tinker never has
+        # the training script declare a context length). Treat it as a floor and
+        # size up to the model's native context below, so long-context recipes
+        # (e.g. harbor_rl, 32K trajectories) work with no cookbook/SDK change.
+        requested_seq_len = kwargs.get("max_seq_len", 2048)
+        seq_len_cap = int(os.environ.get("TINKERCLOUD_MAX_SEQ_LEN_CAP", _DEFAULT_MAX_SEQ_LEN_CAP))
+        max_seq_len = requested_seq_len
         rlve_config = kwargs.get("rlve_config")
         wandb_config = kwargs.get("wandb_config")
 
         hf_path = base_model
 
-        # Detect VLM via config (cheap — only reads config.json)
+        # Detect VLM + read the model's native context window (cheap — reads config.json)
         is_vlm = False
         try:
             from transformers import AutoConfig
@@ -63,8 +103,18 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
             )
             if is_vlm:
                 logger.info("VLM detected: %s — enforcing sequence_packing=False, cp_size=1", cfg.__class__.__name__)
+
+            model_ctx = _read_model_max_positions(cfg)
+            if model_ctx:
+                derived = min(model_ctx, seq_len_cap)
+                max_seq_len = max(requested_seq_len, derived)
+                if max_seq_len != requested_seq_len:
+                    logger.info(
+                        "max_seq_len raised %d -> %d (model context %d, cap %d)",
+                        requested_seq_len, max_seq_len, model_ctx, seq_len_cap,
+                    )
         except Exception as e:
-            logger.debug("VLM detection skipped: %s", e)
+            logger.debug("model config read skipped (VLM/seq-len detection): %s", e)
 
         # Warn about Miles-only RLVE server-side features
         if rlve_config and rlve_config.get("enabled", False):
