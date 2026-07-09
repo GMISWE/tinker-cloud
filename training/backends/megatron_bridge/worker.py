@@ -1,9 +1,7 @@
 """Ray GPU worker for the megatron_bridge backend.
 
-Holds the Evo2 classifier + megatron distributed context in a per-model Ray actor
-(isolated parallel_state), so the server stays a plain process. Needs the cu13
-recipe venv (deploy_tinkercloud.sh --profile megatron_bridge), inherited by the
-actor from the driver. See specs/004-bionemo-classification/P5-TINKER-BACKEND.md.
+Holds distributed context in a per-model Ray actor
+(isolated parallel_state), so the server stays a plain process. 
 """
 import os
 
