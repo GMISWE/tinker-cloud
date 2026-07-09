@@ -1,9 +1,11 @@
 # TinkerCloud Training API
 
-FastAPI server that bridges the Tinker client SDK to pluggable training backends.
+FastAPI server that provides an abstraction layer between the Tinker client SDK and
+pluggable training backends (Miles, NeMo RL, Automodel, Megatron-Bridge) — the same
+Tinker API drives any backend, no client changes required.
 
 ```
-Tinker Client --> FastAPI --> BackendFactory --> Miles or NeMo RL --> Ray + Megatron GPUs
+Tinker Client --> FastAPI --> BackendFactory --> Miles | NeMo RL | Automodel | Megatron-Bridge --> GPUs
 ```
 
 ## Quickstart (NeMo RL)
