@@ -2,23 +2,25 @@
 Megatron-Bridge backend — Evo2 (Striped Hyena) sequence classification.
 
 Hosts the faithful BioNeMo CS2 recipe (bionemo-recipes/recipes/evo2_megatron/
-examples/evo2_classifier.py) behind the tinker TrainingBackend API by
-decomposing megatron-bridge's monolithic ``pretrain()`` into per-step primitives:
-  - create_model         = evo2_1b_classifier_config + GlobalState + setup()
-                           -> model / optimizer / scheduler
-  - forward_backward      = get_forward_backward_func()(classifier_forward_step,
-                           iter([batch]), model, num_microbatches=1)  (grads)
-  - apply_optimizer_step  = optimizer.step() + scheduler.step()
+examples/evo2_classifier.py) behind the tinker TrainingBackend API.
 
-Reproduces ~0.858 test acc on splice_sites_all (see P5-RESULTS.md). Runs ONLY in
-the cu13 recipe venv (deploy_tinkercloud.sh --profile megatron_bridge); the
-megatron.bridge + evo2_classifier imports are lazy so the module still loads
-elsewhere. Generation plane raises (classification, no sampling).
+**Ray-actor architecture** (like nemo_rl / miles; NOT run under torchrun): the
+megatron model + distributed context live in a per-model GPU actor
+(``MegatronBridgeWorker``), so the tinker-cloud server stays a plain process.
+create_model spawns the actor; forward/forward_backward/apply_optimizer_step
+delegate to it. Each model gets its own actor -> megatron's global state
+(parallel_state / microbatch calculator) is isolated per model (multi-model OK,
+clean teardown). The actor decomposes megatron-bridge's ``pretrain()`` into
+setup() + get_forward_backward_func() + optimizer.step().
+
+Runs in the cu13 recipe venv (deploy_tinkercloud.sh --profile megatron_bridge);
+ray + megatron.bridge + evo2_classifier imports are lazy. Generation plane raises.
 See specs/004-bionemo-classification/P5-TINKER-BACKEND.md.
 """
+import asyncio
 import logging
 import os
-import sys
+import socket
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -28,8 +30,6 @@ from ..objectives import Objective, is_classification
 
 logger = logging.getLogger(__name__)
 
-_PLAN = "specs/004-bionemo-classification/P5-TINKER-BACKEND.md"
-
 # Recipe locations inside the cu13 recipe env (deploy --profile megatron_bridge).
 _RECIPE_DIR = os.environ.get("EVO2_RECIPE_DIR", "/workspace/evo2_megatron")
 _RECIPE_EXAMPLES = os.path.join(_RECIPE_DIR, "examples")
@@ -38,35 +38,40 @@ _TOKENIZER_PATH = os.environ.get(
 )
 
 
+def _free_port() -> int:
+    s = socket.socket()
+    s.bind(("", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
+
+
 @dataclass
 class MegatronBridgeHandle(BackendHandle):
-    """Megatron-Bridge-specific runtime state (classification)."""
+    """Handle for one Evo2 classifier — a reference to its GPU worker actor."""
 
     base_model: str = ""
     objective: str = Objective.SEQUENCE_CLASSIFICATION.value
     num_labels: int = 0
     head_config: Optional[Dict[str, Any]] = None
     lora_config: Optional[Dict[str, Any]] = None
-    model: Any = None                 # list[MegatronModule] (Hyena classifier + LoRA + head)
-    optimizer: Any = None             # MegatronOptimizer
-    scheduler: Any = None             # OptimizerParamScheduler
-    state: Any = None                 # megatron.bridge GlobalState
-    forward_step: Any = None          # capturing wrapper around classifier_forward_step
-    fbfunc: Any = None                # get_forward_backward_func()
-    logits_capture: Dict = field(default_factory=dict)  # per-fb stash of class logits
+    worker: Any = None                # MegatronBridgeWorker Ray actor handle
     seq_length: int = 1024
-    needs_zero: bool = True           # zero grads on the next forward_backward
-    config: Dict = field(default_factory=dict)
     created_at: str = ""
 
 
+async def _get(ref):
+    """Await a Ray object ref without blocking the event loop."""
+    import ray
+    return await asyncio.to_thread(ray.get, ref)
+
+
 class MegatronBridgeBackend(TrainingBackend):
-    """Megatron-native classification backend (no generation plane)."""
+    """Megatron-native classification backend (Ray-actor delegation, no gen plane)."""
 
     def __init__(self, overrides: Optional[Dict[str, Any]] = None):
         self.overrides = overrides or {}
         self._converter = None
-        self._builder = None
 
     @property
     def converter(self):
@@ -74,13 +79,6 @@ class MegatronBridgeBackend(TrainingBackend):
             from .converter import NeMo2ClassificationDataConverter
             self._converter = NeMo2ClassificationDataConverter()
         return self._converter
-
-    @property
-    def builder(self):
-        if self._builder is None:
-            from .builder import MegatronBridgeArgumentBuilder
-            self._builder = MegatronBridgeArgumentBuilder(overrides=self.overrides)
-        return self._builder
 
     async def create_model(
         self,
@@ -102,63 +100,25 @@ class MegatronBridgeBackend(TrainingBackend):
         num_labels: Optional[int] = None,
         head_config: Optional[Dict[str, Any]] = None,
     ) -> MegatronBridgeHandle:
-        """Build the Evo2 classifier + LoRA + optimizer via the recipe's
-        config + megatron-bridge ``setup()`` (one-time; per-step control after)."""
+        """Spawn a GPU worker actor that builds the classifier + LoRA + optimizer."""
         if not is_classification(objective):
             raise BackendError(
-                f"Megatron-Bridge backend only serves classification objectives, "
-                f"got {objective!r}",
-                backend="megatron_bridge", operation="create_model",
-            )
+                f"Megatron-Bridge backend only serves classification objectives, got {objective!r}",
+                backend="megatron_bridge", operation="create_model")
         if not num_labels or num_labels < 2:
             raise BackendError(
                 f"num_labels must be >= 2 for classification, got {num_labels!r}",
-                backend="megatron_bridge", operation="create_model",
-            )
+                backend="megatron_bridge", operation="create_model")
 
         hc = head_config or {}
         lc = lora_config or {}
         seq_length = int(hc.get("seq_length", max_seq_len if max_seq_len <= 8192 else 1024))
-        handle = MegatronBridgeHandle(
-            model_id=model_id,
-            backend_type="megatron_bridge",
-            base_model=base_model,
-            objective=Objective(objective).value,
-            num_labels=num_labels,
-            head_config=head_config,
-            lora_config=lora_config,
-            seq_length=seq_length,
-            created_at=datetime.now().isoformat(),
-        )
-
-        # Lazy imports — only present in the cu13 recipe venv.
-        if _RECIPE_EXAMPLES not in sys.path:
-            sys.path.insert(0, _RECIPE_EXAMPLES)
-        try:
-            import functools
-            from pathlib import Path
-            from megatron.bridge.training.state import GlobalState
-            from megatron.bridge.training.setup import setup
-            from megatron.bridge.training.config import runtime_config_update
-            from megatron.bridge.data.utils import get_dataset_provider
-            from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
-            from evo2_classifier import evo2_1b_classifier_config, classifier_forward_step
-        except Exception as e:  # pragma: no cover - env-specific
-            raise BackendError(
-                f"megatron-bridge/evo2 recipe not importable ({e!r}). Run under "
-                f"deploy_tinkercloud.sh --profile megatron_bridge (cu13 recipe env).",
-                backend="megatron_bridge", operation="create_model",
-            )
-
-        def _p(v):
-            return Path(v) if v is not None else None
-
-        cfg = evo2_1b_classifier_config(
-            base_ckpt_dir=_p(hc.get("base_ckpt_dir", base_model)),
-            train_jsonl=_p(hc.get("train_jsonl")), val_jsonl=_p(hc.get("val_jsonl")),
-            test_jsonl=_p(hc.get("test_jsonl")),
-            num_classes=num_labels,
-            result_dir=_p(checkpoint_path or hc.get("result_dir", f"/data/{model_id}")),
+        # kwargs for evo2_1b_classifier_config (built inside the actor; Path-wrapped there)
+        cfg_kwargs = dict(
+            base_ckpt_dir=hc.get("base_ckpt_dir", base_model),
+            train_jsonl=hc.get("train_jsonl"), val_jsonl=hc.get("val_jsonl"),
+            test_jsonl=hc.get("test_jsonl"), num_classes=num_labels,
+            result_dir=checkpoint_path or hc.get("result_dir", f"/data/{model_id}"),
             experiment_name=model_id, model_size=hc.get("model_size", "evo2_1b_base"),
             tensor_model_parallel_size=(parallelism or {}).get("tp", 1),
             seq_length_tokens=seq_length, backbone_seq_length=seq_length,
@@ -170,112 +130,58 @@ class MegatronBridgeBackend(TrainingBackend):
             pool=hc.get("pool", "mean"), classifier_dropout=hc.get("classifier_dropout", 0.1),
             use_lora=True, lora_dim=lc.get("rank", 16), lora_alpha=lc.get("alpha", 32),
             lora_dropout=lc.get("dropout", 0.1),
-            tokenizer_path=_p(hc.get("tokenizer_path", _TOKENIZER_PATH)),
+            tokenizer_path=hc.get("tokenizer_path", _TOKENIZER_PATH),
         )
-        runtime_config_update(cfg)  # derives data_parallel_size etc. (pretrain() does this)
-        state = GlobalState()
-        state.cfg = cfg
-        so = setup(state, get_dataset_provider(cfg.dataset))
-        handle.state = state
-        handle.model = so.model
-        handle.optimizer = so.optimizer
-        handle.scheduler = so.scheduler
-        handle.fbfunc = get_forward_backward_func()
 
-        # wrap the recipe forward_step to stash per-sample class logits (for the
-        # SDK ForwardBackwardOutput.loss_fn_outputs the client reads at eval)
-        _cap = handle.logits_capture
+        try:
+            import ray
+            if not ray.is_initialized():
+                ray.init(address=os.environ.get("RAY_ADDRESS"), ignore_reinit_error=True)
+            from .worker import MegatronBridgeWorker
+        except Exception as e:
+            raise BackendError(
+                f"ray / megatron-bridge recipe not importable ({e!r}). Run under "
+                f"deploy_tinkercloud.sh --profile megatron_bridge (cu13 recipe env).",
+                backend="megatron_bridge", operation="create_model")
 
-        def _capturing_step(*a, **kw):
-            logits, loss_fn = classifier_forward_step(state, *a, **kw)
-            _cap["logits"] = logits.detach()
-            return logits, loss_fn
+        worker = MegatronBridgeWorker.remote(cfg_kwargs, _free_port(), _RECIPE_EXAMPLES)
+        await _get(worker.ready.remote())   # blocks (in a thread) until setup() done
 
-        handle.forward_step = _capturing_step
-        handle.seq_length = cfg.model.seq_length
-        handle.needs_zero = True
+        handle = MegatronBridgeHandle(
+            model_id=model_id, backend_type="megatron_bridge", base_model=base_model,
+            objective=Objective(objective).value, num_labels=num_labels,
+            head_config=head_config, lora_config=lora_config, worker=worker,
+            seq_length=seq_length, created_at=datetime.now().isoformat())
         logger.info(
-            "[%s] megatron_bridge create_model %s: base=%s num_labels=%d seq_len=%d lora_r=%s",
-            request_id, model_id, base_model, num_labels, handle.seq_length, lc.get("rank", 16),
-        )
+            "[%s] megatron_bridge create_model %s: base=%s num_labels=%d seq_len=%d lora_r=%s (Ray actor)",
+            request_id, model_id, base_model, num_labels, seq_length, lc.get("rank", 16))
         return handle
 
-    async def forward(
-        self, handle: BackendHandle, data: List[Dict], loss_fn: str,
-    ) -> Dict[str, Any]:
-        """Forward-only pass -> SDK ForwardBackwardOutput with per-sample logits."""
+    async def forward(self, handle: BackendHandle, data: List[Dict], loss_fn: str) -> Dict[str, Any]:
         h: MegatronBridgeHandle = handle  # type: ignore[assignment]
         batch = self.converter.forward_to_backend(data, {"seq_length": h.seq_length})
-        losses = h.fbfunc(
-            forward_step_func=h.forward_step, data_iterator=iter([batch]),
-            model=h.model, num_microbatches=1, seq_length=h.seq_length,
-            micro_batch_size=batch["input_ids"].shape[0], forward_only=True,
-        )
-        return _sdk_fb_output(h.logits_capture.get("logits"),
-                              _reduce(losses, "ce loss"), _reduce(losses, "accuracy"))
+        return await _get(h.worker.forward.remote(batch))
 
-    async def forward_backward(
-        self, handle: BackendHandle, data: List[Dict], loss_fn: str,
-    ) -> Dict[str, Any]:
-        """One forward+backward microbatch (accumulates grads; no optim step).
-
-        Grads are zeroed on the first fb after an optimizer step, so N fb calls
-        before apply_optimizer_step accumulate (tinker-async friendly)."""
+    async def forward_backward(self, handle: BackendHandle, data: List[Dict], loss_fn: str) -> Dict[str, Any]:
         h: MegatronBridgeHandle = handle  # type: ignore[assignment]
-        batch = self.converter.forward_backward_to_backend(
-            data, loss_fn, {"seq_length": h.seq_length},
-        )
-        if h.needs_zero:
-            for mc in h.model:
-                if hasattr(mc, "zero_grad_buffer"):
-                    mc.zero_grad_buffer()
-            h.optimizer.zero_grad()
-            h.needs_zero = False
-        losses = h.fbfunc(
-            forward_step_func=h.forward_step, data_iterator=iter([batch]),
-            model=h.model, num_microbatches=1, seq_length=h.seq_length,
-            micro_batch_size=batch["input_ids"].shape[0], forward_only=False,
-        )
-        loss = _reduce(losses, "ce loss")
-        logger.debug("megatron_bridge fb: %d samples loss=%.4f", len(data), loss)
-        return _sdk_fb_output(h.logits_capture.get("logits"), loss,
-                              _reduce(losses, "accuracy"))
+        batch = self.converter.forward_backward_to_backend(data, loss_fn, {"seq_length": h.seq_length})
+        return await _get(h.worker.forward_backward.remote(batch))
 
-    async def apply_optimizer_step(
-        self, handle: BackendHandle, learning_rate: Optional[float] = None,
-    ) -> Dict[str, Any]:
-        """optimizer.step() + scheduler.step() over the accumulated grads."""
+    async def apply_optimizer_step(self, handle: BackendHandle, learning_rate: Optional[float] = None) -> Dict[str, Any]:
         h: MegatronBridgeHandle = handle  # type: ignore[assignment]
-        step_out = h.optimizer.step()
-        # megatron optimizer.step() -> (update_successful, grad_norm, num_zeros)
-        grad_norm = None
-        if isinstance(step_out, (tuple, list)) and len(step_out) >= 2:
-            grad_norm = step_out[1]
-        h.scheduler.step(increment=1)
-        h.needs_zero = True
-        lr = h.optimizer.param_groups[0]["lr"] if getattr(h.optimizer, "param_groups", None) else None
-        metrics = {}
-        if grad_norm is not None:
-            metrics["grad_norm:mean"] = float(grad_norm)
-        if lr is not None or learning_rate is not None:
-            metrics["learning_rate:mean"] = float(lr if lr is not None else learning_rate)
-        return {"metrics": metrics}   # SDK OptimStepResponse shape
+        return await _get(h.worker.apply_optimizer_step.remote(learning_rate))
 
-    # --- generation plane: N/A for classification (plan.md Non-Goals) ---
+    # --- generation plane: N/A for classification ---
 
     async def update_inference_weights(self, handle: BackendHandle) -> None:
         raise _no_generation("update_inference_weights")
 
-    async def sample(
-        self, handle: BackendHandle, request_id: str, prompt_tokens: List[int],
-        num_samples: int, sampling_params: Optional[Dict[str, Any]] = None,
-        prompt_logprobs: bool = False,
-    ) -> Dict[str, Any]:
+    async def sample(self, handle: BackendHandle, request_id: str, prompt_tokens: List[int],
+                     num_samples: int, sampling_params: Optional[Dict[str, Any]] = None,
+                     prompt_logprobs: bool = False) -> Dict[str, Any]:
         raise _no_generation("sample")
 
-    async def get_logprobs(
-        self, handle: BackendHandle, data: List[Dict],
-    ) -> List[Any]:
+    async def get_logprobs(self, handle: BackendHandle, data: List[Dict]) -> List[Any]:
         raise _no_generation("get_logprobs")
 
     async def prepare_for_generation(self, handle: BackendHandle) -> None:
@@ -283,74 +189,31 @@ class MegatronBridgeBackend(TrainingBackend):
 
     # --- checkpoint / teardown ---
 
-    async def save_checkpoint(
-        self, handle: BackendHandle, checkpoint_path: str,
-        step_id: Optional[int] = None,
-    ) -> str:
-        """Save the LoRA adapters + head via megatron-bridge dist-checkpointing."""
+    async def save_checkpoint(self, handle: BackendHandle, checkpoint_path: str,
+                              step_id: Optional[int] = None) -> str:
         h: MegatronBridgeHandle = handle  # type: ignore[assignment]
         try:
-            from megatron.bridge.training.checkpointing import save_checkpoint as _save
-            _save(state=h.state, model=h.model, optimizer=h.optimizer,
-                  opt_param_scheduler=h.scheduler, num_floating_point_operations_so_far=0)
-        except Exception as e:  # pragma: no cover
+            return await _get(h.worker.save_checkpoint.remote(checkpoint_path))
+        except Exception as e:
             raise BackendError(f"save_checkpoint failed: {e!r}",
                                backend="megatron_bridge", operation="save_checkpoint")
-        return checkpoint_path
 
-    async def load_checkpoint(
-        self, handle: BackendHandle, checkpoint_path: str,
-    ) -> None:
+    async def load_checkpoint(self, handle: BackendHandle, checkpoint_path: str) -> None:
         h: MegatronBridgeHandle = handle  # type: ignore[assignment]
         try:
-            from megatron.bridge.training.checkpointing import load_checkpoint as _load
-            _load(state=h.state, model=h.model, optimizer=h.optimizer,
-                  opt_param_scheduler=h.scheduler, checkpoint_path=checkpoint_path)
-        except Exception as e:  # pragma: no cover
+            await _get(h.worker.load_checkpoint.remote(checkpoint_path))
+        except Exception as e:
             raise BackendError(f"load_checkpoint failed: {e!r}",
                                backend="megatron_bridge", operation="load_checkpoint")
 
     async def delete_model(self, handle: BackendHandle) -> None:
-        """Release the megatron model + optimizer for this handle."""
+        """Kill the model's GPU actor (frees its megatron state + GPU)."""
         h: MegatronBridgeHandle = handle  # type: ignore[assignment]
-        h.model = None
-        h.optimizer = None
-        h.scheduler = None
-        h.state = None
-        logger.info("megatron_bridge model %s deleted", h.model_id)
-
-
-def _sdk_fb_output(logits_BC, loss: float, accuracy: float) -> Dict[str, Any]:
-    """Shape the SDK ForwardBackwardOutput: per-sample class logits as TensorData
-    (loss_fn_outputs) + loss/accuracy in metrics. The main branch's service passes
-    the backend dict straight through, so the backend emits the wire shape."""
-    outs = []
-    if logits_BC is not None:
-        arr = logits_BC.float().cpu().numpy()
-        for row in arr:
-            outs.append({"logits": {"data": [float(x) for x in row.tolist()],
-                                    "dtype": "float32", "shape": [int(row.shape[0])]}})
-    metrics = {}  # SDK requires "name:reduction" keys (chunked_fwdbwd_helpers)
-    if loss == loss:       # not NaN
-        metrics["loss:mean"] = float(loss)
-    if accuracy == accuracy:
-        metrics["accuracy:mean"] = float(accuracy)
-    return {"loss_fn_output_type": "TorchLossReturn",
-            "loss_fn_outputs": outs, "metrics": metrics}
-
-
-def _reduce(losses, key: str) -> float:
-    """Reduce megatron forward_backward_func reporting dicts: sum(val)/sum(count).
-
-    classifier loss_fn reports {key: [value_sum, count]} per microbatch."""
-    if not losses:
-        return float("nan")
-    num = den = 0.0
-    for d in losses:
-        if isinstance(d, dict) and key in d:
-            v = d[key]
-            num += float(v[0]); den += float(v[1])
-    return num / den if den else float("nan")
+        if h.worker is not None:
+            import ray
+            ray.kill(h.worker)
+            h.worker = None
+        logger.info("megatron_bridge model %s deleted (actor killed)", h.model_id)
 
 
 def _objective(handle: BackendHandle) -> str:
@@ -360,5 +223,4 @@ def _objective(handle: BackendHandle) -> str:
 def _no_generation(operation: str) -> BackendError:
     return BackendError(
         "only valid for the language_modeling objective (no generation plane)",
-        backend="megatron_bridge", operation=operation,
-    )
+        backend="megatron_bridge", operation=operation)
