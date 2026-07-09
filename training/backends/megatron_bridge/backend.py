@@ -20,7 +20,6 @@ See specs/004-bionemo-classification/P5-TINKER-BACKEND.md.
 import asyncio
 import logging
 import os
-import socket
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -36,14 +35,6 @@ _RECIPE_EXAMPLES = os.path.join(_RECIPE_DIR, "examples")
 _TOKENIZER_PATH = os.environ.get(
     "EVO2_TOKENIZER_PATH", os.path.join(_RECIPE_DIR, "tokenizers", "nucleotide_fast_tokenizer_512")
 )
-
-
-def _free_port() -> int:
-    s = socket.socket()
-    s.bind(("", 0))
-    p = s.getsockname()[1]
-    s.close()
-    return p
 
 
 @dataclass
@@ -144,7 +135,7 @@ class MegatronBridgeBackend(TrainingBackend):
                 f"deploy_tinkercloud.sh --profile megatron_bridge (cu13 recipe env).",
                 backend="megatron_bridge", operation="create_model")
 
-        worker = MegatronBridgeWorker.remote(cfg_kwargs, _free_port(), _RECIPE_EXAMPLES)
+        worker = MegatronBridgeWorker.remote(cfg_kwargs, _RECIPE_EXAMPLES)
         await _get(worker.ready.remote())   # blocks (in a thread) until setup() done
 
         handle = MegatronBridgeHandle(

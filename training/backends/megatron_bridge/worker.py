@@ -44,18 +44,33 @@ def _reduce(losses, key: str) -> float:
     return num / den if den else float("nan")
 
 
+def _pick_free_port() -> int:
+    """Bind an ephemeral port and hand it back (torch's _find_free_port idiom).
+
+    Chosen INSIDE the actor, immediately before init_process_group, so the same
+    process that reads the port is the one that binds it — no driver->actor port
+    passing, minimal TOCTOU window, and each actor gets a distinct port."""
+    import socket
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
 @ray.remote(num_gpus=1)
 class MegatronBridgeWorker:
     """One Evo2 classifier + optimizer, per model, in its own GPU actor."""
 
-    def __init__(self, cfg_kwargs: dict, master_port: int, recipe_examples: str):
+    def __init__(self, cfg_kwargs: dict, recipe_examples: str):
         # single-process distributed group (tp=1); Ray assigns the GPU via
-        # CUDA_VISIBLE_DEVICES, we provide the rendezvous env megatron needs.
+        # CUDA_VISIBLE_DEVICES, we provide the 1-rank rendezvous env megatron needs.
         os.environ.setdefault("RANK", "0")
         os.environ.setdefault("WORLD_SIZE", "1")
         os.environ.setdefault("LOCAL_RANK", "0")
         os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-        os.environ["MASTER_PORT"] = str(master_port)
+        os.environ["MASTER_PORT"] = str(_pick_free_port())
 
         import sys
         if recipe_examples not in sys.path:
