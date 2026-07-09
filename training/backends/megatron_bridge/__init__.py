@@ -1,4 +1,4 @@
-"""Megatron-Bridge backend — Evo2 StripedHyena classification (Megatron/NeMo2)."""
+"""Megatron-Bridge backend (Megatron/NeMo2)."""
 from .backend import MegatronBridgeBackend, MegatronBridgeHandle
 from .builder import MegatronBridgeArgumentBuilder
 from .converter import NeMo2ClassificationDataConverter
