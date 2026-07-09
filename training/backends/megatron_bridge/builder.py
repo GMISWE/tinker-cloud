@@ -2,9 +2,6 @@
 Megatron-Bridge argument builder — maps Tinker create_model args to a
 Megatron-Bridge classification config (Evo2 StripedHyena, NeMo2 checkpoints).
 
-Scaffold: config assembly is stubbed. Reuse targets: megatron.bridge.AutoBridge,
-bionemo-evo2 StripedHyena model def, NeMo2 dist-checkpoints, Transformer Engine.
-See specs/004-bionemo-classification/plan.md.
 """
 import logging
 from typing import Any, Dict, Optional
