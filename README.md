@@ -6,15 +6,6 @@ FastAPI server that bridges the Tinker client SDK to pluggable training backends
 Tinker Client --> FastAPI --> BackendFactory --> Miles or NeMo RL --> Ray + Megatron GPUs
 ```
 
-## Backends
-
-| | Miles | NeMo RL |
-|---|---|---|
-| Orchestration | Ray `TrainGroup` + `RolloutManager` | `nemo_rl.Policy` push-mode API |
-| Generation | SGLang (via Miles) | vLLM (via `nemo_rl.models.generation`) |
-| Base image | `gmicloudai/tinkercloud:dev-local` | `nvcr.io/nvidia/nemo-rl:v0.5.0` |
-| Selection | `TINKERCLOUD_BACKEND=miles` (default) | `TINKERCLOUD_BACKEND=nemo_rl` |
-
 ## Quickstart (NeMo RL)
 
 ### 1. Deploy
