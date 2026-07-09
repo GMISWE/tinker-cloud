@@ -1,28 +1,51 @@
 """
-Megatron-Bridge classification converter.
+Megatron-Bridge classification converter — Tinker Datum -> the bionemo-recipes
+evo2_classifier batch: {input_ids [B,S] long, pool_mask [B,S] float, labels [B]}.
 
-Reuses the shared ClassificationDataConverter contract (input_ids,
-attention_mask, labels) from the automodel package (Constitution P1/P4).
-Megatron/NeMo2 may need a distinct batch layout (packed THD, position ids,
-NeMo2 microbatch dicts) — NeMo2ClassificationDataConverter is the stub seam
-for that variant.
-See specs/004-bionemo-classification/plan.md.
+This is what ``classifier_forward_step`` (recipes/evo2_megatron/examples/
+evo2_classifier.py) consumes: ``model(input_ids=..., pool_mask=...)`` then CE on
+``labels``. Pooling is masked-mean over pool_mask, so pad positions must be 0.
+No target_tokens shift (classification reads labels from loss_fn_inputs["labels"]).
+See specs/004-bionemo-classification/P5-TINKER-BACKEND.md.
 """
 from typing import Any, List
 
-from ..automodel.converter import ClassificationDataConverter
+import torch
+
+from ..automodel.converter import (
+    ClassificationDataConverter,
+    _extract_labels,
+    _extract_tokens,
+)
+
+PAD_TOKEN_ID = 1  # recipe default (Evo2ClassifierDataset)
 
 
 class NeMo2ClassificationDataConverter(ClassificationDataConverter):
-    """NeMo2-batch variant of the shared classification converter (scaffold).
+    """Emits the evo2_classifier batch layout (input_ids / pool_mask / labels)."""
 
-    Inherits the {input_ids, attention_mask, labels} contract; override to emit
-    NeMo2/Megatron microbatch dicts when the Evo2/StripedHyena path lands.
-    """
+    def _to_recipe_batch(self, data: List, args: Any) -> dict:
+        tokens_B = [_extract_tokens(d) for d in data]
+        labels_B = [_extract_labels(d) for d in data]
+        bsz = len(tokens_B)
+        # pad to the model's fixed seq_length if given, else per-batch max
+        seq_length = int((args or {}).get("seq_length", 0)) or max(len(t) for t in tokens_B)
 
-    def forward_backward_to_backend(
-        self, data: List, loss_fn: str, args: Any,
-    ) -> Any:
-        # TODO(004-P5): emit NeMo2 microbatch layout (packed THD / position_ids)
-        # for Megatron-Bridge + StripedHyena. Falls back to the HF-style batch.
-        return super().forward_backward_to_backend(data, loss_fn, args)
+        input_ids = torch.full((bsz, seq_length), PAD_TOKEN_ID, dtype=torch.long)
+        pool_mask = torch.zeros((bsz, seq_length), dtype=torch.float32)
+        for i, tokens in enumerate(tokens_B):
+            n = min(len(tokens), seq_length)
+            input_ids[i, :n] = tokens[:n] if torch.is_tensor(tokens) else torch.tensor(tokens[:n])
+            pool_mask[i, :n] = 1.0
+
+        labels = torch.zeros(bsz, dtype=torch.long)
+        for i, lbl in enumerate(labels_B):
+            if lbl.numel() > 0:
+                labels[i] = lbl.reshape(-1)[0]
+        return {"input_ids": input_ids, "pool_mask": pool_mask, "labels": labels}
+
+    def forward_backward_to_backend(self, data: List, loss_fn: str, args: Any) -> Any:
+        return self._to_recipe_batch(data, args)
+
+    def forward_to_backend(self, data: List, args: Any) -> Any:
+        return self._to_recipe_batch(data, args)

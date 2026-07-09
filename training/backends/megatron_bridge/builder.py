@@ -31,10 +31,16 @@ class MegatronBridgeArgumentBuilder(ArgumentBuilder):
         checkpoint_config: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> Any:
-        """Return Megatron-Bridge config for a classification model (no gen engine)."""
-        # TODO(004-P5): assemble Megatron-Bridge config (TP/PP/CP, TE, NeMo2
-        # checkpoint, Megatron LoRA adapters, num_labels head).
-        raise NotImplementedError(
-            "MegatronBridgeArgumentBuilder.build_args is a scaffold stub. "
-            "Implement per specs/004-bionemo-classification/plan.md (P5)."
-        )
+        """Resolve LoRA/head knobs to a dict.
+
+        Unused by the backend today: MegatronBridgeBackend.create_model builds the
+        recipe's ConfigContainer directly via evo2_1b_classifier_config(). Kept as
+        the ArgumentBuilder seam; returns a flat config dict for callers that want
+        one (mirrors AutomodelArgumentBuilder)."""
+        cfg = dict(self.overrides)
+        cfg.update({"base_model": base_model, "num_gpus": num_gpus})
+        if lora_config:
+            cfg["lora"] = lora_config
+        if checkpoint_config:
+            cfg["checkpoint"] = checkpoint_config
+        return cfg
