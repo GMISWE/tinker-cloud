@@ -5,7 +5,7 @@ pluggable training backends (Miles, NeMo RL, Automodel, Megatron-Bridge) — the
 Tinker API drives any backend, no client changes required.
 
 ```
-Tinker Client --> FastAPI --> BackendFactory --> Miles | NeMo RL | Automodel | Megatron-Bridge --> GPUs
+Tinker Client --> TinkerCloud --> Miles | NeMo RL | Automodel | Megatron-Bridge --> GPUs
 ```
 
 ## Quickstart (NeMo RL)
