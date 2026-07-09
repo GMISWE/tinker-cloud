@@ -51,8 +51,9 @@ class MegatronBridgeHandle(BackendHandle):
     optimizer: Any = None             # MegatronOptimizer
     scheduler: Any = None             # OptimizerParamScheduler
     state: Any = None                 # megatron.bridge GlobalState
-    forward_step: Any = None          # partial(classifier_forward_step, state)
+    forward_step: Any = None          # capturing wrapper around classifier_forward_step
     fbfunc: Any = None                # get_forward_backward_func()
+    logits_capture: Dict = field(default_factory=dict)  # per-fb stash of class logits
     seq_length: int = 1024
     needs_zero: bool = True           # zero grads on the next forward_backward
     config: Dict = field(default_factory=dict)
@@ -180,7 +181,17 @@ class MegatronBridgeBackend(TrainingBackend):
         handle.optimizer = so.optimizer
         handle.scheduler = so.scheduler
         handle.fbfunc = get_forward_backward_func()
-        handle.forward_step = functools.partial(classifier_forward_step, state)
+
+        # wrap the recipe forward_step to stash per-sample class logits (for the
+        # SDK ForwardBackwardOutput.loss_fn_outputs the client reads at eval)
+        _cap = handle.logits_capture
+
+        def _capturing_step(*a, **kw):
+            logits, loss_fn = classifier_forward_step(state, *a, **kw)
+            _cap["logits"] = logits.detach()
+            return logits, loss_fn
+
+        handle.forward_step = _capturing_step
         handle.seq_length = cfg.model.seq_length
         handle.needs_zero = True
         logger.info(
@@ -192,7 +203,7 @@ class MegatronBridgeBackend(TrainingBackend):
     async def forward(
         self, handle: BackendHandle, data: List[Dict], loss_fn: str,
     ) -> Dict[str, Any]:
-        """Forward-only pass -> per-sample class logits (no grad)."""
+        """Forward-only pass -> SDK ForwardBackwardOutput with per-sample logits."""
         h: MegatronBridgeHandle = handle  # type: ignore[assignment]
         batch = self.converter.forward_to_backend(data, {"seq_length": h.seq_length})
         losses = h.fbfunc(
@@ -200,7 +211,8 @@ class MegatronBridgeBackend(TrainingBackend):
             model=h.model, num_microbatches=1, seq_length=h.seq_length,
             micro_batch_size=batch["input_ids"].shape[0], forward_only=True,
         )
-        return {"loss": _reduce(losses, "ce loss"), "accuracy": _reduce(losses, "accuracy")}
+        return _sdk_fb_output(h.logits_capture.get("logits"),
+                              _reduce(losses, "ce loss"), _reduce(losses, "accuracy"))
 
     async def forward_backward(
         self, handle: BackendHandle, data: List[Dict], loss_fn: str,
@@ -226,7 +238,8 @@ class MegatronBridgeBackend(TrainingBackend):
         )
         loss = _reduce(losses, "ce loss")
         logger.debug("megatron_bridge fb: %d samples loss=%.4f", len(data), loss)
-        return {"loss": loss, "accuracy": _reduce(losses, "accuracy")}
+        return _sdk_fb_output(h.logits_capture.get("logits"), loss,
+                              _reduce(losses, "accuracy"))
 
     async def apply_optimizer_step(
         self, handle: BackendHandle, learning_rate: Optional[float] = None,
@@ -241,10 +254,12 @@ class MegatronBridgeBackend(TrainingBackend):
         h.scheduler.step(increment=1)
         h.needs_zero = True
         lr = h.optimizer.param_groups[0]["lr"] if getattr(h.optimizer, "param_groups", None) else None
-        return {
-            "grad_norm": float(grad_norm) if grad_norm is not None else None,
-            "learning_rate": float(lr) if lr is not None else learning_rate,
-        }
+        metrics = {}
+        if grad_norm is not None:
+            metrics["grad_norm:mean"] = float(grad_norm)
+        if lr is not None or learning_rate is not None:
+            metrics["learning_rate:mean"] = float(lr if lr is not None else learning_rate)
+        return {"metrics": metrics}   # SDK OptimStepResponse shape
 
     # --- generation plane: N/A for classification (plan.md Non-Goals) ---
 
@@ -303,6 +318,25 @@ class MegatronBridgeBackend(TrainingBackend):
         h.scheduler = None
         h.state = None
         logger.info("megatron_bridge model %s deleted", h.model_id)
+
+
+def _sdk_fb_output(logits_BC, loss: float, accuracy: float) -> Dict[str, Any]:
+    """Shape the SDK ForwardBackwardOutput: per-sample class logits as TensorData
+    (loss_fn_outputs) + loss/accuracy in metrics. The main branch's service passes
+    the backend dict straight through, so the backend emits the wire shape."""
+    outs = []
+    if logits_BC is not None:
+        arr = logits_BC.float().cpu().numpy()
+        for row in arr:
+            outs.append({"logits": {"data": [float(x) for x in row.tolist()],
+                                    "dtype": "float32", "shape": [int(row.shape[0])]}})
+    metrics = {}  # SDK requires "name:reduction" keys (chunked_fwdbwd_helpers)
+    if loss == loss:       # not NaN
+        metrics["loss:mean"] = float(loss)
+    if accuracy == accuracy:
+        metrics["accuracy:mean"] = float(accuracy)
+    return {"loss_fn_output_type": "TorchLossReturn",
+            "loss_fn_outputs": outs, "metrics": metrics}
 
 
 def _reduce(losses, key: str) -> float:
