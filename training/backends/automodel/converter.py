@@ -8,9 +8,6 @@ classification consumes labels directly from loss_fn_inputs["labels"].
   seq-cls:   labels [B]      (one class id per sample)
   token-cls: labels [B, S]   (per-token class id, -100 ignore on pads)
 
-Shared contract for both classification backends (Constitution P1/P4). The
-megatron_bridge backend subclasses this for a NeMo2-batch variant.
-See specs/004-bionemo-classification/plan.md.
 """
 import logging
 from typing import Any, Dict, List
