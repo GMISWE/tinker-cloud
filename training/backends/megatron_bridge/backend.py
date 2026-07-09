@@ -1,21 +1,6 @@
 """
-Megatron-Bridge backend — Evo2 (Striped Hyena) sequence classification.
-
-Hosts the faithful BioNeMo CS2 recipe (bionemo-recipes/recipes/evo2_megatron/
-examples/evo2_classifier.py) behind the tinker TrainingBackend API.
-
-**Ray-actor architecture** (like nemo_rl / miles; NOT run under torchrun): the
-megatron model + distributed context live in a per-model GPU actor
-(``MegatronBridgeWorker``), so the tinker-cloud server stays a plain process.
-create_model spawns the actor; forward/forward_backward/apply_optimizer_step
-delegate to it. Each model gets its own actor -> megatron's global state
-(parallel_state / microbatch calculator) is isolated per model (multi-model OK,
-clean teardown). The actor decomposes megatron-bridge's ``pretrain()`` into
-setup() + get_forward_backward_func() + optimizer.step().
-
-Runs in the cu13 recipe venv (deploy_tinkercloud.sh --profile megatron_bridge);
-ray + megatron.bridge + evo2_classifier imports are lazy. Generation plane raises.
-See specs/004-bionemo-classification/P5-TINKER-BACKEND.md.
+Megatron-Bridge backend
+ray + megatron.bridge
 """
 import asyncio
 import logging
