@@ -1,10 +1,5 @@
 """
-Automodel backend — HF-encoder classification (ESM2, Nucleotide Transformer).
-
-Hosts supervised sequence- / token-classification via HuggingFace
-`AutoModelFor{Sequence,Token}Classification` + PEFT LoRA. This is the
-P0-proven path (transformers + peft): ESM2 `EsmFor*Classification` load, LoRA
-over `[query,key,value,dense]`, CE over `loss_fn_inputs["labels"]`.
+Automodel backend 
 
 Training model (unlike NeMo RL's R9 buffering): forward_backward runs the real
 forward + `loss.backward()` immediately and returns the real loss;
@@ -12,7 +7,6 @@ apply_optimizer_step runs `optimizer.step()` over the accumulated grads. There
 is NO generation plane — sample / get_logprobs are only valid for the
 language_modeling objective.
 
-See specs/004-bionemo-classification/plan.md.
 """
 import asyncio
 import logging
