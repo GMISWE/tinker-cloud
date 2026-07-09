@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/tinkercloud.svg" alt="tinkercloud" width="640"></p>
+<p align="center"><img src="docs/tinkercloud-mark.svg" alt="tinkercloud" width="640"></p>
 
 FastAPI server that provides an abstraction layer between the Tinker client SDK and
 pluggable training backends (Miles, NeMo RL, Automodel, Megatron-Bridge) — the same
