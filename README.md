@@ -98,36 +98,4 @@ Full status for all 23 recipe entries, bugs, and gaps: `specs/002-nemorl-recipe-
 | `ALLOW_PARTIAL_BATCHES` | Pad batches smaller than DP size | `false` |
 | `HF_HOME` | HuggingFace model cache | `/data/models` |
 
-## API
 
-The API is backend-agnostic. All endpoints work with both Miles and NeMo RL.
-
-| Endpoint | Description |
-|----------|-------------|
-| `POST /api/v1/create_model` | Initialize model on GPUs |
-| `POST /api/v1/forward_backward` | Forward/backward pass |
-| `POST /api/v1/forward` | Forward-only (logprobs) |
-| `POST /api/v1/optim_step` | Apply optimizer step |
-| `POST /api/v1/sample` | Generate with latest weights |
-| `POST /api/v1/save_weights_for_sampler` | Save weights + get sampling endpoint |
-| `POST /api/v1/retrieve_future` | Poll async tasks |
-| `GET /api/v1/health` | Readiness probe |
-
-## Project Layout
-
-```
-training/
-├── api.py              # FastAPI app factory + startup
-├── config.py           # Pydantic config from env vars
-├── server.py           # uvicorn runner
-├── backends/           # Backend abstraction
-│   ├── base.py         # TrainingBackend ABC
-│   ├── factory.py      # BackendFactory
-│   ├── miles/          # Miles/Slime implementation
-│   └── nemo_rl/        # NeMo RL implementation
-├── routers/            # HTTP handlers
-├── services/           # Business logic
-├── models/             # Request/response schemas
-├── storage/            # SQLite persistence
-└── utils/              # Auth, model config helpers
-```
