@@ -135,8 +135,10 @@ class MegatronBridgeBackend(TrainingBackend):
             sys.path.insert(0, _RECIPE_EXAMPLES)
         try:
             import functools
+            from pathlib import Path
             from megatron.bridge.training.state import GlobalState
             from megatron.bridge.training.setup import setup
+            from megatron.bridge.training.config import runtime_config_update
             from megatron.bridge.data.utils import get_dataset_provider
             from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
             from evo2_classifier import evo2_1b_classifier_config, classifier_forward_step
@@ -147,12 +149,15 @@ class MegatronBridgeBackend(TrainingBackend):
                 backend="megatron_bridge", operation="create_model",
             )
 
+        def _p(v):
+            return Path(v) if v is not None else None
+
         cfg = evo2_1b_classifier_config(
-            base_ckpt_dir=hc.get("base_ckpt_dir", base_model),
-            train_jsonl=hc.get("train_jsonl"), val_jsonl=hc.get("val_jsonl"),
-            test_jsonl=hc.get("test_jsonl"),
+            base_ckpt_dir=_p(hc.get("base_ckpt_dir", base_model)),
+            train_jsonl=_p(hc.get("train_jsonl")), val_jsonl=_p(hc.get("val_jsonl")),
+            test_jsonl=_p(hc.get("test_jsonl")),
             num_classes=num_labels,
-            result_dir=checkpoint_path or hc.get("result_dir", f"/data/{model_id}"),
+            result_dir=_p(checkpoint_path or hc.get("result_dir", f"/data/{model_id}")),
             experiment_name=model_id, model_size=hc.get("model_size", "evo2_1b_base"),
             tensor_model_parallel_size=(parallelism or {}).get("tp", 1),
             seq_length_tokens=seq_length, backbone_seq_length=seq_length,
@@ -164,8 +169,9 @@ class MegatronBridgeBackend(TrainingBackend):
             pool=hc.get("pool", "mean"), classifier_dropout=hc.get("classifier_dropout", 0.1),
             use_lora=True, lora_dim=lc.get("rank", 16), lora_alpha=lc.get("alpha", 32),
             lora_dropout=lc.get("dropout", 0.1),
-            tokenizer_path=hc.get("tokenizer_path", _TOKENIZER_PATH),
+            tokenizer_path=_p(hc.get("tokenizer_path", _TOKENIZER_PATH)),
         )
+        runtime_config_update(cfg)  # derives data_parallel_size etc. (pretrain() does this)
         state = GlobalState()
         state.cfg = cfg
         so = setup(state, get_dataset_provider(cfg.dataset))
