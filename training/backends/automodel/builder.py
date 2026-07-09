@@ -2,9 +2,6 @@
 Automodel argument builder — maps Tinker create_model args + HF config to a
 NeMo-Automodel classification config (num_labels, LoRA/PEFT, head_config).
 
-Scaffold: config assembly is stubbed. Reuse target:
-  nemo_automodel/recipes/llm/train_seq_cls.py (seq-cls + LoRA recipe).
-See specs/004-bionemo-classification/plan.md.
 """
 import logging
 from typing import Any, Dict, Optional
