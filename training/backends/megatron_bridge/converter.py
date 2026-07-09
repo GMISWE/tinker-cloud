@@ -1,12 +1,6 @@
 """
-Megatron-Bridge classification converter — Tinker Datum -> the bionemo-recipes
-evo2_classifier batch: {input_ids [B,S] long, pool_mask [B,S] float, labels [B]}.
+Megatron-Bridge classification converter — Tinker Datum -> the xxx-recipes
 
-This is what ``classifier_forward_step`` (recipes/evo2_megatron/examples/
-evo2_classifier.py) consumes: ``model(input_ids=..., pool_mask=...)`` then CE on
-``labels``. Pooling is masked-mean over pool_mask, so pad positions must be 0.
-No target_tokens shift (classification reads labels from loss_fn_inputs["labels"]).
-See specs/004-bionemo-classification/P5-TINKER-BACKEND.md.
 """
 from typing import Any, List
 
