@@ -25,9 +25,6 @@ from ..objectives import Objective, is_classification
 
 logger = logging.getLogger(__name__)
 
-_PLAN = "specs/004-bionemo-classification/plan.md"
-
-# P0-proven LoRA targets for ESM/BERT-style encoders (plan.md P0 findings).
 _DEFAULT_LORA_TARGETS = ["query", "key", "value", "dense"]
 _DEFAULT_LR = 1e-4
 
@@ -171,7 +168,7 @@ class AutomodelBackend(TrainingBackend):
         model = _apply_lora(model, objective, lora_config, hc)
         if hc.get("freeze_base"):
             # Linear-probe / head-only baseline: train only the classification
-            # head, freeze the encoder. (plan.md CS2 head-only ablation.)
+            # head, freeze the encoder.
             for name, p in model.named_parameters():
                 p.requires_grad = "classifier" in name or "score" in name
         model.to(device)
@@ -281,7 +278,7 @@ class AutomodelBackend(TrainingBackend):
             "metrics": {"grad_norm": grad_norm},
         }
 
-    # --- generation plane: N/A for classification (plan.md Non-Goals) ---
+    # --- generation plane: N/A for classification ---
 
     async def update_inference_weights(self, handle: BackendHandle) -> None:
         raise _no_generation("update_inference_weights")

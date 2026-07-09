@@ -115,7 +115,6 @@ class NemoRLBackend(TrainingBackend):
         try:
             logger.info("[%s] Creating NeMo RL model %s", request_id, model_id)
 
-            # Build NeMo RL config
             config_dict, hf_path = await asyncio.to_thread(
                 self.builder.build_args,
                 base_model=base_model,
@@ -133,7 +132,6 @@ class NemoRLBackend(TrainingBackend):
             )
             logger.info("[%s] NeMo RL config built, hf_path=%s", request_id, hf_path)
 
-            # Initialize NeMo RL components (blocking — run in thread pool)
             policy, policy_generation, cluster, tokenizer, loss_fn = await asyncio.to_thread(
                 _init_nemo_rl_components,
                 config_dict=config_dict,
@@ -199,7 +197,6 @@ class NemoRLBackend(TrainingBackend):
         """
         h: NemoRLHandle = handle  # type: ignore[assignment]
         try:
-            # Convert data to NeMo RL format
             batched_data = self.converter.forward_to_backend(data, h.config)
 
             # Pad for dp_size alignment (get_logprobs uses shard_by_batch_size)
@@ -213,26 +210,16 @@ class NemoRLBackend(TrainingBackend):
             if h.policy_generation is not None and h.colocated_inference:
                 await asyncio.to_thread(h.policy_generation.finish_generation)
 
-            # Move model CPU→CUDA for logprob computation.
-            # NOTE: NeMo RL's native algorithms use prepare_for_lp_inference()
-            # (eval mode + optimizer offload) before get_logprobs(). We use
-            # prepare_for_training() instead because in pipelined SFT, forward()
-            # may be called concurrently with apply_optimizer_step — calling
-            # prepare_for_lp_inference() would offload the optimizer while
-            # policy.train() is using it, causing a deadlock. The difference
-            # is minimal: model.train() vs model.eval() produces identical
-            # logprobs for LLMs without dropout.
+            # Use prepare_for_training(), not prepare_for_lp_inference(): the latter
+            # offloads the optimizer, deadlocking a concurrent apply_optimizer_step
+            # in pipelined SFT. train vs eval mode gives identical logprobs (no dropout).
             await asyncio.to_thread(h.policy.prepare_for_training)
 
-            # Compute logprobs via policy.get_logprobs()
             result = await asyncio.to_thread(h.policy.get_logprobs, batched_data)
 
-            # Skip refit after forward(): this is a read-only eval pass (no weight
-            # updates), so inference weights are already in sync. Refitting here
-            # crashes because DTensor sharding metadata becomes stale after the
-            # CPU→CUDA transition in prepare_for_training (NCCL error in
-            # tensor.full_tensor() → redistribute). Refit only happens after
-            # apply_optimizer_step() which actually modifies weights.
+            # No refit after forward(): read-only pass, inference weights already in
+            # sync. Refitting here crashes (stale DTensor sharding after CPU→CUDA →
+            # NCCL error in full_tensor()); refit only follows apply_optimizer_step().
 
             return self.converter.backend_to_forward_result(
                 result, data, loss_fn=loss_fn,
@@ -314,7 +301,6 @@ class NemoRLBackend(TrainingBackend):
                             operation="forward_backward",
                         )
 
-                # Buffer the data — training deferred to apply_optimizer_step()
                 h.data_buffer.append(batched_data)
                 buffer_len = len(h.data_buffer)
                 # Store loss_fn name for apply_optimizer_step() response
@@ -325,20 +311,15 @@ class NemoRLBackend(TrainingBackend):
                 buffer_len, h.model_id, len(data),
             )
 
-            # Return deferred result — no training metrics available yet.
-            # CHK010: Deferred contract: empty metrics, deferred=True.
-            # Real metrics available at optim_step.
-            # Populate loss_fn_outputs with zero-logprobs per datum so the
-            # SFT train loop's finish_batch can zip(logprobs, weights) without
-            # crashing. The actual NLL is computed by the NLL evaluator via
-            # the forward() path; these zeros are placeholders only.
+            # CHK010: deferred contract — empty metrics, real metrics at optim_step.
+            # Zero-logprob placeholders let SFT finish_batch zip(logprobs, weights);
+            # actual NLL comes from the forward() path.
             placeholder_outputs = []
             for datum in data:
                 # Handle both Pydantic ForwardBackwardDatum and plain dict
                 lfi = getattr(datum, "loss_fn_inputs", None) or (
                     datum.get("loss_fn_inputs") if isinstance(datum, dict) else None
                 ) or {}
-                # Navigate weights → data to find length
                 weights = getattr(lfi, "weights", None) or (
                     lfi.get("weights") if isinstance(lfi, dict) else None
                 )
@@ -450,7 +431,6 @@ class NemoRLBackend(TrainingBackend):
                 num_buffered, h.model_id,
             )
 
-            # Set learning rate if provided
             if learning_rate is not None:
                 _set_learning_rate(h.policy, learning_rate)
 
@@ -498,17 +478,14 @@ class NemoRLBackend(TrainingBackend):
                             all_data["prev_logprobs"] = logprob_result["logprobs"]
                             logger.info("prev_logprobs replaced with DTensor-computed values")
 
-                    # Select loss function based on loss_fn_name from forward_backward()
                     if h.loss_fn_name == "cross_entropy":
                         from nemo_rl.algorithms.loss_functions import NLLLoss
                         active_loss_fn = NLLLoss()
                     else:
                         active_loss_fn = h.loss_fn  # ClippedPGLossFn (RL)
 
-                    # Execute training — policy.train() does forward + backward + optimizer.step()
-                    # Pass gbs=actual batch size so NeMo RL shards correctly.
-                    # Without this, it defaults to train_global_batch_size from config
-                    # which may not match the recipe's batch size.
+                    # Pass gbs=actual size so NeMo RL shards correctly instead of
+                    # defaulting to config train_global_batch_size.
                     train_result = await asyncio.to_thread(
                         h.policy.train,
                         data=all_data,
@@ -524,7 +501,6 @@ class NemoRLBackend(TrainingBackend):
                         {k: v for k, v in train_result.get("all_mb_metrics", {}).items()},
                     )
 
-                    # Sync weights to inference engine
                     if h.policy_generation is not None and not h.debug_train_only:
                         logger.info("Refitting policy generation for %s", h.model_id)
                         await asyncio.to_thread(
@@ -550,7 +526,6 @@ class NemoRLBackend(TrainingBackend):
                             )
                             h.generation_state = "generation_ready"
 
-            # Normalize metrics to common schema
             result = self.converter.backend_to_forward_backward_result(
                 train_result, [], loss_fn=h.loss_fn_name,
             )
@@ -562,7 +537,6 @@ class NemoRLBackend(TrainingBackend):
                 train_result.get("curr_logprobs"), all_data, original_size,
             )
 
-            # Override with optimizer step format
             return {
                 "success": True,
                 "grad_norm": result.get("grad_norm", 0.0),
@@ -607,9 +581,6 @@ class NemoRLBackend(TrainingBackend):
         """Save model checkpoint via policy.save_checkpoint()."""
         h: NemoRLHandle = handle  # type: ignore[assignment]
         try:
-            # Translate tinker:// URI to local filesystem path.
-            # The checkpoint_service generates tinker://<run_id>/weights/<name>
-            # but NeMo RL expects a real filesystem path.
             local_path = _resolve_checkpoint_path(checkpoint_path)
 
             weights_path = f"{local_path}/weights"
@@ -656,7 +627,6 @@ class NemoRLBackend(TrainingBackend):
                 optimizer_path=optimizer_path,
             )
 
-            # Sync loaded weights to inference engine
             if h.policy_generation is not None and not h.debug_train_only:
                 logger.info("Refitting policy generation after checkpoint load for %s", h.model_id)
                 await asyncio.to_thread(
@@ -768,11 +738,6 @@ class NemoRLBackend(TrainingBackend):
         await _ensure_generation_ready(h)
 
 
-# ---------------------------------------------------------------------------
-# Async helpers (called directly from async code)
-# ---------------------------------------------------------------------------
-
-
 async def _ensure_generation_ready(handle) -> None:
     """Ensure the handle is ready for generation.
 
@@ -836,7 +801,6 @@ def _resolve_checkpoint_path(path: str) -> str:
     Plain filesystem paths are returned as-is.
     """
     if path.startswith("tinker://"):
-        # tinker://model_xxx/weights/checkpoint_name → /data/checkpoints/model_xxx/checkpoint_name
         parts = path[len("tinker://"):].split("/")
         # parts: [model_id, "weights", checkpoint_name]
         run_id = parts[0]
@@ -870,11 +834,9 @@ def _init_nemo_rl_components(
     loss_fn_config = config_dict["loss_fn"]
     cluster_config = config_dict["cluster"]
 
-    # Ensure Ray is initialized
     if not ray.is_initialized():
         ray.init(ignore_reinit_error=True)
 
-    # Create virtual cluster
     cluster = RayVirtualCluster(
         bundle_ct_per_node_list=cluster_config["bundle_ct_per_node_list"],
         num_gpus_per_node=cluster_config.get("num_gpus_per_node", 8),
@@ -886,10 +848,8 @@ def _init_nemo_rl_components(
     tokenizer_config = {"name": model_name}
     tokenizer = get_tokenizer(tokenizer_config)
 
-    # Create loss function
     loss_fn = ClippedPGLossFn(loss_fn_config)
 
-    # Initialize generation engine (vLLM) if not debug_train_only
     policy_generation = None
     if not debug_train_only:
         generation_config = policy_config.get("generation")
@@ -897,18 +857,12 @@ def _init_nemo_rl_components(
             from nemo_rl.models.generation import configure_generation_config
             from nemo_rl.models.generation.vllm import VllmGeneration
 
-            # Set model_name on generation config
             generation_config["model_name"] = model_name
 
-            # Set stop_strings BEFORE configure_generation_config() so it sees
-            # them and sets skip_tokenizer_init=False (vLLM needs the tokenizer
-            # to match text-based stop strings).
-            # Use stop_strings (not stop_token_ids) because NeMo RL vLLM sets
-            # include_stop_str_in_output=True for strings, so the stop token
-            # appears in the output. Renderers (e.g. Qwen3, Llama3) expect the
-            # stop token in the response for parse_response() to succeed.
-            # stop_token_ids would also stop generation but vLLM strips those
-            # from output, causing parse_success=False and format=0.
+            # Set stop_strings BEFORE configure_generation_config() so it sets
+            # skip_tokenizer_init=False (vLLM needs the tokenizer for text matching).
+            # Use stop_strings, not stop_token_ids: vLLM keeps stop strings in the
+            # output (renderers need them for parse_response) but strips stop ids.
             stop_strs = set()
             for token_str in ["<|im_end|>", "<|eot_id|>", "<|end▁of▁sentence|>"]:
                 try:
@@ -921,9 +875,8 @@ def _init_nemo_rl_components(
                 generation_config["stop_strings"] = list(stop_strs)
                 logger.info("Set stop_strings from tokenizer: %s", list(stop_strs))
 
-            # configure_generation_config sets skip_tokenizer_init based on
-            # whether stop_strings is set: False if set (needed for text matching),
-            # True if not. Do NOT override skip_tokenizer_init manually.
+            # configure_generation_config derives skip_tokenizer_init from
+            # stop_strings — do NOT override it manually.
             generation_config = configure_generation_config(generation_config, tokenizer)
 
             logger.info("Initializing VllmGeneration (colocated mode)...")

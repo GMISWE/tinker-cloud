@@ -3,7 +3,7 @@ NeMo RL generation batching.
 
 Accumulates per-sample generation requests and flushes them as a single
 batched Policy.generate() call (PERF-002). Lifted from SamplingService
-so all NeMo RL specifics live behind the backend abstraction (001 review P2).
+so all NeMo RL specifics live behind the backend abstraction.
 """
 import asyncio
 import logging
@@ -78,8 +78,6 @@ class NemoRLBatchAccumulator:
         except asyncio.TimeoutError:
             pass
 
-        # Keep flushing until the queue is empty — new requests may arrive
-        # while generate() is running (which takes seconds to minutes).
         while True:
             had_work = await self._flush(handle, request_id)
             if not had_work:
@@ -192,7 +190,6 @@ async def _batched_nemo_rl_generate(
         for i in range(actual_size)
     ] + [top_p] * (padded_size - actual_size)
 
-    # Stop strings
     raw_stop = first_params.get("stop")
     stop_strings: List[str] = []
     if raw_stop is not None:
@@ -203,7 +200,6 @@ async def _batched_nemo_rl_generate(
     if stop_strings:
         data["stop_strings"] = [stop_strings] * padded_size
 
-    # Prompt logprobs
     any_prompt_logprobs = any(req.prompt_logprobs for req in batch)
     if any_prompt_logprobs:
         data["_tinker_prompt_logprobs"] = [True] * padded_size
@@ -213,11 +209,9 @@ async def _batched_nemo_rl_generate(
         request_id, len(batch), actual_size, padded_size,
     )
 
-    # Generate — single call for entire batch
     await _ensure_generation_ready(handle)
     result = await asyncio.to_thread(handle.policy_generation.generate, data, greedy)
 
-    # Split results back to per-request responses
     output_ids = result["output_ids"]
     gen_lengths = result["generation_lengths"]
     logprobs_tensor = result["logprobs"]

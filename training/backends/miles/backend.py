@@ -1,10 +1,5 @@
-"""
-Miles backend implementation.
-
-Wraps existing RayTrainGroup/RolloutManager/SlimeArgumentBuilder code
-behind the TrainingBackend interface. This is a refactoring — no
-behavior change from the existing Miles-based TinkerCloud.
-"""
+"""Miles backend — wraps RayTrainGroup/RolloutManager/SlimeArgumentBuilder
+behind the TrainingBackend interface (refactor only, no behavior change)."""
 import asyncio
 import logging
 from dataclasses import dataclass, field
@@ -36,12 +31,7 @@ class MilesHandle(BackendHandle):
 
 
 class MilesBackend(TrainingBackend):
-    """
-    Miles backend — wraps existing RayTrainGroup + RolloutManager.
-
-    This is a thin adapter over the existing Miles integration code
-    from model_service.py and training_service.py.
-    """
+    """Thin adapter over existing Miles integration code (model_service.py / training_service.py)."""
 
     def __init__(self, overrides: Optional[Dict[str, Any]] = None):
         self.overrides = overrides or {}
@@ -107,10 +97,8 @@ class MilesBackend(TrainingBackend):
             )
             logger.info("[%s] Miles args built, hf_path=%s", request_id, hf_path)
 
-            # Import Miles actors
             from miles.ray.actor_group import RayTrainGroup
 
-            # Create placement group
             num_nodes = 1
             num_gpus_per_node = num_gpus
             bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_nodes * num_gpus_per_node)]
@@ -123,7 +111,6 @@ class MilesBackend(TrainingBackend):
 
             reordered_indices = list(range(len(bundles)))
 
-            # Create RayTrainGroup
             train_group = RayTrainGroup(
                 args=args,
                 num_nodes=num_nodes,
@@ -133,7 +120,6 @@ class MilesBackend(TrainingBackend):
                 role="actor",
             )
 
-            # Initialize actors
             init_refs = train_group.async_init(args, role="actor", with_ref=False)
             try:
                 await asyncio.wait_for(
@@ -186,7 +172,6 @@ class MilesBackend(TrainingBackend):
                         rollout_manager.onload.remote(tags=[GPU_MEMORY_TYPE_KV_CACHE])
                     ))
 
-                # Get router address
                 try:
                     router_address_ref = rollout_manager.get_router_address.remote()
                     router_ip, router_port = await asyncio.wrap_future(router_address_ref.future())
@@ -229,7 +214,6 @@ class MilesBackend(TrainingBackend):
         try:
             from miles.utils.ray_utils import Box
 
-            # Offload SGLang if needed
             if h.rollout_manager is not None and h.args.offload_rollout:
                 await asyncio.to_thread(lambda: ray.get(h.rollout_manager.offload.remote()))
 
@@ -258,11 +242,9 @@ class MilesBackend(TrainingBackend):
         try:
             from miles.utils.ray_utils import Box
 
-            # Offload SGLang if needed
             if h.rollout_manager is not None and h.args.offload_rollout:
                 await asyncio.to_thread(lambda: ray.get(h.rollout_manager.offload.remote()))
 
-            # Determine training mode (RL vs SFT)
             is_rl = not h.args.debug_train_only
 
             # Check if data needs fake generation (legacy test compat)
@@ -280,7 +262,6 @@ class MilesBackend(TrainingBackend):
                 )
                 rollout_data = self._generate_fake_rollout_data(h.args)
             else:
-                # Validate data against Megatron args
                 from ...core.validators import RequestValidator
                 from ...config import get_config
 
@@ -296,7 +277,6 @@ class MilesBackend(TrainingBackend):
                         f"{validator.get_config_summary()}"
                     )
 
-                # Convert data
                 rollout_data = self.converter.forward_backward_to_backend(
                     data, loss_fn, h.args,
                 )
@@ -381,7 +361,6 @@ class MilesBackend(TrainingBackend):
     ) -> Dict[str, Any]:
         h: MilesHandle = handle  # type: ignore[assignment]
         try:
-            # Set learning rate if provided
             if learning_rate is not None:
                 await asyncio.to_thread(h.train_group.set_learning_rate, learning_rate)
 
@@ -477,7 +456,6 @@ class MilesBackend(TrainingBackend):
     ) -> None:
         h: MilesHandle = handle  # type: ignore[assignment]
         try:
-            # Load weights on all actors via Megatron's load_checkpoint
             object_refs = [
                 actor.load_checkpoint.remote(checkpoint_path)
                 for actor in h.train_group._actor_handlers
