@@ -1,7 +1,23 @@
 #!/usr/bin/env bash
-# One-key deploy of a TinkerCloud NeMo RL server (k8s pod or docker container).
+# One-key deploy of a TinkerCloud dev environment (k8s pod or docker container).
 #
-#   deploy_tinkercloud.sh [--source dev|git] [--target k8s|docker] [--code-only]
+#   deploy_tinkercloud.sh [--profile nemo_rl|bionemo|megatron_bridge] \
+#                         [--source dev|git] [--target k8s|docker] [--code-only]
+#
+# Profiles (cased by BASE IMAGE — the images ship incompatible stacks)
+#   nemo_rl  (default) NeMo RL server backend. Image nvcr.io/nvidia/nemo-rl:*.
+#            Overlays RL/nemo_rl, starts a Ray head + `python3 -m training`
+#            (TINKERCLOUD_BACKEND=nemo_rl), health-checks :8000. GPUS=4, master-02.
+#   bionemo  cu12 NeMo2 exploration env (feature 004 P5). Image
+#            nvcr.io/nvidia/clara/bionemo-framework:* — hyena Megatron-LM + TE +
+#            bionemo.evo2 + NeMo2. Env only (code + scripts/evo2 helpers, no server).
+#   megatron_bridge  cu13 recipe env (feature 004 P5, the FAITHFUL Evo2 classifier).
+#            Image nvcr.io/nvidia/pytorch:26.04-py3. Builds the bionemo-recipes
+#            evo2_megatron recipe (megatron-bridge v0.4.1) so the megatron_bridge
+#            backend can import megatron.bridge + evo2_classifier. Env only until
+#            that backend lands (stubs today). GPUS=2, master-03.
+#   Per-profile defaults (IMAGE, GPUS, NODE, BACKEND) are overridable by env vars.
+#   See specs/004-bionemo-classification/P5-TINKER-BACKEND.md.
 #
 # Sources
 #   dev  (default when run inside the tinker-nemorl monorepo)
@@ -25,11 +41,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+PROFILE="${PROFILE:-nemo_rl}"
 SOURCE=dev
 TARGET=k8s
 CODE_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
+    --profile) PROFILE="$2"; shift 2 ;;
     --source) SOURCE="$2"; shift 2 ;;
     --target) TARGET="$2"; shift 2 ;;
     --code-only) CODE_ONLY=1; shift ;;
@@ -37,18 +55,45 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# --- shared config ---------------------------------------------------------
-GPUS="${GPUS:-4}"
-IMAGE="${IMAGE:-nvcr.io/nvidia/nemo-rl:v0.5.0}"
+# --- profile: case by base image (the two images' stacks are incompatible) --
+# Sets per-profile DEFAULTS; every one is overridable by the same-named env var.
+case "$PROFILE" in
+  nemo_rl)
+    IMAGE="${IMAGE:-nvcr.io/nvidia/nemo-rl:v0.5.0}"
+    BACKEND="${BACKEND:-nemo_rl}"
+    GPUS="${GPUS:-4}"
+    NODE="${NODE:-master-02}"
+    POD="${POD:-tinkercloud-nemorl-m02}"
+    CONTAINER="${CONTAINER:-tinkercloud-nemorl}"
+    RUN_SERVER=1 ;;   # Ray head + `python3 -m training` + health check
+  bionemo)
+    IMAGE="${IMAGE:-nvcr.io/nvidia/clara/bionemo-framework:2.7.1}"
+    BACKEND="${BACKEND:-automodel}"
+    GPUS="${GPUS:-2}"
+    NODE="${NODE:-master-03}"
+    POD="${POD:-bionemo-evo2-p5}"
+    CONTAINER="${CONTAINER:-bionemo-evo2-p5}"
+    RUN_SERVER=0 ;;   # env only (cu12 NeMo2 exploration env): code + evo2 helpers
+  megatron_bridge)
+    # cu13 recipe env: builds bionemo-recipes evo2_megatron (megatron-bridge) so
+    # the megatron_bridge backend can import megatron.bridge + the Evo2 classifier.
+    IMAGE="${IMAGE:-nvcr.io/nvidia/pytorch:26.04-py3}"
+    BACKEND="${BACKEND:-megatron_bridge}"
+    GPUS="${GPUS:-2}"
+    NODE="${NODE:-master-03}"
+    POD="${POD:-evo2-recipe}"
+    CONTAINER="${CONTAINER:-evo2-recipe}"
+    RUN_SERVER=0 ;;   # env only until the megatron_bridge backend lands (stubs today)
+  *) echo "unknown --profile $PROFILE (want: nemo_rl | bionemo | megatron_bridge)"; exit 1 ;;
+esac
+
+# --- shared config (IMAGE/GPUS/NODE/POD/CONTAINER/BACKEND set per-profile) --
 SERVER_LOG="${SERVER_LOG:-/data/server1.log}"
 HF_TOKEN_FILE="${HF_TOKEN_FILE:-}"
 # k8s
 export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/ns.config}"
 NS="${NS:-tinkercloud-nemorl}"
-POD="${POD:-tinkercloud-nemorl-m02}"
-NODE="${NODE:-master-02}"
 # docker
-CONTAINER="${CONTAINER:-tinkercloud-nemorl}"
 DATA_DIR="${DATA_DIR:-/opt/dlami/nvme/$USER}"
 DOCKER="${DOCKER:-docker}"
 
@@ -103,7 +148,7 @@ spec:
     - {name: PYTHONUNBUFFERED, value: "1"}
     - {name: TOKENIZERS_PARALLELISM, value: "false"}
     - {name: TINKER_API_KEY, value: tml-dev-key}
-    - {name: TINKERCLOUD_BACKEND, value: nemo_rl}
+    - {name: TINKERCLOUD_BACKEND, value: $BACKEND}
     - {name: ALLOW_PARTIAL_BATCHES, value: "true"}
     - {name: HF_HOME, value: /data/.cache/huggingface}
     - {name: CUDA_DEVICE_MAX_CONNECTIONS, value: "1"}
@@ -141,7 +186,7 @@ EOF
     $DOCKER run -d --name "$CONTAINER" --init --gpus all --network host \
       --shm-size=32g -v "$DATA_DIR:/data" \
       -e PYTHONUNBUFFERED=1 -e TOKENIZERS_PARALLELISM=false \
-      -e TINKER_API_KEY=tml-dev-key -e TINKERCLOUD_BACKEND=nemo_rl \
+      -e TINKER_API_KEY=tml-dev-key -e TINKERCLOUD_BACKEND=$BACKEND \
       -e ALLOW_PARTIAL_BATCHES=true -e HF_HOME=/data/.cache/huggingface \
       -e CUDA_DEVICE_MAX_CONNECTIONS=1 -e NCCL_NVLS_ENABLE=0 \
       -e NCCL_IGNORE_DISABLED_P2P=1 \
@@ -152,6 +197,11 @@ else
   EX "pkill -f 'python3 -m trainin[g]' || true; sleep 8" || true
 fi
 
+# the megatron_bridge profile also bundles the bionemo-recipes evo2 recipe (built
+# in-container). dev/monorepo only (submodule); git mode not supported for it.
+EXTRA_TAR_PATHS=""
+[ "$PROFILE" = megatron_bridge ] && EXTRA_TAR_PATHS="bionemo-recipes/recipes/evo2_megatron"
+
 # --- 2. gather code ---------------------------------------------------------
 echo "==> [2/6] gathering code (source=$SOURCE)"
 if [ "$SOURCE" = dev ]; then
@@ -160,8 +210,12 @@ if [ "$SOURCE" = dev ]; then
   for d in tinker-cloud RL tinker_gmi tinker-cookbook; do
     [ -d "$MONOREPO/$d" ] || { echo "ERROR: $MONOREPO/$d missing (dev mode needs the monorepo)"; exit 1; }
   done
+  if [ -n "$EXTRA_TAR_PATHS" ] && [ ! -d "$MONOREPO/$EXTRA_TAR_PATHS" ]; then
+    echo "ERROR: $MONOREPO/$EXTRA_TAR_PATHS missing (megatron_bridge needs the bionemo-recipes submodule: git submodule update --init bionemo-recipes)"; exit 1
+  fi
   SRC="$MONOREPO"
 elif [ "$SOURCE" = git ]; then
+  [ -n "$EXTRA_TAR_PATHS" ] && { echo "ERROR: --profile megatron_bridge needs --source dev (bionemo-recipes submodule)"; exit 1; }
   echo "    cloning: tinker-cloud@$TINKER_CLOUD_REF RL@$RL_REF tinker_gmi@$TINKER_GMI_REF tinker-cookbook@$COOKBOOK_REF"
   git clone -q --depth 1 --branch "$TINKER_CLOUD_REF" "$TINKER_CLOUD_REPO" "$TMP/src/tinker-cloud"
   git clone -q --depth 1 --branch "$RL_REF"           "$RL_REPO"           "$TMP/src/RL"
@@ -173,11 +227,12 @@ else
 fi
 tar -C "$SRC" -czf "$TMP/code.tar.gz" \
   --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
-  --exclude='tinker-cookbook/attic' \
-  tinker-cloud/training tinker-cloud/tests \
+  --exclude='.venv' --exclude='tinker-cookbook/attic' \
+  tinker-cloud/training tinker-cloud/tests tinker-cloud/scripts/evo2 \
   RL/nemo_rl \
   tinker_gmi/src tinker_gmi/pyproject.toml tinker_gmi/README.md \
-  tinker-cookbook/tinker_cookbook tinker-cookbook/pyproject.toml tinker-cookbook/README.md
+  tinker-cookbook/tinker_cookbook tinker-cookbook/pyproject.toml tinker-cookbook/README.md \
+  $EXTRA_TAR_PATHS
 echo "    bundle: $(du -h "$TMP/code.tar.gz" | cut -f1)"
 
 # --- 3. copy in --------------------------------------------------------------
@@ -187,12 +242,31 @@ CP "$SCRIPT_DIR/lib/setup_container.sh" /tmp/setup_container.sh
 if [ -n "$HF_TOKEN_FILE" ]; then
   CP "$HF_TOKEN_FILE" /tmp/hf_token.txt
 fi
-EX "test -s /tmp/hf_token.txt" || {
-  echo "ERROR: no HF token in target; pass HF_TOKEN_FILE=<path>"; exit 1; }
+if [ "$RUN_SERVER" = 1 ]; then
+  EX "test -s /tmp/hf_token.txt" || {
+    echo "ERROR: no HF token in target; pass HF_TOKEN_FILE=<path>"; exit 1; }
+else
+  # bionemo: the Evo2 checkpoint (arcinstitute) is public; token optional.
+  EX "test -s /tmp/hf_token.txt" || echo "    note: no HF token (fine for public Evo2 weights)"
+fi
 
 # --- 4. in-container setup ---------------------------------------------------
-echo "==> [4/6] running shared in-container setup"
-EX "bash /tmp/setup_container.sh"
+echo "==> [4/6] running in-container setup (profile=$PROFILE)"
+EX "PROFILE=$PROFILE bash /tmp/setup_container.sh"
+
+if [ "$RUN_SERVER" = 0 ]; then
+  # bionemo profile: env only — no Ray, no server (no working evo2 server yet).
+  echo "==> DONE: faithful Evo2 env ready (profile=$PROFILE, target=$TARGET, image=$IMAGE)"
+  echo "    code at /app/training; evo2 helpers at /app/scripts/evo2/"
+  echo "    quickstart (inside the target):"
+  echo "      export HF_HOME=/data/.cache/huggingface"
+  echo "      evo2_convert_to_nemo2 --model-path hf://arcinstitute/savanna_evo2_1b_base \\"
+  echo "        --model-size 1b --output-dir /data/evo2_1b_nemo2"
+  echo "      python /app/scripts/evo2/splice_mkdata.py     # splice_sites_all -> fasta+labels"
+  echo "      python /app/scripts/evo2/evo2_extract.py --fasta <fa> --ckpt-dir /data/evo2_1b_nemo2 --output-dir <out>"
+  echo "    see specs/004-bionemo-classification/P5-RESULTS.md"
+  exit 0
+fi
 
 # --- 5. ray head -------------------------------------------------------------
 echo "==> [5/6] ensuring Ray head is up"
