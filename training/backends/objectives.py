@@ -14,7 +14,7 @@ class Objective(str, Enum):
     TOKEN_CLASSIFICATION = "token_classification"
 
 
-# Loss-registry name for classification cross-entropy (plan.md:113).
+# Loss-registry name for classification cross-entropy.
 CLASSIFICATION_CE = "classification_ce"
 
 CLASSIFICATION_OBJECTIVES = frozenset({

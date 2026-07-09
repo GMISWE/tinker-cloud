@@ -116,7 +116,6 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
         except Exception as e:
             logger.debug("model config read skipped (VLM/seq-len detection): %s", e)
 
-        # Warn about Miles-only RLVE server-side features
         if rlve_config and rlve_config.get("enabled", False):
             miles_only_keys = [
                 "custom_prompt_preprocessor", "answer_marker_type",
@@ -132,7 +131,6 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
                     unsupported,
                 )
 
-        # Parallelism config
         tp_size = 1
         pp_size = 1
         cp_size = 1
@@ -151,11 +149,8 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
             model_parallel = tp_size * pp_size * cp_size
             dp_size = max(1, num_gpus // model_parallel)
 
-        # Micro-batch size calculation
-        # NeMo RL train_global_batch_size = total samples per train() call
-        # train_micro_batch_size = samples per GPU per forward/backward pass
-        # MBS=1 minimizes activation memory (NeMo RL convention: 78/91 configs use 1)
-        # Gradient accumulation steps = GBS / (MBS * DP) bridges the gap
+        # GBS = samples per train() call; MBS=1 minimizes activation memory
+        # (NeMo RL convention); grad-accum steps = GBS / (MBS * DP) bridge the gap.
         train_global_batch_size = max_batch_size
         train_micro_batch_size = 1
 
@@ -236,7 +231,6 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
             },
         }
 
-        # LoRA config
         if lora_config and lora_config.get("rank", 0) > 0:
             policy_config["dtensor_cfg"]["lora_cfg"] = {
                 "enabled": True,
@@ -269,7 +263,6 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
             "force_on_policy_ratio": False,
         }
 
-        # Override loss config from rl_config or rlve_config
         if rl_config:
             if "kl_penalty_coef" in rl_config:
                 loss_fn_config["reference_policy_kl_penalty"] = rl_config["kl_penalty_coef"]
@@ -277,7 +270,6 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
                 loss_fn_config["ratio_clip_min"] = rl_config["eps_clip"]
                 loss_fn_config["ratio_clip_max"] = rl_config["eps_clip"]
 
-        # Cluster config
         cluster_config = {
             "bundle_ct_per_node_list": [num_gpus],
             "num_gpus_per_node": num_gpus,
@@ -292,7 +284,6 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
         if checkpoint_config:
             checkpointing_config.update(checkpoint_config)
 
-        # Apply overrides
         config_dict = {
             "policy": policy_config,
             "loss_fn": loss_fn_config,
@@ -304,7 +295,6 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
             "rlve_config": rlve_config,
         }
 
-        # Deep merge user overrides
         if self.overrides:
             _deep_merge(config_dict, self.overrides)
 

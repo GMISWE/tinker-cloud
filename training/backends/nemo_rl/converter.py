@@ -96,7 +96,6 @@ class NemoRLDataConverter(DataConverter):
         if not data:
             return self._empty_batched_data_dict()
 
-        # SFT path — reconstruct full sequence for NLLLoss
         if loss_fn == "cross_entropy":
             return self._forward_backward_sft(data, image_preprocessor)
 
@@ -105,7 +104,6 @@ class NemoRLDataConverter(DataConverter):
         max_seq_len = max((len(t) for t in full_tokens_B), default=0)
         batch_size = len(data)
 
-        # Initialize tensors with padding (zeros)
         input_ids = torch.zeros(batch_size, max_seq_len, dtype=torch.long)
         input_lengths = torch.zeros(batch_size, dtype=torch.long)
         token_mask = torch.zeros(batch_size, max_seq_len, dtype=torch.float32)
@@ -178,10 +176,7 @@ class NemoRLDataConverter(DataConverter):
             image_preprocessor.image_token_id if image_preprocessor is not None else None
         )
 
-        # Compute max reconstructed sequence length.
-        # For VLM, expand chunks to include image placeholder tokens
-        # (<|image_pad|>=151655 for Qwen3-VL) at each image position.
-        # For text-only, fall back to the text-chunk concatenation.
+        # VLM: expand image chunks to placeholder tokens; text-only: concat text chunks.
         def _full_input_tokens(datum):
             if image_token_id is not None:
                 expanded = _expand_chunks_to_full_sequence(datum, image_token_id)
@@ -199,13 +194,10 @@ class NemoRLDataConverter(DataConverter):
         sample_mask = torch.ones(batch_size, dtype=torch.float32)
 
         for i, datum in enumerate(data):
-            # Get full input sequence (with image_pad tokens inserted for VLM)
             input_tokens = _full_input_tokens(datum)
 
-            # Extract target_tokens — same length as input_tokens shifted by 1
             target_tokens = _extract_target_tokens(datum)
 
-            # Reconstruct full sequence: concat(input_tokens, [target_tokens[-1]])
             if target_tokens is not None and len(target_tokens) > 0:
                 last_token = target_tokens[-1].unsqueeze(0)
                 full_tokens = torch.cat([input_tokens, last_token])
@@ -220,14 +212,11 @@ class NemoRLDataConverter(DataConverter):
             input_ids[i, :seq_len] = full_tokens
             input_lengths[i] = seq_len
 
-            # Extract weights (length N-1)
             weights = _extract_sft_weights(datum)
 
-            # Reconstruct full mask: concat([0.0], weights) → length N
             if weights is not None:
                 full_mask = torch.cat([torch.zeros(1, dtype=torch.float32), weights])
             else:
-                # Fallback: mask entire response (all ones except first position)
                 full_mask = torch.ones(seq_len, dtype=torch.float32)
                 full_mask[0] = 0.0
                 logger.warning(
@@ -359,7 +348,6 @@ class NemoRLDataConverter(DataConverter):
         loss = _to_python_scalar(result.get("loss", 0.0))
         grad_norm = _to_python_scalar(result.get("grad_norm", 0.0))
 
-        # Extract per-microbatch metrics
         all_mb_metrics = result.get("all_mb_metrics", {})
         metrics = {
             "total_loss": loss,
@@ -462,14 +450,12 @@ def _extract_tokens(datum) -> torch.Tensor:
                 if all_tokens:
                     return torch.cat(all_tokens)
 
-        # Try direct tokens: model_input.tokens
         tokens = _get_attr_or_key(model_input, "tokens")
         if tokens is not None:
             if isinstance(tokens, torch.Tensor):
                 return tokens.detach().cpu().long()
             return torch.tensor(tokens, dtype=torch.long)
 
-        # Try input_ids: model_input.input_ids
         input_ids = _get_attr_or_key(model_input, "input_ids")
         if input_ids is not None:
             if isinstance(input_ids, torch.Tensor):
