@@ -78,7 +78,6 @@ Validated end-to-end against this server with each recipe's README hyperparamete
 | chat_sl (no_robots) | SFT (async) | Qwen3-8B-Base | **Pass** — test/nll 1.871 → 1.800 by step 20 (recipe ref: 1.788 @ 140) |
 | preference/dpo | DPO | Llama-3.2-1B | **Pass** (mechanics) — 34 steps error-free, gradients flowing; loss ~ln(2) flat in 34 steps at documented lr=1e-5, longer run needed for convergence verdict |
 
-Full status for all 23 recipe entries, bugs, and gaps: `specs/002-nemorl-recipe-testing/compatibility-matrix.md` in the monorepo.
 
 ## Configuration
 
