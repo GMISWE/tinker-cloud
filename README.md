@@ -12,10 +12,6 @@ Tinker Client --> TinkerCloud --> Miles | NeMo RL | Automodel | Megatron-Bridge 
 
 ### 1. Deploy
 
-One command via `scripts/deploy_tinkercloud.sh` — clones the four repos
-(tinker-cloud, RL, tinker_gmi, tinker-cookbook) at pinned refs, creates the
-pod/container, installs the code, starts Ray and the API server, and
-health-checks it:
 
 ```bash
 # Onto a Kubernetes GPU cluster
@@ -28,12 +24,7 @@ HF_TOKEN_FILE=~/.hf_token ./scripts/deploy_tinkercloud.sh --source git --target 
 ./scripts/deploy_tinkercloud.sh --source git --code-only
 ```
 
-Both targets run the same in-container setup (`scripts/lib/setup_container.sh`),
-so k8s and docker deployments cannot drift. (Developers working in the
-tinker-nemorl monorepo can pass `--source dev` to bundle their local working
-trees, uncommitted changes included.)
-
-Common knobs (env vars):
+Common knobs:
 
 | Var | Meaning |
 |---|---|
