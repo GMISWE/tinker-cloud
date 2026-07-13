@@ -108,7 +108,9 @@ class MilesBackend(TrainingBackend):
             from miles.ray.placement_group import create_placement_groups, create_rollout_manager
             from miles.ray.tinker_group import TinkerTrainGroup
 
-            pgs = create_placement_groups(args)
+            # Sync ray calls (pg.ready waits, actor allocation) — keep them off
+            # the event loop or /retrieve_future polls stall and clients time out.
+            pgs = await asyncio.to_thread(create_placement_groups, args)
 
             rollout_manager = None
             router_ip = None
@@ -118,7 +120,7 @@ class MilesBackend(TrainingBackend):
                     create_rollout_manager, args, pgs["rollout"]
                 )
 
-            train_group = TinkerTrainGroup(
+            train_group = await asyncio.to_thread(lambda: TinkerTrainGroup(
                 args=args,
                 num_nodes=args.actor_num_nodes,
                 num_gpus_per_node=args.actor_num_gpus_per_node,
@@ -127,7 +129,7 @@ class MilesBackend(TrainingBackend):
                 role="actor",
                 with_ref=False,
                 rollout_manager=rollout_manager,
-            )
+            ))
 
             try:
                 await asyncio.wait_for(train_group.init(), timeout=1800.0)
@@ -396,7 +398,8 @@ class MilesBackend(TrainingBackend):
                 seen = set()
                 for pg_tuple in h.placement_group.values():
                     pg_obj = pg_tuple[0] if isinstance(pg_tuple, tuple) else pg_tuple
-                    if id(pg_obj) not in seen:
+                    # debug_train_only leaves the rollout entry as None
+                    if pg_obj is not None and id(pg_obj) not in seen:
                         seen.add(id(pg_obj))
                         ray.util.remove_placement_group(pg_obj)
                         resources_freed.append("placement_group")
