@@ -68,9 +68,19 @@ elif [ "$PROFILE" = miles ]; then
   MILES_REPO="${MILES_REPO:-https://github.com/GavinZhu-GMI/miles.git}"
   MILES_REF="${MILES_REF:-main}"
   MPKG=$(python3 -c 'import miles, os; print(os.path.dirname(miles.__file__))')
-  rm -rf /tmp/miles_src
-  git clone -q --depth 1 --branch "$MILES_REF" "$MILES_REPO" /tmp/miles_src
-  cp -r /tmp/miles_src/miles/. "$MPKG/"
+  MROOT=$(dirname "$MPKG")
+  if git -C "$MROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    # miles is an editable checkout (miles image): update it via git so the
+    # worktree IS the pinned ref — a bare cp leaves stale files and a dirty
+    # git status that masquerades as unsaved work.
+    git -C "$MROOT" fetch -q --depth 1 "$MILES_REPO" "$MILES_REF"
+    git -C "$MROOT" checkout -qf FETCH_HEAD
+    git -C "$MROOT" clean -qfd -- miles/
+  else
+    rm -rf /tmp/miles_src "$MPKG"
+    git clone -q --depth 1 --branch "$MILES_REF" "$MILES_REPO" /tmp/miles_src
+    cp -r /tmp/miles_src/miles "$MPKG"
+  fi
   python3 -c 'import miles; print("miles fork overlaid OK ('"$MILES_REF"')")'
 fi
 
