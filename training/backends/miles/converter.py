@@ -23,7 +23,9 @@ class MilesDataConverter(DataConverter):
         args: Any,
     ) -> Any:
         """Convert Tinker data to Miles rollout_data for forward pass."""
-        return self._inner.forward_to_rollout(data)
+        rollout_data = self._inner.forward_to_rollout(data)
+        self._add_tinker_seam_keys(rollout_data, len(data))
+        return rollout_data
 
     def forward_backward_to_backend(
         self,
@@ -33,7 +35,28 @@ class MilesDataConverter(DataConverter):
     ) -> Any:
         """Convert Tinker data to Miles rollout_data for training."""
         is_rl = not getattr(args, "debug_train_only", False)
-        return self._inner.forward_backward_to_rollout(data, is_rl=is_rl)
+        rollout_data = self._inner.forward_backward_to_rollout(data, is_rl=is_rl)
+        self._add_tinker_seam_keys(rollout_data, len(data))
+        # Per-request loss selection (upstream dispatches on args.loss_type at
+        # startup; the seam overrides per batch). The inner converter already
+        # sets sft_loss when it detects SFT-shaped data — don't override that.
+        rollout_data.setdefault(
+            "_loss_type_override",
+            "sft_loss" if loss_fn == "cross_entropy" else "policy_loss",
+        )
+        return rollout_data
+
+    @staticmethod
+    def _add_tinker_seam_keys(rollout_data: Any, num_samples: int) -> None:
+        """Keys the tinker-seam miles branch consumes (specs/005 design.md).
+
+        - dynamic_global_batch_size: actual request size, so upstream
+          get_data_iterator schedules correctly for variable batches.
+        - _loss_norm_total=1: pure-sum gradients — invariant to how a logical
+          batch is split across forward_backward calls (G1 contract).
+        """
+        rollout_data["dynamic_global_batch_size"] = num_samples
+        rollout_data["_loss_norm_total"] = 1
 
     def backend_to_forward_result(
         self,
