@@ -61,7 +61,17 @@ if [ "$PROFILE" = nemo_rl ]; then
   PKG=$(python3 -c 'import nemo_rl, os; print(os.path.dirname(nemo_rl.__file__))')
   cp -r /tmp/RL/nemo_rl/. "$PKG/"
 elif [ "$PROFILE" = miles ]; then
-  python3 -c 'import miles; print("miles pre-installed OK")'
+  # Overlay the GMI miles fork onto the image's editable install: the base image's
+  # baked miles predates the Tinker Ray-orchestration interface (forward_backward_only,
+  # apply_optimizer_step(learning_rate=), apply_optimizer_step_and_sync). Fork main is
+  # the maintained branch (PR merges fix_hackathon_rebased -> main).
+  MILES_REPO="${MILES_REPO:-https://github.com/GavinZhu-GMI/miles.git}"
+  MILES_REF="${MILES_REF:-main}"
+  MPKG=$(python3 -c 'import miles, os; print(os.path.dirname(miles.__file__))')
+  rm -rf /tmp/miles_src
+  git clone -q --depth 1 --branch "$MILES_REF" "$MILES_REPO" /tmp/miles_src
+  cp -r /tmp/miles_src/miles/. "$MPKG/"
+  python3 -c 'import miles; print("miles fork overlaid OK ('"$MILES_REF"')")'
 fi
 
 # SDK + cookbook editable installs
