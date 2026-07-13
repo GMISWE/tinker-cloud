@@ -328,9 +328,11 @@ class SlimeArgumentBuilder:
         if checkpoint_path:
             args.load = parse_checkpoint_uri(checkpoint_path, args.save)
 
-        # LoRA configuration
+        # LoRA configuration. alpha defaults to rank per the API schema
+        # (requests.py LoraConfig); alpha=0 zeroes LoRA scaling and gradients
+        # entirely — see specs/005-miles-ray-interface/design.md (grad_norm=0).
         args.lora_rank = lora_config.get("rank", 0) if lora_config else 0
-        args.lora_alpha = lora_config.get("alpha", 0) if lora_config else 0
+        args.lora_alpha = (lora_config.get("alpha") or args.lora_rank) if lora_config else 0
         args.lora_dropout = lora_config.get("dropout", 0.0) if lora_config else 0.0
 
         # Parallelism settings - use values from parallel_config (already auto-detected in build_args)
