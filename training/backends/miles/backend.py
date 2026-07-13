@@ -247,39 +247,24 @@ class MilesBackend(TrainingBackend):
 
             is_rl = not h.args.debug_train_only
 
-            # Check if data needs fake generation (legacy test compat)
-            needs_fake_data = (
-                not data
-                or len(data) == 0
-                or len(data) < h.args.data_parallel_size
+            from ...core.validators import RequestValidator
+            from ...config import get_config
+
+            config = get_config()
+            allow_partial = getattr(config, "allow_partial_batches", False)
+            validator = RequestValidator(h.args, allow_partial_batches=allow_partial)
+            validation_error = validator.validate_forward_backward_request(
+                data, is_rl=is_rl,
             )
-
-            if needs_fake_data:
-                logger.info(
-                    "Insufficient data (%d samples, need %d) — generating fake test data",
-                    len(data) if data else 0,
-                    h.args.data_parallel_size,
+            if validation_error:
+                raise ValueError(
+                    f"Request validation failed:\n{validation_error}\n\n"
+                    f"{validator.get_config_summary()}"
                 )
-                rollout_data = self._generate_fake_rollout_data(h.args)
-            else:
-                from ...core.validators import RequestValidator
-                from ...config import get_config
 
-                config = get_config()
-                allow_partial = getattr(config, "allow_partial_batches", False)
-                validator = RequestValidator(h.args, allow_partial_batches=allow_partial)
-                validation_error = validator.validate_forward_backward_request(
-                    data, is_rl=is_rl,
-                )
-                if validation_error:
-                    raise ValueError(
-                        f"Request validation failed:\n{validation_error}\n\n"
-                        f"{validator.get_config_summary()}"
-                    )
-
-                rollout_data = self.converter.forward_backward_to_backend(
-                    data, loss_fn, h.args,
-                )
+            rollout_data = self.converter.forward_backward_to_backend(
+                data, loss_fn, h.args,
+            )
 
             results = await asyncio.to_thread(
                 h.train_group.forward_backward_only,
@@ -298,61 +283,6 @@ class MilesBackend(TrainingBackend):
             raise BackendError(
                 str(e), backend="miles", operation="forward_backward", original_error=e,
             ) from e
-
-    @staticmethod
-    def _generate_fake_rollout_data(args) -> Dict[str, Any]:
-        """Generate fake rollout data for legacy test compatibility."""
-        import torch
-
-        seq_length = args.seq_length
-        vocab_size = args.vocab_size
-        batch_size = args.global_batch_size
-        response_length = seq_length - (seq_length // 2)
-        device = torch.device("cpu")
-
-        tokens_list = []
-        loss_masks_list = []
-        response_lengths_list = []
-        advantages_list = []
-        log_probs_list = []
-        ref_log_probs_list = []
-        returns_list = []
-        values_list = []
-
-        for _ in range(batch_size):
-            tokens_list.append(
-                torch.randint(0, vocab_size, (seq_length,), dtype=torch.long, device=device)
-            )
-            loss_masks_list.append(
-                torch.ones(response_length, dtype=torch.float32, device=device)
-            )
-            response_lengths_list.append(response_length)
-            advantages_list.append(
-                torch.randn(response_length, dtype=torch.float32, device=device) * 0.1
-            )
-            log_probs_list.append(
-                torch.randn(response_length, dtype=torch.float32, device=device) * 0.5 - 5.0
-            )
-            ref_log_probs_list.append(
-                torch.randn(response_length, dtype=torch.float32, device=device) * 0.5 - 5.0
-            )
-            returns_list.append(
-                torch.randn(response_length, dtype=torch.float32, device=device) * 0.5
-            )
-            values_list.append(
-                torch.randn(response_length, dtype=torch.float32, device=device) * 0.5
-            )
-
-        return {
-            "tokens": tokens_list,
-            "loss_masks": loss_masks_list,
-            "response_lengths": response_lengths_list,
-            "advantages": advantages_list,
-            "log_probs": log_probs_list,
-            "ref_log_probs": ref_log_probs_list,
-            "values": values_list,
-            "returns": returns_list,
-        }
 
     async def apply_optimizer_step(
         self,
