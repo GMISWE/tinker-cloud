@@ -12,7 +12,6 @@ from typing import Any, Dict, Optional, Tuple
 
 from ..utils.model_config import (
     load_model_config,
-    get_parallelism_config,
     auto_detect_all_parallelism,
     detect_torch_dist_path,
     parse_checkpoint_uri,
@@ -478,5 +477,12 @@ class SlimeArgumentBuilder:
         args.offload_train = False
         args.offload_rollout = False
         args.train_memory_margin_bytes = 0
+
+        # Tinker seam (miles tinker-seam branch, specs/005 design.md):
+        # per-request batch sizes ride the dynamic_global_batch_size rollout key
+        # (its assert couples this arg to the key's presence), and each actor
+        # splits the fanned-out batch by DP rank locally.
+        args.use_dynamic_global_batch_size = True
+        args.delay_split_train_data_by_dp = True
 
         return args

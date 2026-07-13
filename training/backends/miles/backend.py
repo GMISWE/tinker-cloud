@@ -1,8 +1,13 @@
-"""Miles backend — wraps RayTrainGroup/RolloutManager/SlimeArgumentBuilder
-behind the TrainingBackend interface (refactor only, no behavior change)."""
+"""Miles backend — wraps TinkerTrainGroup/RolloutManager/SlimeArgumentBuilder
+behind the TrainingBackend interface.
+
+Targets the miles `tinker-seam` branch (upstream-based; specs/005 in
+tinker-nemorl): async TinkerTrainGroup fanout, decoupled
+forward_backward_only / apply_optimizer_step, pure-sum loss via rollout keys
+set in the converter."""
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -97,93 +102,64 @@ class MilesBackend(TrainingBackend):
             )
             logger.info("[%s] Miles args built, hf_path=%s", request_id, hf_path)
 
-            from miles.ray.actor_group import RayTrainGroup
+            # Reuse upstream's own wiring (miles tinker-seam branch): placement
+            # groups + RolloutManager from the factories train.py uses, and the
+            # TinkerTrainGroup fanout for the decoupled train-step seam.
+            from miles.ray.placement_group import create_placement_groups, create_rollout_manager
+            from miles.ray.tinker_group import TinkerTrainGroup
 
-            num_nodes = 1
-            num_gpus_per_node = num_gpus
-            bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_nodes * num_gpus_per_node)]
-            pg = ray.util.placement_group(bundles, strategy="PACK")
+            pgs = create_placement_groups(args)
 
-            await asyncio.wait_for(
-                asyncio.wrap_future(pg.ready().future()),
-                timeout=120.0,
-            )
-
-            reordered_indices = list(range(len(bundles)))
-
-            train_group = RayTrainGroup(
-                args=args,
-                num_nodes=num_nodes,
-                num_gpus_per_node=num_gpus_per_node,
-                pg=(pg, reordered_indices),
-                num_gpus_per_actor=0.8,
-                role="actor",
-            )
-
-            init_refs = train_group.async_init(args, role="actor", with_ref=False)
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(*[asyncio.wrap_future(ref.future()) for ref in init_refs]),
-                    timeout=1800.0,
+            rollout_manager = None
+            router_ip = None
+            router_port = None
+            if not debug_train_only:
+                rollout_manager, _ = await asyncio.to_thread(
+                    create_rollout_manager, args, pgs["rollout"]
                 )
+
+            train_group = TinkerTrainGroup(
+                args=args,
+                num_nodes=args.actor_num_nodes,
+                num_gpus_per_node=args.actor_num_gpus_per_node,
+                pg=pgs["actor"],
+                num_gpus_per_actor=0.4,
+                role="actor",
+                with_ref=False,
+                rollout_manager=rollout_manager,
+            )
+
+            try:
+                await asyncio.wait_for(train_group.init(), timeout=1800.0)
             except asyncio.TimeoutError:
-                ray.util.remove_placement_group(pg)
                 raise BackendError(
                     "Actor initialization timeout after 1800s",
                     backend="miles",
                     operation="create_model",
                 )
 
-            # Create RolloutManager for SGLang (RL mode only)
-            rollout_manager = None
-            router_ip = None
-            router_port = None
+            if rollout_manager is not None:
+                await train_group.set_rollout_manager()
 
-            if not debug_train_only:
-                from miles.ray.rollout import RolloutManager
-
-                rollout_manager = RolloutManager.options(
-                    num_cpus=1, num_gpus=0,
-                ).remote(args, (pg, reordered_indices))
-
-                await asyncio.to_thread(train_group.set_rollout_manager, rollout_manager)
-
-                # Initialize SGLang memory state
-                from sglang.srt.constants import GPU_MEMORY_TYPE_WEIGHTS, GPU_MEMORY_TYPE_KV_CACHE
-                try:
-                    from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH
-                except ImportError:
-                    GPU_MEMORY_TYPE_CUDA_GRAPH = None
-
+                # Mirror upstream train.py startup: load weights into SGLang
+                # before anything samples, honoring rollout offload state.
                 if args.offload_rollout:
-                    await asyncio.to_thread(lambda: ray.get(rollout_manager.offload.remote()))
-                    await asyncio.to_thread(lambda: ray.get(
-                        rollout_manager.onload.remote(tags=[GPU_MEMORY_TYPE_WEIGHTS])
-                    ))
-
-                await asyncio.to_thread(train_group.update_weights)
-
+                    await rollout_manager.onload_weights.remote()
+                await train_group.update_weights()
                 if args.offload_rollout:
-                    if GPU_MEMORY_TYPE_CUDA_GRAPH is not None:
-                        await asyncio.to_thread(lambda: ray.get(
-                            rollout_manager.onload.remote(tags=[GPU_MEMORY_TYPE_CUDA_GRAPH])
-                        ))
-                    await asyncio.to_thread(lambda: ray.get(
-                        rollout_manager.onload.remote(tags=[GPU_MEMORY_TYPE_KV_CACHE])
-                    ))
+                    await rollout_manager.onload_kv.remote()
 
-                try:
-                    router_address_ref = rollout_manager.get_router_address.remote()
-                    router_ip, router_port = await asyncio.wrap_future(router_address_ref.future())
-                except Exception as e:
-                    logger.error("[%s] Failed to get router address: %s", request_id, e)
+                router_ip = getattr(args, "sglang_router_ip", None)
+                router_port = getattr(args, "sglang_router_port", None)
+                if not router_ip:
+                    logger.error("[%s] SGLang router address missing from args", request_id)
 
             handle = MilesHandle(
                 model_id=model_id,
                 backend_type="miles",
                 train_group=train_group,
                 rollout_manager=rollout_manager,
-                placement_group=pg,
+                placement_group=pgs,
                 args=args,
                 hf_path=hf_path,
                 router_ip=router_ip,
@@ -215,15 +191,23 @@ class MilesBackend(TrainingBackend):
             from miles.utils.ray_utils import Box
 
             if h.rollout_manager is not None and h.args.offload_rollout:
-                await asyncio.to_thread(lambda: ray.get(h.rollout_manager.offload.remote()))
+                await h.rollout_manager.offload.remote()
 
             rollout_data = self.converter.forward_to_backend(data, h.args)
-            results = await asyncio.to_thread(
-                h.train_group.forward_only,
-                rollout_id=0,
-                rollout_data_ref=Box(ray.put(rollout_data)),
-            )
-            return self.converter.backend_to_forward_result(results, data)
+            # TinkerTrainGroup returns per-sample logprob tensors already
+            # merged into the client's submission order.
+            logprobs = await h.train_group.forward_logprobs(0, Box(ray.put(rollout_data)))
+
+            loss_fn_outputs = [
+                {"logprobs": {"data": lp.tolist(), "shape": [len(lp)], "dtype": "float32"}}
+                for lp in logprobs
+            ]
+            return {
+                "type": "forward",
+                "loss_fn_output_type": loss_fn,
+                "loss_fn_outputs": loss_fn_outputs,
+                "metrics": {},
+            }
 
         except BackendError:
             raise
@@ -243,7 +227,7 @@ class MilesBackend(TrainingBackend):
             from miles.utils.ray_utils import Box
 
             if h.rollout_manager is not None and h.args.offload_rollout:
-                await asyncio.to_thread(lambda: ray.get(h.rollout_manager.offload.remote()))
+                await h.rollout_manager.offload.remote()
 
             is_rl = not h.args.debug_train_only
 
@@ -266,14 +250,28 @@ class MilesBackend(TrainingBackend):
                 data, loss_fn, h.args,
             )
 
-            results = await asyncio.to_thread(
-                h.train_group.forward_backward_only,
-                rollout_id=0,
-                rollout_data_ref=Box(ray.put(rollout_data)),
-            )
-            result = self.converter.backend_to_forward_backward_result(results, data)
-            result["deferred"] = False
-            return result
+            results = await h.train_group.forward_backward_only(0, Box(ray.put(rollout_data)))
+
+            # Only pipeline-last-stage actors return metrics; average across
+            # the DP ranks that did. Per-sample logprobs are not emitted by the
+            # seam's fb pass (specs/005 HANDOFF, open item).
+            summed: Dict[str, float] = {}
+            reporting = 0
+            for r in results or []:
+                loss_dict = (r or {}).get("loss") or {}
+                if loss_dict:
+                    reporting += 1
+                    for k, v in loss_dict.items():
+                        summed[k] = summed.get(k, 0.0) + float(v)
+            metrics = {k: v / reporting for k, v in summed.items()} if reporting else {}
+
+            return {
+                "loss_fn_output_type": loss_fn,
+                "loss": metrics.get("loss"),
+                "metrics": metrics,
+                "loss_fn_outputs": [],
+                "deferred": False,
+            }
 
         except BackendError:
             raise
@@ -291,43 +289,26 @@ class MilesBackend(TrainingBackend):
     ) -> Dict[str, Any]:
         h: MilesHandle = handle  # type: ignore[assignment]
         try:
-            # Miles' RayTrainGroup takes the LR as a parameter (no set_learning_rate);
-            # apply_optimizer_step_and_sync = apply_optimizer_step + update_weights.
+            # TinkerTrainGroup: apply_optimizer_step(learning_rate) fans out to
+            # the actors; _and_sync additionally pushes weights to SGLang.
             offload_train = h.args.offload_train if h.args else True
             offload_rollout = h.args.offload_rollout if h.args else True
 
-            if not offload_train and not offload_rollout:
-                results = await asyncio.to_thread(
-                    h.train_group.apply_optimizer_step_and_sync, learning_rate)
+            if h.rollout_manager is None:
+                results = await h.train_group.apply_optimizer_step(learning_rate)
+            elif not offload_train and not offload_rollout:
+                results = await h.train_group.apply_optimizer_step_and_sync(learning_rate)
             else:
-                results = await asyncio.to_thread(
-                    h.train_group.apply_optimizer_step, learning_rate)
+                results = await h.train_group.apply_optimizer_step(learning_rate)
 
-                if h.rollout_manager is not None:
-                    from sglang.srt.constants import GPU_MEMORY_TYPE_KV_CACHE, GPU_MEMORY_TYPE_WEIGHTS
-                    try:
-                        from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH
-                    except ImportError:
-                        GPU_MEMORY_TYPE_CUDA_GRAPH = None
-
-                    if offload_train:
-                        await asyncio.to_thread(h.train_group.offload)
-
-                    if offload_rollout:
-                        await asyncio.to_thread(lambda: ray.get(
-                            h.rollout_manager.onload.remote(tags=[GPU_MEMORY_TYPE_WEIGHTS])
-                        ))
-
-                    await asyncio.to_thread(h.train_group.update_weights)
-
-                    if offload_rollout:
-                        if GPU_MEMORY_TYPE_CUDA_GRAPH is not None:
-                            await asyncio.to_thread(lambda: ray.get(
-                                h.rollout_manager.onload.remote(tags=[GPU_MEMORY_TYPE_CUDA_GRAPH])
-                            ))
-                        await asyncio.to_thread(lambda: ray.get(
-                            h.rollout_manager.onload.remote(tags=[GPU_MEMORY_TYPE_KV_CACHE])
-                        ))
+                # Mirror upstream train.py's offload dance around weight sync.
+                if offload_train:
+                    await h.train_group.offload()
+                if offload_rollout:
+                    await h.rollout_manager.onload_weights.remote()
+                await h.train_group.update_weights()
+                if offload_rollout:
+                    await h.rollout_manager.onload_kv.remote()
 
             return {
                 "success": results[0]["success"],
@@ -346,7 +327,7 @@ class MilesBackend(TrainingBackend):
     async def update_inference_weights(self, handle: BackendHandle) -> None:
         h: MilesHandle = handle  # type: ignore[assignment]
         try:
-            await asyncio.to_thread(h.train_group.update_weights)
+            await h.train_group.update_weights()
         except Exception as e:
             raise BackendError(
                 str(e), backend="miles", operation="update_inference_weights", original_error=e,
@@ -368,11 +349,7 @@ class MilesBackend(TrainingBackend):
             if step_id is None:
                 step_id = 0
 
-            object_refs = [
-                actor.save_model.remote(step_id)
-                for actor in h.train_group._actor_handlers
-            ]
-            await asyncio.gather(*[asyncio.wrap_future(ref.future()) for ref in object_refs])
+            await h.train_group.save_model(step_id)
             return checkpoint_path
 
         except Exception as e:
@@ -387,15 +364,11 @@ class MilesBackend(TrainingBackend):
     ) -> None:
         h: MilesHandle = handle  # type: ignore[assignment]
         try:
-            object_refs = [
-                actor.load_checkpoint.remote(checkpoint_path)
-                for actor in h.train_group._actor_handlers
-            ]
-            await asyncio.gather(*[asyncio.wrap_future(ref.future()) for ref in object_refs])
+            await h.train_group.load_checkpoint(checkpoint_path)
 
             # Sync loaded weights to inference engine
             if h.rollout_manager is not None:
-                await asyncio.to_thread(h.train_group.update_weights)
+                await h.train_group.update_weights()
 
             logger.info("Miles checkpoint loaded from %s", checkpoint_path)
 
@@ -408,7 +381,7 @@ class MilesBackend(TrainingBackend):
         h: MilesHandle = handle  # type: ignore[assignment]
         try:
             resources_freed = []
-            for actor in h.train_group._actor_handlers:
+            for actor in h.train_group._actor_handles:
                 ray.kill(actor, no_restart=True)
                 resources_freed.append("actor")
 
@@ -416,9 +389,17 @@ class MilesBackend(TrainingBackend):
                 ray.kill(h.rollout_manager, no_restart=True)
                 resources_freed.append("rollout_manager")
 
-            if h.placement_group is not None:
-                ray.util.remove_placement_group(h.placement_group)
-                resources_freed.append("placement_group")
+            # placement_group holds the create_placement_groups() dict of
+            # (pg, bundle_indices, gpu_ids) tuples; pgs may be shared between
+            # roles (colocate), so dedupe before removal.
+            if h.placement_group:
+                seen = set()
+                for pg_tuple in h.placement_group.values():
+                    pg_obj = pg_tuple[0] if isinstance(pg_tuple, tuple) else pg_tuple
+                    if id(pg_obj) not in seen:
+                        seen.add(id(pg_obj))
+                        ray.util.remove_placement_group(pg_obj)
+                        resources_freed.append("placement_group")
 
             logger.info("Miles model %s deleted, freed %d resources", h.model_id, len(resources_freed))
 
