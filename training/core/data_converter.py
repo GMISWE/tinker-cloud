@@ -40,13 +40,22 @@ class TinkerDataConverter:
 
         Works with both dict and Pydantic model inputs.
         """
-        # Try chunks first
+        # Try chunks first. A ModelInput may carry MULTIPLE chunks (the SDK
+        # splits inputs); concatenate them all — taking only chunks[0]
+        # silently truncates the sample (specs/005: 4-token tokens vs
+        # 438-token weights crash in the miles loss).
         chunks = TinkerDataConverter._get_field(model_input, "chunks")
         if chunks:
-            if not chunks:
-                raise ValueError("Empty chunks in model_input")
-            first_chunk = chunks[0]
-            return TinkerDataConverter._get_field(first_chunk, "tokens")
+            tokens: List[int] = []
+            for chunk in chunks:
+                chunk_tokens = TinkerDataConverter._get_field(chunk, "tokens")
+                if chunk_tokens is None:
+                    raise ValueError(
+                        "model_input chunk without tokens (non-text chunks are "
+                        "not supported by the miles backend)"
+                    )
+                tokens.extend(chunk_tokens)
+            return tokens
 
         # Try tokens
         tokens = TinkerDataConverter._get_field(model_input, "tokens")
