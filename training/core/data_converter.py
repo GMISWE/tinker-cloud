@@ -112,11 +112,15 @@ class TinkerDataConverter:
                 # Default: all ones (no masking)
                 loss_mask = torch.ones(len(tokens), dtype=torch.float32)
 
+            # Miles convention: the mask covers the response REGION, so
+            # response_length is the mask's length (zeros inside are allowed);
+            # counting nonzeros breaks prompt/response alignment in get_batch.
+            # Causal N-1 trim: response == total yields an empty logit slice
+            # (same handling as the forward_backward RL path).
+            if len(loss_mask) == len(tokens) and len(tokens) > 1:
+                loss_mask = loss_mask[1:]
             loss_masks_list.append(loss_mask)
-
-            # Response length is number of non-zero mask elements
-            response_length = int(loss_mask.sum().item())
-            response_lengths_list.append(response_length)
+            response_lengths_list.append(len(loss_mask))
             # print(f"[CONVERTER DEBUG SFT] Sample {len(loss_masks_list)-1}: loss_mask sum={response_length}, len={len(loss_mask)}", flush=True)
 
         # Build rollout_data with dummy RL fields (not used for forward-only)

@@ -107,7 +107,12 @@ def load_model_config(base_model: str) -> Dict[str, Any]:
                 config, 'rms_norm_eps',
                 getattr(config, 'layer_norm_eps', 1e-6)
             ),
-            'rotary_base': getattr(config, 'rope_theta', 10000),
+            # transformers 5.x moved rope_theta into the rope_parameters dict
+            'rotary_base': (
+                getattr(config, 'rope_theta', None)
+                or (getattr(config, 'rope_parameters', None) or {}).get('rope_theta')
+                or 10000
+            ),
             'tie_word_embeddings': getattr(config, 'tie_word_embeddings', False),
             'max_position_embeddings': getattr(config, 'max_position_embeddings', 2048),
         }

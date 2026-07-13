@@ -473,10 +473,15 @@ class SlimeArgumentBuilder:
             }
 
         # Disable offload_train for simpler GPU memory management
-        # When offload_train=False, must also set train_memory_margin_bytes=0 to avoid assert
+        # When offload_train=False, must also set train_memory_margin_bytes=0 to avoid assert.
+        # Also reset flags parse_args DERIVED from the minimal-args --offload flag,
+        # or actors allocate grad buffers in a torch_memory_saver region without
+        # LD_PRELOAD (only set for offload actors) and crash at init.
         args.offload_train = False
         args.offload_rollout = False
         args.train_memory_margin_bytes = 0
+        args.disable_grad_buffers_cpu_backup = False
+        args.disable_param_buffers_cpu_backup = False
 
         # Tinker seam (miles tinker-seam branch, specs/005 design.md):
         # per-request batch sizes ride the dynamic_global_batch_size rollout key

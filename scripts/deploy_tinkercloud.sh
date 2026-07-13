@@ -276,7 +276,7 @@ fi
 
 # --- 4. in-container setup ---------------------------------------------------
 echo "==> [4/6] running in-container setup (profile=$PROFILE)"
-EX "PROFILE=$PROFILE bash /tmp/setup_container.sh"
+EX "PROFILE=$PROFILE MILES_REPO='${MILES_REPO:-}' MILES_REF='${MILES_REF:-}' bash /tmp/setup_container.sh"
 
 if [ "$RUN_SERVER" = 0 ]; then
   # bionemo profile: env only — no Ray, no server (no working evo2 server yet).
