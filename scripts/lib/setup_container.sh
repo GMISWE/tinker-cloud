@@ -5,6 +5,7 @@
 #
 # PROFILE (env, default nemo_rl) cases the base-image-specific steps:
 #   nemo_rl  overlay RL/nemo_rl, editable-install SDK+cookbook + extra deps.
+#   miles    miles pre-installed in the image; editable-install SDK+cookbook + deps.
 #   bionemo  deploy code + scripts/evo2 only; NO nemo_rl overlay, NO SDK/cookbook
 #            installs (the bionemo image's deps are tightly pinned — don't perturb).
 #   megatron_bridge  build the bionemo-recipes evo2_megatron recipe env
@@ -54,9 +55,14 @@ if [ "$PROFILE" = megatron_bridge ]; then
   exit 0
 fi
 
-# NeMo RL worker overlay onto the image's install (picked up at next create_model)
-PKG=$(python3 -c 'import nemo_rl, os; print(os.path.dirname(nemo_rl.__file__))')
-cp -r /tmp/RL/nemo_rl/. "$PKG/"
+# nemo_rl overlays its worker onto the image's install (picked up at next
+# create_model); miles + its stack are already baked into the miles image.
+if [ "$PROFILE" = nemo_rl ]; then
+  PKG=$(python3 -c 'import nemo_rl, os; print(os.path.dirname(nemo_rl.__file__))')
+  cp -r /tmp/RL/nemo_rl/. "$PKG/"
+elif [ "$PROFILE" = miles ]; then
+  python3 -c 'import miles; print("miles pre-installed OK")'
+fi
 
 # SDK + cookbook editable installs
 mv /tmp/tinker_gmi /work/tinker_gmi
@@ -66,12 +72,13 @@ pip install -e /work/tinker_gmi --no-deps -q
 SETUPTOOLS_SCM_PRETEND_VERSION=${SETUPTOOLS_SCM_PRETEND_VERSION:-0.1.0} \
   pip install -e /work/tinker-cookbook --no-deps -q
 
-# deps missing from the nemo-rl image that --no-deps skips
+# deps missing from the base image that --no-deps skips
 # (distro: SDK; chz/termcolor/blobfile/tiktoken: cookbook;
 #  sympy/pylatexenc/math-verify: math_rl recipe extras)
 pip install -q distro chz termcolor blobfile tiktoken cloudpickle rich anyio \
   'httpx[http2]' sympy pylatexenc math-verify
 
-python3 -c 'import tinker, tinker_cookbook, nemo_rl; print("imports OK")'
+RUNTIME=$([ "$PROFILE" = miles ] && echo miles || echo nemo_rl)
+python3 -c "import tinker, tinker_cookbook, $RUNTIME; print('imports OK')"
 PYTHONPATH=/app python3 -c 'import training; print("training OK")'
 echo SETUP_DONE

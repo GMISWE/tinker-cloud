@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-key deploy of a TinkerCloud dev environment (k8s pod or docker container).
 #
-#   deploy_tinkercloud.sh [--profile nemo_rl|bionemo|megatron_bridge] \
+#   deploy_tinkercloud.sh [--profile nemo_rl|bionemo|megatron_bridge|miles] \
 #                         [--source dev|git] [--target k8s|docker] [--code-only]
 #
 # Profiles (cased by BASE IMAGE — the images ship incompatible stacks)
@@ -16,6 +16,12 @@
 #            evo2_megatron recipe (megatron-bridge v0.4.1) so the megatron_bridge
 #            backend can import megatron.bridge + evo2_classifier. Env only until
 #            that backend lands (stubs today). GPUS=2, master-03.
+#   miles    Miles/Slime backend. Image is the private GMI GAR build of
+#            github.com/GavinZhu-GMI/miles (miles + Megatron/SGLang/TE pre-installed);
+#            overlays only the server code, starts Ray head + `python3 -m training`
+#            (TINKERCLOUD_BACKEND=miles), health-checks :8000. GPUS=4, master-02.
+#            Needs a pull secret for the private image: IMAGE_PULL_SECRET (default
+#            gcp-secret) must exist in namespace $NS.
 #   Per-profile defaults (IMAGE, GPUS, NODE, BACKEND) are overridable by env vars.
 #   See specs/004-bionemo-classification/P5-TINKER-BACKEND.md.
 #
@@ -84,10 +90,24 @@ case "$PROFILE" in
     POD="${POD:-evo2-recipe}"
     CONTAINER="${CONTAINER:-evo2-recipe}"
     RUN_SERVER=0 ;;   # env only until the megatron_bridge backend lands (stubs today)
-  *) echo "unknown --profile $PROFILE (want: nemo_rl | bionemo | megatron_bridge)"; exit 1 ;;
+  miles)
+    # Miles/Slime backend. Miles + its Megatron/SGLang/TE stack are pre-installed
+    # in the GMI base image (built from github.com/GavinZhu-GMI/miles); we overlay
+    # only the tinker-cloud server code. The image is a PRIVATE GAR repo, so the
+    # pod needs an imagePullSecret (IMAGE_PULL_SECRET, default gcp-secret).
+    IMAGE="${IMAGE:-us-west1-docker.pkg.dev/devv-404803/gmi-test-repo/miles_dev-202511120a-dev:latest}"
+    BACKEND="${BACKEND:-miles}"
+    GPUS="${GPUS:-4}"
+    NODE="${NODE:-master-02}"
+    POD="${POD:-tinkercloud-miles}"
+    CONTAINER="${CONTAINER:-tinkercloud-miles}"
+    IMAGE_PULL_SECRET="${IMAGE_PULL_SECRET:-gcp-secret}"
+    RUN_SERVER=1 ;;   # Ray head + `python3 -m training` (TINKERCLOUD_BACKEND=miles)
+  *) echo "unknown --profile $PROFILE (want: nemo_rl | bionemo | megatron_bridge | miles)"; exit 1 ;;
 esac
 
 # --- shared config (IMAGE/GPUS/NODE/POD/CONTAINER/BACKEND set per-profile) --
+IMAGE_PULL_SECRET="${IMAGE_PULL_SECRET:-}"   # non-empty only for private-registry profiles (miles)
 SERVER_LOG="${SERVER_LOG:-/data/server1.log}"
 HF_TOKEN_FILE="${HF_TOKEN_FILE:-}"
 # k8s
@@ -127,6 +147,9 @@ fi
 if [ "$CODE_ONLY" = 0 ]; then
   if [ "$TARGET" = k8s ]; then
     echo "==> [1/6] creating pod $POD on $NODE"
+    # private-registry profiles (miles GAR image) need a pull secret; blank otherwise
+    PULL_SECRET_YAML=""
+    [ -n "$IMAGE_PULL_SECRET" ] && PULL_SECRET_YAML="imagePullSecrets: [{name: $IMAGE_PULL_SECRET}]"
     cat > "$TMP/pod.yaml" <<EOF
 apiVersion: v1
 kind: Pod
@@ -138,6 +161,7 @@ spec:
   nodeName: $NODE          # bypasses scheduler; NoSchedule taints don't block
   restartPolicy: Never
   runtimeClassName: nvidia # MANDATORY: without it vLLM dies (no NVML)
+  $PULL_SECRET_YAML
   tolerations:
   - {key: node.kubernetes.io/unschedulable, operator: Exists, effect: NoSchedule}
   containers:
@@ -280,7 +304,7 @@ echo "==> [6/6] starting API server (log: $SERVER_LOG)"
 EX_TIMEOUT "
 export PYTHONPATH=/app NUM_GPUS=$GPUS RAY_ADDRESS=ray://localhost:10001
 export HF_TOKEN=\$(cat /tmp/hf_token.txt) HF_HOME=/data/.cache/huggingface \
-       TINKER_API_KEY=tml-dev-key TINKERCLOUD_BACKEND=nemo_rl ALLOW_PARTIAL_BATCHES=true
+       TINKER_API_KEY=tml-dev-key TINKERCLOUD_BACKEND=$BACKEND ALLOW_PARTIAL_BATCHES=true
 cd /app && setsid nohup python3 -m training > $SERVER_LOG 2>&1 < /dev/null &
 sleep 2; echo LAUNCHED"
 
