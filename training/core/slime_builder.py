@@ -333,6 +333,21 @@ class SlimeArgumentBuilder:
         args.lora_rank = lora_config.get("rank", 0) if lora_config else 0
         args.lora_alpha = (lora_config.get("alpha") or args.lora_rank) if lora_config else 0
         args.lora_dropout = lora_config.get("dropout", 0.0) if lora_config else 0.0
+        # Megatron module targets from Tinker's train_attn/train_mlp flags
+        # (upstream requires target_modules when LoRA is enabled; unembed LoRA
+        # is not supported by miles' injector).
+        target_modules = []
+        if not lora_config or lora_config.get("train_attn", True):
+            target_modules += ["linear_qkv", "linear_proj"]
+        if not lora_config or lora_config.get("train_mlp", True):
+            target_modules += ["linear_fc1", "linear_fc2"]
+        args.target_modules = target_modules
+        # Upstream only injects megatron-side LoRA adapters on the bridge path
+        # (model.py: is_lora_enabled and megatron_to_hf_mode == "bridge");
+        # without this the model silently builds as full-finetune and LoRA
+        # weight sync to SGLang fails (no lora_A/lora_B params).
+        if args.lora_rank > 0:
+            args.megatron_to_hf_mode = "bridge"
 
         # Parallelism settings - use values from parallel_config (already auto-detected in build_args)
         tp_size = parallel_config.get('tensor_parallel_size', 2)
@@ -420,8 +435,10 @@ class SlimeArgumentBuilder:
         args.rollout_function_path = "miles.rollout.sglang_rollout.generate_rollout"
         args.eval_function_path = "miles.rollout.sglang_rollout.generate_rollout"
 
-        # Dataset configuration (fallback for testing)
-        args.rollout_global_dataset = True
+        # No server-side prompt dataset: Tinker clients drive all training and
+        # sampling data, so RolloutManager must not load one (its data source
+        # raises if the file is missing).
+        args.rollout_global_dataset = False
         args.prompt_data = "/data/datasets/gsm8k_rl.jsonl"
         args.rollout_shuffle = False
         args.rollout_max_prompt_len = 2048

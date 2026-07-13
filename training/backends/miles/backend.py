@@ -265,13 +265,26 @@ class MilesBackend(TrainingBackend):
                     reporting += 1
                     for k, v in loss_dict.items():
                         summed[k] = summed.get(k, 0.0) + float(v)
-            metrics = {k: v / reporting for k, v in summed.items()} if reporting else {}
+            averaged = {k: v / reporting for k, v in summed.items()} if reporting else {}
+            # SDK metric keys carry their cross-chunk reduction as ":<type>"
+            # (chunked_fwdbwd_helpers._metrics_reduction splits on ":").
+            metrics = {f"{k}:mean": v for k, v in averaged.items()}
+
+            # Per-datum response logprobs in client order (the SDK weights its
+            # metric reduction by len(loss_fn_outputs), and the cookbook
+            # computes NLL from these).
+            from miles.ray.tinker_group import merge_dp_sample_outputs
+            logprobs_list = merge_dp_sample_outputs(results or [], key="log_probs")
+            loss_fn_outputs = [
+                {"logprobs": {"data": lp.tolist(), "shape": [len(lp)], "dtype": "float32"}}
+                for lp in logprobs_list
+            ]
 
             return {
                 "loss_fn_output_type": loss_fn,
-                "loss": metrics.get("loss"),
+                "loss": averaged.get("loss"),
                 "metrics": metrics,
-                "loss_fn_outputs": [],
+                "loss_fn_outputs": loss_fn_outputs,
                 "deferred": False,
             }
 
