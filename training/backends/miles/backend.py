@@ -291,16 +291,17 @@ class MilesBackend(TrainingBackend):
     ) -> Dict[str, Any]:
         h: MilesHandle = handle  # type: ignore[assignment]
         try:
-            if learning_rate is not None:
-                await asyncio.to_thread(h.train_group.set_learning_rate, learning_rate)
-
+            # Miles' RayTrainGroup takes the LR as a parameter (no set_learning_rate);
+            # apply_optimizer_step_and_sync = apply_optimizer_step + update_weights.
             offload_train = h.args.offload_train if h.args else True
             offload_rollout = h.args.offload_rollout if h.args else True
 
             if not offload_train and not offload_rollout:
-                results = await asyncio.to_thread(h.train_group.apply_optimizer_step_and_sync)
+                results = await asyncio.to_thread(
+                    h.train_group.apply_optimizer_step_and_sync, learning_rate)
             else:
-                results = await asyncio.to_thread(h.train_group.apply_optimizer_step)
+                results = await asyncio.to_thread(
+                    h.train_group.apply_optimizer_step, learning_rate)
 
                 if h.rollout_manager is not None:
                     from sglang.srt.constants import GPU_MEMORY_TYPE_KV_CACHE, GPU_MEMORY_TYPE_WEIGHTS
