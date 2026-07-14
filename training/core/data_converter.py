@@ -42,8 +42,8 @@ class TinkerDataConverter:
         """
         # Try chunks first. A ModelInput may carry MULTIPLE chunks (the SDK
         # splits inputs); concatenate them all — taking only chunks[0]
-        # silently truncates the sample (specs/005: 4-token tokens vs
-        # 438-token weights crash in the miles loss).
+        # silently truncates the sample (e.g. 4-token tokens vs 438-token
+        # weights, crashing the miles loss on shape mismatch).
         chunks = TinkerDataConverter._get_field(model_input, "chunks")
         if chunks:
             tokens: List[int] = []

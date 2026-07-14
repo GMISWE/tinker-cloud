@@ -1,8 +1,8 @@
 """Miles backend — wraps TinkerTrainGroup/RolloutManager/SlimeArgumentBuilder
 behind the TrainingBackend interface.
 
-Targets the miles `tinker-seam` branch (upstream-based; specs/005 in
-tinker-nemorl): async TinkerTrainGroup fanout, decoupled
+Targets the miles `tinker-seam` branch (upstream-based): async
+TinkerTrainGroup fanout, decoupled
 forward_backward_only / apply_optimizer_step, pure-sum loss via rollout keys
 set in the converter."""
 import asyncio
@@ -256,7 +256,7 @@ class MilesBackend(TrainingBackend):
 
             # Only pipeline-last-stage actors return metrics; average across
             # the DP ranks that did. Per-sample logprobs are not emitted by the
-            # seam's fb pass (specs/005 HANDOFF, open item).
+            # seam's fb pass itself (they ride a separate forward).
             summed: Dict[str, float] = {}
             reporting = 0
             for r in results or []:
