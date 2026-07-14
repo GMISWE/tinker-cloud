@@ -48,7 +48,7 @@ class MilesDataConverter(DataConverter):
 
     @staticmethod
     def _add_tinker_seam_keys(rollout_data: Any, num_samples: int) -> None:
-        """Keys the tinker-seam miles branch consumes (specs/005 design.md).
+        """Keys the tinker-seam miles branch consumes.
 
         - dynamic_global_batch_size: actual request size, so upstream
           get_data_iterator schedules correctly for variable batches.

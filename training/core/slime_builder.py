@@ -329,7 +329,7 @@ class SlimeArgumentBuilder:
 
         # LoRA configuration. alpha defaults to rank per the API schema
         # (requests.py LoraConfig); alpha=0 zeroes LoRA scaling and gradients
-        # entirely — see specs/005-miles-ray-interface/design.md (grad_norm=0).
+        # entirely (the historical grad_norm=0 constant-loss bug).
         args.lora_rank = lora_config.get("rank", 0) if lora_config else 0
         args.lora_alpha = (lora_config.get("alpha") or args.lora_rank) if lora_config else 0
         args.lora_dropout = lora_config.get("dropout", 0.0) if lora_config else 0.0
@@ -500,7 +500,7 @@ class SlimeArgumentBuilder:
         args.disable_grad_buffers_cpu_backup = False
         args.disable_param_buffers_cpu_backup = False
 
-        # Tinker seam (miles tinker-seam branch, specs/005 design.md):
+        # Tinker seam (miles tinker-seam branch):
         # per-request batch sizes ride the dynamic_global_batch_size rollout key
         # (its assert couples this arg to the key's presence), and each actor
         # splits the fanned-out batch by DP rank locally.
