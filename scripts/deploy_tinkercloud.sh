@@ -95,7 +95,7 @@ case "$PROFILE" in
     # in the GMI base image (built from github.com/GavinZhu-GMI/miles); we overlay
     # only the tinker-cloud server code. The image is a PRIVATE GAR repo, so the
     # pod needs an imagePullSecret (IMAGE_PULL_SECRET, default gcp-secret).
-    IMAGE="${IMAGE:-us-west1-docker.pkg.dev/devv-404803/gmi-test-repo/miles_dev-202511120a-dev:latest}"
+    IMAGE="${IMAGE:-us-west1-docker.pkg.dev/devv-404803/gmi-test-repo/miles_tinker_seam:20260715}"
     BACKEND="${BACKEND:-miles}"
     GPUS="${GPUS:-4}"
     NODE="${NODE:-master-02}"
