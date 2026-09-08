@@ -115,8 +115,8 @@ class MilesDataConverter(DataConverter):
 
         # Zeroing these is what makes a pad inert; everything else is copied so
         # the sample stays well-formed (valid token ids, consistent lengths).
-        zero_keys = {"loss_masks", "advantages", "log_probs", "rollout_log_probs",
-                     "returns", "values", "weights"}
+        zero_keys = {"loss_masks", "loss_weights", "advantages", "log_probs",
+                     "rollout_log_probs", "returns", "values", "weights"}
 
         for key, value in list(rollout_data.items()):
             if not (isinstance(value, list) and len(value) == n):

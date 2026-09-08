@@ -98,6 +98,7 @@ class TinkerDataConverter:
         """
         tokens_list = []
         loss_masks_list = []
+        loss_weights_list = []
         response_lengths_list = []
 
         for datum in data:
@@ -113,12 +114,15 @@ class TinkerDataConverter:
             mask = cls._get_field(loss_fn_inputs, "mask")
             weights = cls._get_field(loss_fn_inputs, "weights")
 
+            # loss_mask is Miles' 0/1 response region; client per-token weights
+            # travel beside it as loss_weights (the loss multiplies them in).
+            loss_weights = None
+            if weights is not None:
+                loss_weights = torch.tensor(cls.extract_tensor_data(weights), dtype=torch.float32)
             if mask is not None:
-                mask_data = cls.extract_tensor_data(mask)
-                loss_mask = torch.tensor(mask_data, dtype=torch.float32)
-            elif weights is not None:
-                weights_data = cls.extract_tensor_data(weights)
-                loss_mask = torch.tensor(weights_data, dtype=torch.float32)
+                loss_mask = torch.tensor(cls.extract_tensor_data(mask), dtype=torch.float32)
+            elif loss_weights is not None:
+                loss_mask = (loss_weights != 0).to(torch.float32)
             else:
                 # Default: all ones (no masking)
                 loss_mask = torch.ones(len(tokens), dtype=torch.float32)
@@ -137,7 +141,10 @@ class TinkerDataConverter:
                 tokens_list[-1] = torch.cat([tokens_list[-1], torch.tensor(target_data[-1:], dtype=torch.long)])
             elif len(loss_mask) == len(tokens) and len(tokens) > 1:
                 loss_mask = loss_mask[:-1]  # no target on the wire: the last target is unknowable
+                if loss_weights is not None:
+                    loss_weights = loss_weights[:-1]
             loss_masks_list.append(loss_mask)
+            loss_weights_list.append(loss_weights if loss_weights is not None else torch.ones_like(loss_mask))
             response_lengths_list.append(len(loss_mask))
             # print(f"[CONVERTER DEBUG SFT] Sample {len(loss_masks_list)-1}: loss_mask sum={response_length}, len={len(loss_mask)}", flush=True)
 
@@ -148,6 +155,7 @@ class TinkerDataConverter:
         rollout_data = {
             "tokens": tokens_list,
             "loss_masks": loss_masks_list,
+            "loss_weights": loss_weights_list,
             "response_lengths": response_lengths_list,
             # Dummy fields for compatibility (not used in forward_only)
             "advantages": [torch.zeros(max_len, dtype=torch.float32) for _ in range(batch_size)],
@@ -200,6 +208,7 @@ class TinkerDataConverter:
         # print(f"[CONVERTER DEBUG SFT] forward_backward_to_rollout called with {len(data)} samples, is_rl={is_rl}", flush=True)
         tokens_list = []
         loss_masks_list = []
+        loss_weights_list = []
         response_lengths_list = []
 
         # RL-specific fields
@@ -220,6 +229,7 @@ class TinkerDataConverter:
             return {
                 "tokens": [],
                 "loss_masks": [],
+                "loss_weights": [],
                 "response_lengths": [],
                 "advantages": [] if is_rl else None,
                 "log_probs": [] if is_rl else None,
@@ -255,9 +265,10 @@ class TinkerDataConverter:
                 # (the cookbook's RL datums strip the mask and rely on zero
                 # advantages outside the response).
                 mask = cls._get_field(loss_fn_inputs, "mask")
-                if mask is None:
-                    mask = cls._get_field(loss_fn_inputs, "weights")
-                mask_data = cls.extract_tensor_data(mask) if mask is not None else None
+                weights = cls._get_field(loss_fn_inputs, "weights")
+                weights_data = cls.extract_tensor_data(weights) if weights is not None else None
+                mask_from_weights = mask is None and weights is not None
+                mask_data = cls.extract_tensor_data(mask) if mask is not None else weights_data
 
                 # Step 2: Determine response_len from mask or logprobs
                 if mask_data is not None:
@@ -301,8 +312,14 @@ class TinkerDataConverter:
                 # Step 4: Build per-token tensors (all must have length = response_len)
                 if mask_data is not None:
                     loss_mask = torch.tensor(maybe_trim(mask_data), dtype=torch.float32)
+                    if mask_from_weights:
+                        loss_mask = (loss_mask != 0).to(torch.float32)
                 else:
                     loss_mask = torch.ones(response_len, dtype=torch.float32)
+                if weights_data is not None:
+                    loss_weights_list.append(torch.tensor(maybe_trim(weights_data), dtype=torch.float32))
+                else:
+                    loss_weights_list.append(torch.ones(response_len, dtype=torch.float32))
 
                 if logprobs_data is not None:
                     logprobs_clean = [0.0 if lp is None else float(lp) for lp in logprobs_data]
@@ -376,11 +393,13 @@ class TinkerDataConverter:
                 full_tokens = torch.cat([input_tokens_tensor, target_tensor[-1:]], dim=0)
                 tokens_list[-1] = full_tokens  # Replace the one we added earlier
 
-                loss_mask = torch.tensor(weights_data, dtype=torch.float32)
+                loss_weights = torch.tensor(weights_data, dtype=torch.float32)
+                loss_mask = (loss_weights != 0).to(torch.float32)
                 response_len = len(loss_mask)
 
                 # Append to shared lists
                 loss_masks_list.append(loss_mask)
+                loss_weights_list.append(loss_weights)
                 response_lengths_list.append(response_len)
                 advantages_list.append(torch.zeros(response_len, dtype=torch.float32))
                 log_probs_list.append(torch.zeros(response_len, dtype=torch.float32))
@@ -389,6 +408,7 @@ class TinkerDataConverter:
         rollout_data = {
             "tokens": tokens_list,
             "loss_masks": loss_masks_list,
+            "loss_weights": loss_weights_list,
             "response_lengths": response_lengths_list,
             "advantages": advantages_list,
             "log_probs": log_probs_list,
