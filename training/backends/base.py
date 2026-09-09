@@ -36,6 +36,11 @@ class BackendHandle:
 
     model_id: str
     backend_type: str  # "miles" | "nemo_rl"
+    # Inference-engine context window in tokens: a sample() must satisfy
+    # len(prompt) + max_tokens <= context_length. Each backend fills it at
+    # create_model from the number its engine was actually booted with; None
+    # means unknown and the service skips the check.
+    context_length: Optional[int] = None
 
 
 class TrainingBackend(ABC):
@@ -364,6 +369,15 @@ class TrainingBackend(ABC):
             BackendError: If the engine cannot be made ready.
         """
         ...
+
+
+class SampleRequestError(BackendError):
+    """A sample() request the engine cannot honor as stated (missing max_tokens,
+    prompt + max_tokens past the context window). Terminal: the future fails
+    with this message and the client sees HTTP 400, never an engine crash."""
+
+    def __init__(self, message: str, backend: str):
+        super().__init__(message, backend=backend, operation="sample")
 
 
 class UnsupportedFeatureError(BackendError):

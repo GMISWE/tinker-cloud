@@ -103,6 +103,17 @@ def _model_input_lens(data: List[Any]) -> List[int]:
     return lens
 
 
+def _engine_context_length(hf_path: str) -> Optional[int]:
+    """SGLang is booted without --context-length, so its window is the model's
+    max_position_embeddings; None if the config cannot be read."""
+    try:
+        from ...utils.model_config import load_model_config
+        return int(load_model_config(hf_path)["max_position_embeddings"])
+    except Exception as e:  # noqa: BLE001 - unknown context disables the check, never blocks boot
+        logger.warning("context_length unknown for %s: %s", hf_path, e)
+        return None
+
+
 @dataclass
 class MilesHandle(BackendHandle):
     """Miles-specific runtime state."""
@@ -393,6 +404,7 @@ class MilesBackend(TrainingBackend):
         return MilesHandle(
             model_id=model_id,
             backend_type="miles",
+            context_length=_engine_context_length(pool.hf_path),
             train_group=pool.train_group,
             rollout_manager=pool.rollout_manager,
             placement_group=None,   # pool-owned; freed only at pool teardown
@@ -581,6 +593,7 @@ class MilesBackend(TrainingBackend):
             handle = MilesHandle(
                 model_id=model_id,
                 backend_type="miles",
+                context_length=_engine_context_length(hf_path),
                 train_group=train_group,
                 rollout_manager=rollout_manager,
                 placement_group=pgs,

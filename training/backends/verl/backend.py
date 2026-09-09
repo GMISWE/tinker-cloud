@@ -155,6 +155,8 @@ class VerlBackend(TrainingBackend):
             handle = VerlHandle(
                 model_id=model_id,
                 backend_type="verl",
+                # vLLM max_model_len == rollout prompt_length + response_length
+                context_length=int(cfg["rollout"]["prompt_length"]) + int(cfg["rollout"]["response_length"]),
                 worker_group=boot["worker_group"],
                 resource_pool=boot["resource_pool"],
                 config=cfg,

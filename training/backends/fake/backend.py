@@ -64,6 +64,12 @@ def _datum_parts(datum: Any):
     return datum.model_input, datum.loss_fn_inputs or {}
 
 
+def decode(tokens: List[int]) -> str:
+    """The fake tokenizer: token t renders as its decimal digits, space-joined.
+    Deterministic and invertible, so stop-string tests need no real tokenizer."""
+    return " ".join(str(t) for t in tokens)
+
+
 def logprobs_for(tokens: List[int]) -> List[float]:
     return [-(t % 7) / 7.0 for t in tokens]
 
@@ -105,7 +111,7 @@ class FakeBackend(TrainingBackend):
         if objective != "language_modeling":
             raise BackendError(f"objective {objective!r} unsupported", backend="fake", operation="create_model")
         h = FakeHandle(model_id=model_id, backend_type="fake", base_model=base_model,
-                       lora_config=lora_config, hf_path=base_model)
+                       lora_config=lora_config, hf_path=base_model, context_length=max_seq_len)
         if resume_from:
             self._load_into(h, resume_from)
         self._models[model_id] = h
@@ -192,6 +198,7 @@ class FakeBackend(TrainingBackend):
         max_tokens = int(params.get("max_tokens") or 4)
         seed = params.get("seed")
         stop_ids = set(params.get("stop_token_ids") or [])
+        stop_strs = [str(x) for x in (params.get("stop") or [])]
         self._trace("sample", h.model_id, prompt_len=len(prompt_tokens), num_samples=num_samples,
                     sampling_params=params, prompt_logprobs=prompt_logprobs, pinned_version=pinned_version)
         sequences = []
@@ -200,12 +207,14 @@ class FakeBackend(TrainingBackend):
             toks, stop_reason = [], "length"
             for _ in range(max_tokens):
                 t = rng.randrange(4, 1000)
-                if t in stop_ids:
+                # Contract (API-CONTRACT S4/S5): the token that triggered the stop
+                # is part of the returned sequence, for token ids and strings alike.
+                toks.append(t)
+                if t in stop_ids or (stop_strs and any(ss in decode(toks) for ss in stop_strs)):
                     stop_reason = "stop"
                     break
-                toks.append(t)
             sequences.append({"tokens": toks, "logprobs": logprobs_for(toks),
-                              "text": None, "stop_reason": stop_reason})
+                              "text": decode(toks), "stop_reason": stop_reason})
         out: Dict[str, Any] = {
             "sequences": sequences,
             "prompt_logprobs": ([None] + logprobs_for(prompt_tokens)[1:]) if prompt_logprobs else None,

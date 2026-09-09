@@ -180,7 +180,10 @@ class SamplingParams(BaseModel):
     temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="Sampling temperature")
     top_p: float = Field(default=0.9, gt=0.0, le=1.0, description="Top-p (nucleus) sampling")
     top_k: int = Field(default=50, ge=-1, description="Top-k sampling (-1 for no limit)")
-    max_tokens: int = Field(default=256, ge=1, le=4096, description="Maximum tokens to generate")
+    # Required: the SDK drops a None max_tokens on the wire, and a server default
+    # silently truncated every turn to 256; no cap — the model context is the
+    # only limit, enforced per request (SampleRequestError) against the engine.
+    max_tokens: int = Field(..., ge=1, description="Maximum tokens to generate (required)")
     stop: Optional[List[str]] = Field(default=None, description="Stop sequences")
     stop_token_ids: Optional[List[int]] = Field(default=None, description="Stop token IDs")
     # SDK SamplingParams carries seed; without this field pydantic silently
