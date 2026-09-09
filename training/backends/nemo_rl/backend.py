@@ -44,7 +44,7 @@ class NemoRLHandle(BackendHandle):
     cluster: Any = None              # RayVirtualCluster
     config: Dict = field(default_factory=dict)   # Full config dict
     tokenizer: Any = None            # HuggingFace tokenizer
-    loss_fn: Any = None              # ClippedPGLossFn instance (RL)
+    loss_fn: Any = None              # TinkerSumPGLoss instance (RL)
     data_buffer: List = field(default_factory=list)  # R9 buffering
     max_buffer_size: int = DEFAULT_MAX_BUFFER_SIZE  # CHK006: bound buffer growth
     _buffer_lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # CHK018: thread safety
@@ -74,7 +74,7 @@ class NemoRLHandle(BackendHandle):
 
 
 class NemoRLBackend(TrainingBackend):
-    # TinkerSumCELoss / ClippedPGLossFn; cispo and dro have no NeMo RL loss.
+    # TinkerSumCELoss / TinkerSumPGLoss; cispo and dro have no NeMo RL loss.
     SUPPORTED_LOSS_FNS = frozenset({"cross_entropy", "importance_sampling", "ppo"})
     """
     NeMo RL backend — uses Policy.train() push-mode API.
@@ -552,32 +552,11 @@ class NemoRLBackend(TrainingBackend):
                         # call, so the BUG-005 invariant already holds.
                         phases["prepare"] = 0.0
 
-                    # BUG-011 fix: For RL loss functions, recompute prev_logprobs
-                    # using DTensor forward pass (like native GRPO grpo.py:1530-1532).
-                    # vLLM generation logprobs differ from DTensor logprobs (different
-                    # precision/kernels), causing IS ratio ~0.003 instead of ~1.0.
-                    # By computing prev_logprobs here with the same DTensor path used
-                    # for curr_logprobs during training, the ratio starts at ~1.0.
-                    # A4: only legal at staleness 0 — the recompute uses CURRENT
-                    # policy weights, so under a staleness declaration it would
-                    # silently erase the off-policy correction (the sampler's own
-                    # logprobs ARE the behavior policy; keep them).
-                    if h.loss_fn_name != "cross_entropy" and "prev_logprobs" in all_data:
-                        if h.staleness_k == 0:
-                            logger.info("Computing prev_logprobs via DTensor forward pass (BUG-011)")
-                            _ensure_dyn_mb_budget(h, all_data)
-                            logprob_result = await asyncio.to_thread(
-                                h.policy.get_logprobs, all_data,
-                            )
-                            if hasattr(logprob_result, "get") and logprob_result.get("logprobs") is not None:
-                                all_data["prev_logprobs"] = logprob_result["logprobs"]
-                                logger.info("prev_logprobs replaced with DTensor-computed values")
-                        else:
-                            logger.info(
-                                "staleness_k=%d: keeping sampler-provided prev_logprobs "
-                                "(behavior-policy version; BUG-011 recompute skipped)",
-                                h.staleness_k,
-                            )
+                    # The ratio's denominator is the client's sampling logprobs
+                    # (Tinker contract). The earlier BUG-011 recompute against the
+                    # current weights forced ratio == 1 and dropped the
+                    # train/sample mismatch; the ~0.003 ratio it masked was the
+                    # BUG-012 alignment defect, fixed in the converter.
 
                     if h.loss_fn_name == "cross_entropy":
                         # Pure-sum CE (Tinker contract), not NeMo RL's mean-normalized
@@ -587,17 +566,17 @@ class NemoRLBackend(TrainingBackend):
                         from .losses import TinkerSumCELoss
                         active_loss_fn = TinkerSumCELoss()
                     elif h.loss_fn_name == "ppo" and step_loss_config:
-                        # Per-call clip range: rebuild the clipped-PG loss from the
+                        # Per-call clip range: rebuild the pure-sum PG loss from the
                         # create-time config with the client's thresholds.
-                        from nemo_rl.algorithms.loss_functions import ClippedPGLossFn
+                        from .losses import TinkerSumPGLoss
                         low, high = clip_thresholds(step_loss_config)
-                        active_loss_fn = ClippedPGLossFn({
+                        active_loss_fn = TinkerSumPGLoss({
                             **h.config["loss_fn"],
                             "ratio_clip_min": 1.0 - low,
                             "ratio_clip_max": high - 1.0,
                         })
                     else:
-                        active_loss_fn = h.loss_fn  # ClippedPGLossFn (RL)
+                        active_loss_fn = h.loss_fn  # TinkerSumPGLoss (importance_sampling)
 
                     # Pass gbs=actual size so NeMo RL shards correctly instead of
                     # defaulting to config train_global_batch_size.
@@ -672,6 +651,14 @@ class NemoRLBackend(TrainingBackend):
                             )
                             h.generation_state = "generation_ready"
 
+            # The worker records each microbatch loss after `loss *= dp*cp` (which
+            # only cancels FSDP's mean-reduce for the backward) and all-reduces by
+            # sum, so its global_loss is dp*cp times the batch loss. Report the
+            # batch loss, which the API defines as the sum over the datums.
+            _scale = h.config.get("dp_size", 1) * h.config.get("policy", {}).get(
+                "dtensor_cfg", {}).get("context_parallel_size", 1)
+            if isinstance(train_result, dict) and train_result.get("loss") is not None and _scale > 1:
+                train_result["loss"] = train_result["loss"] / _scale
             result = self.converter.backend_to_forward_backward_result(
                 train_result, [], loss_fn=h.loss_fn_name,
             )
@@ -1130,8 +1117,8 @@ def _init_nemo_rl_components(
     import ray
     from nemo_rl.distributed.virtual_cluster import RayVirtualCluster
     from nemo_rl.models.policy.lm_policy import Policy
-    from nemo_rl.algorithms.loss_functions import ClippedPGLossFn
     from nemo_rl.algorithms.utils import get_tokenizer
+    from .losses import TinkerSumPGLoss
 
     policy_config = config_dict["policy"]
     loss_fn_config = config_dict["loss_fn"]
@@ -1151,7 +1138,7 @@ def _init_nemo_rl_components(
     tokenizer_config = {"name": model_name}
     tokenizer = get_tokenizer(tokenizer_config)
 
-    loss_fn = ClippedPGLossFn(loss_fn_config)
+    loss_fn = TinkerSumPGLoss(loss_fn_config)
 
     policy_generation = None
     if not debug_train_only:
@@ -1285,6 +1272,14 @@ def _wake_generation_stale(policy, policy_generation, colocated_inference: bool)
         policy_generation.prepare_for_generation()
 
 
+def _applied_grad_clip(max_grad_norm) -> float:
+    """The clip the API sees: 0.0 (off) when the worker bound cannot bind."""
+    from .loss_config import NO_GRAD_CLIP
+    if max_grad_norm is None or float(max_grad_norm) >= NO_GRAD_CLIP:
+        return 0.0
+    return float(max_grad_norm)
+
+
 def _warn_on_adam_mismatch(h: "NemoRLHandle", adam_params: Dict[str, Any]) -> None:
     """P4: compare client-requested Adam params against the applied config.
 
@@ -1300,7 +1295,7 @@ def _warn_on_adam_mismatch(h: "NemoRLHandle", adam_params: Dict[str, Any]) -> No
         "beta2": kwargs.get("betas", [0.9, 0.95])[1],
         "eps": kwargs.get("eps", 1e-8),
         "weight_decay": kwargs.get("weight_decay", 0.0),
-        "grad_clip_norm": h.config.get("policy", {}).get("max_grad_norm", 1.0),
+        "grad_clip_norm": _applied_grad_clip(h.config.get("policy", {}).get("max_grad_norm")),
     }
     mismatches = {
         k: (v, applied[k]) for k, v in adam_params.items()

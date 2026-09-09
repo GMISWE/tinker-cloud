@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 from ..base import ArgumentBuilder
 from .config import NemoRLConfig
 from ...utils.model_config import detect_num_gpus
+from .loss_config import NO_GRAD_CLIP, TINKER_PG_LOSS_DEFAULTS
 
 logger = logging.getLogger(__name__)
 
@@ -212,7 +213,11 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
             "precision": "bfloat16",
             "max_total_sequence_length": max_seq_len,
             "make_sequence_length_divisible_by": 1,
-            "max_grad_norm": 1.0,
+            # AdamParams.grad_clip_norm defaults to 0 (off); NeMo RL bakes the
+            # clip at model creation, so the default must be the API's default.
+            # A bound that cannot bind, not None: with None the worker skips the
+            # norm entirely and reports grad_norm 0.0, an observation key.
+            "max_grad_norm": NO_GRAD_CLIP,
             "offload_optimizer_for_logprob": False,
             # Use DTensor V2 backend (recommended by NeMo RL)
             "dtensor_cfg": {
@@ -422,23 +427,9 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
                 },
             }
 
-        # Loss function config (ClippedPGLossConfig for GRPO/PPO)
-        loss_fn_config = {
-            "reference_policy_kl_penalty": 0.001,
-            "reference_policy_kl_type": "k1",
-            "kl_input_clamp_value": None,
-            "kl_output_clamp_value": None,
-            "ratio_clip_min": 0.2,
-            "ratio_clip_max": 0.2,
-            "ratio_clip_c": None,
-            "use_on_policy_kl_approximation": False,
-            "use_importance_sampling_correction": False,
-            "truncated_importance_sampling_ratio": None,
-            "token_level_loss": True,
-            "sequence_level_importance_ratios": False,
-            "disable_ppo_ratio": False,
-            "force_on_policy_ratio": False,
-        }
+        # Loss function config: Tinker's importance_sampling (no clip, no KL);
+        # the ppo path swaps in the client's clip bounds per call.
+        loss_fn_config = dict(TINKER_PG_LOSS_DEFAULTS)
 
         if rl_config:
             if "kl_penalty_coef" in rl_config:
