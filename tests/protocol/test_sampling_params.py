@@ -43,5 +43,7 @@ def test_stop_token_ends_generation(service_client, server):
     stop_id = free.sequences[0].tokens[2]
     stopped = sc.sample(prompt=prompt, num_samples=1,
                         sampling_params=types.SamplingParams(max_tokens=8, seed=1, stop=[stop_id])).result()
-    assert stopped.sequences[0].tokens == free.sequences[0].tokens[:2]
+    # the stop token itself is returned (API-CONTRACT S5): free[:3] ends with stop_id
+    assert stopped.sequences[0].tokens == free.sequences[0].tokens[:3]
+    assert stopped.sequences[0].tokens[-1] == stop_id
     assert stopped.sequences[0].stop_reason == "stop"

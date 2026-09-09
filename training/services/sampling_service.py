@@ -15,6 +15,29 @@ from ..backends.base import BackendHandle, TrainingBackend
 logger = logging.getLogger(__name__)
 
 
+
+def _check_sample_request(handle, prompt_tokens, sampling_params) -> None:
+    """Typed rejection before the engine sees the request.
+
+    `max_tokens` must be stated (pydantic already requires it when
+    sampling_params is present; this covers an absent sampling_params), and
+    prompt + max_tokens must fit the engine context the backend recorded on
+    its handle at create_model. Unknown context (None) is not checked.
+    """
+    from ..backends.base import SampleRequestError
+
+    backend = getattr(handle, "backend_type", "?")
+    max_tokens = (sampling_params or {}).get("max_tokens")
+    if max_tokens is None:
+        raise SampleRequestError("sampling_params.max_tokens is required", backend=backend)
+    ctx = getattr(handle, "context_length", None)
+    if ctx is not None and len(prompt_tokens) + int(max_tokens) > ctx:
+        raise SampleRequestError(
+            f"prompt_len {len(prompt_tokens)} + max_tokens {int(max_tokens)} = "
+            f"{len(prompt_tokens) + int(max_tokens)} exceeds the model context {ctx}",
+            backend=backend,
+        )
+
 class SamplingService:
     """Service for model sampling via the backend's inference engine."""
 
@@ -64,6 +87,7 @@ class SamplingService:
             BackendError: If the inference engine is unavailable
         """
         handle = self._resolve_handle(training_clients, model_id)
+        _check_sample_request(handle, prompt_tokens, sampling_params)
         logger.info(f"[{request_id}] Async sampling for {handle.model_id}")
         return await self.backend.sample(
             handle=handle,
@@ -95,6 +119,7 @@ class SamplingService:
 
         all_sequences = []
         for prompt_tokens in prompts:
+            _check_sample_request(handle, prompt_tokens, sampling_params)
             result = await self.backend.sample(
                 handle=handle,
                 request_id=request_id,

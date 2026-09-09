@@ -168,6 +168,8 @@ class NemoRLBackend(TrainingBackend):
             handle = NemoRLHandle(
                 model_id=model_id,
                 backend_type="nemo_rl",
+                # vLLM max_model_len == policy max_total_sequence_length (GAP-003)
+                context_length=(config_dict.get("policy") or {}).get("max_total_sequence_length"),
                 policy=policy,
                 policy_generation=policy_generation,
                 cluster=cluster,
