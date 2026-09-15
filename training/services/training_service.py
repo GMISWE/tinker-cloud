@@ -24,8 +24,8 @@ class TrainingService:
         self.backend = backend
 
     def _check_loss_supported(self, loss_fn: str) -> None:
-        supported = getattr(self.backend, "SUPPORTED_LOSS_FNS", None)
-        if supported is not None and loss_fn not in supported:
+        supported = self.backend.SUPPORTED_LOSS_FNS
+        if loss_fn not in supported:
             raise UnsupportedFeatureError(
                 f"loss_fn {loss_fn!r}", backend=type(self.backend).__name__,
                 suggestion=f"this backend supports: {', '.join(sorted(supported))}",

@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 def _dp_size(args: Any) -> int:
     """Data-parallel width the actors will split a batch across."""
-    return int(getattr(args, "data_parallel_size", 1) or 1)
+    return int(args.data_parallel_size)
 
 
 def _adapter_save_dir(native_root: Optional[Path], adapter_name: str) -> Path:
@@ -68,7 +68,7 @@ def _publish_native_adapter(args, root: str) -> None:
     mtime; the numeric iter suffix is miles' own counter, monotone per save)
     and export it. Runs under the handle's lock right after save_model, so
     newest-mtime is the one this save produced."""
-    save_root = getattr(args, "save", None) if args else None
+    save_root = args.save
     if not save_root or not os.path.isdir(save_root):
         logger.warning("No miles save root at %r; skipping interchange publish", save_root)
         return
@@ -141,7 +141,6 @@ class MilesHandle(BackendHandle):
     # snapshots it (routers/checkpoints.py) so a sampler saved before any
     # step pins v0. v0 == base model only for fresh-init LoRA (B=0 at init),
     # hence created_from_checkpoint gates the v0->base sampling route.
-    weight_version: int = 0
     created_from_checkpoint: bool = False
     # Serializes GPU-bound ops per model. The task manager runs request
     # handlers as concurrent asyncio tasks; without this, pipelined
@@ -499,7 +498,7 @@ class MilesBackend(TrainingBackend):
             # (orphaned PGs starve every later create_model until a rotation).
             _cleanup["pgs"] = pgs
 
-            multi_lora = bool(getattr(args, "multi_lora", False))
+            multi_lora = bool(args.multi_lora)
             if multi_lora and debug_train_only:
                 raise BackendError(
                     "Multi-LoRA pool mode requires rollout engines (adapter "
@@ -648,7 +647,7 @@ class MilesBackend(TrainingBackend):
                     from .e0_registry import resolve_e0
                     res = resolve_e0(
                         base_model,
-                        tp=int(getattr(args, "tensor_model_parallel_size", 1) or 1),
+                        tp=int(args.tensor_model_parallel_size),
                         dp=_dp_size(args),
                         override=self.config.cobatch_e0_tokens,
                     )
@@ -1002,7 +1001,7 @@ class MilesBackend(TrainingBackend):
 
         is_rl = not h.args.debug_train_only
         config = get_config()
-        allow_partial = getattr(config, "allow_partial_batches", False)
+        allow_partial = config.allow_partial_batches
         validator = RequestValidator(h.args, allow_partial_batches=allow_partial)
         # Validate what will actually be DISPATCHED, not what arrived: the
         # converter pads the batch up to a multiple of dp before it reaches the
@@ -1491,7 +1490,7 @@ class MilesBackend(TrainingBackend):
         sequences = []
         prompt_logprobs_result = None
         base_params = dict(sampling_params or {})
-        if base_params.get("seed") is not None and not getattr(h.args, "sglang_enable_deterministic_inference", False):
+        if base_params.get("seed") is not None and not h.args.sglang_enable_deterministic_inference:
             if not getattr(h, "_seed_warned", False):
                 h._seed_warned = True
                 logger.warning(

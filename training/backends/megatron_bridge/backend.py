@@ -213,7 +213,7 @@ class MegatronBridgeBackend(TrainingBackend):
 
 
 def _objective(handle: BackendHandle) -> str:
-    return getattr(handle, "objective", Objective.SEQUENCE_CLASSIFICATION.value)
+    return handle.objective
 
 
 def _no_generation(operation: str) -> BackendError:

@@ -38,7 +38,6 @@ class FakeHandle(BackendHandle):
     lora_config: Optional[Dict[str, Any]] = None
     hf_path: str = ""
     w: float = 0.0
-    weight_version: int = 0
     step_count: int = 0
     pending: int = 0
     metrics: Dict[str, Any] = field(default_factory=dict)

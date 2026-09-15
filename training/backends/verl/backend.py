@@ -52,7 +52,6 @@ class VerlHandle(BackendHandle):
     hf_path: str = ""
     dp_size: int = 1
     loss_fn_name: str = ""            # currently installed loss fn on workers
-    weight_version: int = 0
     created_at: str = ""
     # M2 rollout state (hybrid timeshare)
     has_rollout: bool = False

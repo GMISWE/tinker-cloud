@@ -41,6 +41,8 @@ class BackendHandle:
     # create_model from the number its engine was actually booted with; None
     # means unknown and the service skips the check.
     context_length: Optional[int] = None
+    # Optimizer steps applied since create; pins samplers and checkpoint records.
+    weight_version: int = 0
 
 
 class TrainingBackend(ABC):
