@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, Generic, List, Optional, TypeVar
 
 from ..models.requests import Datum
+from .env_config import EnvConfig
 
 
 class BackendError(Exception):
@@ -45,6 +46,9 @@ class BackendHandle:
     context_length: Optional[int] = None
     # Optimizer steps applied since create; pins samplers and checkpoint records.
     weight_version: int = 0
+    # HF model directory the engine loaded (tokenizer source for get_tokenizer_info);
+    # empty for backends that resolve no HF checkpoint.
+    hf_path: str = ""
 
 
 # Each backend's handle subclass: a backend only ever receives the handles its
@@ -66,6 +70,8 @@ class TrainingBackend(ABC, Generic[H]):
 
     # False for in-process backends (no Ray actors); the server then skips ray.init.
     needs_ray: bool = True
+    # The backend's declared env knobs (logged at startup); None: it has none.
+    config: Optional[EnvConfig] = None
     # Loss names (core.loss_registry) this backend can train; TrainingService
     # rejects others with UnsupportedFeatureError before any GPU work.
     SUPPORTED_LOSS_FNS: FrozenSet[str] = frozenset()

@@ -9,14 +9,13 @@ Handles:
 All model lifecycle operations delegate to the TrainingBackend instance.
 """
 import logging
-import ray
 from datetime import datetime
 from typing import Dict, Any, Optional
 
 from ..backends.base import TrainingBackend
 from ..checkpoints import CheckpointStore
 from ..storage import MetadataStorage
-from ..utils.model_config import extract_model_name, detect_architecture, detect_num_gpus
+from ..utils.model_config import detect_architecture, detect_num_gpus
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +89,7 @@ class ModelService:
         )
 
         # Save metadata
-        hf_path = getattr(handle, "hf_path", "")
+        hf_path = handle.hf_path
         training_run_id = model_id
         metadata = {
             "training_run_id": model_id,
@@ -116,24 +115,16 @@ class ModelService:
         metadata_storage.save_training_run(model_id, metadata)
         training_runs_metadata[model_id] = metadata
 
-        # Store client info — includes backend handle + legacy fields from handle
-        # for backward compat with routers that read train_group/args/etc.
+        # Backend-agnostic record; engine state stays behind the handle.
         client_info = {
             "backend_handle": handle,
             "training_run_id": training_run_id,
             "hf_path": hf_path,
             "base_model": base_model,
             "lora_config": lora_config,
-            "router_ip": getattr(handle, "router_ip", None),
-            "router_port": getattr(handle, "router_port", None),
             "rlve_config": rlve_config,
             "wandb_config": wandb_config,
             "created_at": datetime.now().isoformat(),
-            # Legacy Miles fields — populated from handle for router compat
-            "train_group": getattr(handle, "train_group", None),
-            "rollout_manager": getattr(handle, "rollout_manager", None),
-            "placement_group": getattr(handle, "placement_group", None),
-            "args": getattr(handle, "args", None),
         }
         training_clients[model_id] = client_info
 
@@ -156,14 +147,7 @@ class ModelService:
             raise KeyError(f"Model {model_id} not found")
 
         client_info = training_clients[model_id]
-        handle = client_info.get("backend_handle")
-
-        if handle is not None:
-            await self.backend.delete_model(handle)
-        else:
-            # Legacy fallback (should not happen after Phase 2)
-            logger.warning("No backend handle for %s — using legacy cleanup", model_id)
-            self._legacy_delete(client_info)
+        await self.backend.delete_model(client_info["backend_handle"])
 
         del training_clients[model_id]
         # ephemeral sampler records die with the model; persistent checkpoints
@@ -183,20 +167,6 @@ class ModelService:
             "resources_freed": ["backend_resources"],
         }
 
-    @staticmethod
-    def _legacy_delete(client_info: Dict[str, Any]) -> None:
-        """Fallback cleanup for pre-backend client_info dicts."""
-        train_group = client_info.get("train_group")
-        if train_group:
-            for actor in train_group._actor_handlers:
-                ray.kill(actor, no_restart=True)
-        rm = client_info.get("rollout_manager")
-        if rm is not None:
-            ray.kill(rm, no_restart=True)
-        pg = client_info.get("placement_group")
-        if pg is not None:
-            ray.util.remove_placement_group(pg)
-
     def get_model_info(
         self,
         model_id: str,
@@ -207,15 +177,13 @@ class ModelService:
             raise KeyError(f"Model {model_id} not found")
 
         client_info = training_clients[model_id]
-        args = client_info.get("args")
 
-        # Backend-agnostic: the LoRA shape is what the client asked for at create time.
+        # Backend-agnostic: the LoRA shape and model name are what the client
+        # asked for at create time (the engine's local checkpoint path is not
+        # the client's business).
         lora_rank = int((client_info.get("lora_config") or {}).get("rank") or 0)
         is_lora = lora_rank > 0
-        if args is not None:
-            model_name = extract_model_name(args)
-        else:
-            model_name = client_info.get("base_model", "unknown")
+        model_name = client_info["base_model"]
         arch = detect_architecture(model_name)
 
         return {

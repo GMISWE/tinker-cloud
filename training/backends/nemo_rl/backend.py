@@ -49,7 +49,6 @@ class NemoRLHandle(BackendHandle):
     data_buffer: List = field(default_factory=list)  # R9 buffering
     max_buffer_size: int = DEFAULT_MAX_BUFFER_SIZE  # CHK006: bound buffer growth
     _buffer_lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # CHK018: thread safety
-    hf_path: str = ""
     image_preprocessor: Any = None   # ImagePreprocessor (VLM only)
     colocated_inference: bool = True
     refit_memory_ratio: float = 0.3      # share of free GPU memory for the IPC refit buffer
@@ -75,6 +74,7 @@ class NemoRLHandle(BackendHandle):
 
 
 class NemoRLBackend(TrainingBackend[NemoRLHandle]):
+    config: NemoRLConfig
     # TinkerSumCELoss / TinkerSumPGLoss; cispo and dro have no NeMo RL loss.
     SUPPORTED_LOSS_FNS = frozenset({"cross_entropy", "importance_sampling", "ppo"})
     """

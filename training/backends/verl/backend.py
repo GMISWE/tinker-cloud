@@ -50,7 +50,6 @@ class VerlHandle(BackendHandle):
     worker_group: Any = None          # RayWorkerGroup over Tinker*Worker
     resource_pool: Any = None         # RayResourcePool
     config: Dict = field(default_factory=dict)
-    hf_path: str = ""
     dp_size: int = 1
     loss_fn_name: str = ""            # currently installed loss fn on workers
     created_at: str = ""

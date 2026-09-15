@@ -116,7 +116,6 @@ class MilesHandle(BackendHandle):
     rollout_manager: Any = None       # RolloutManager (None for SFT)
     placement_group: Any = None       # Ray PlacementGroup
     args: Any = None                  # Megatron Namespace
-    hf_path: str = ""
     router_ip: Optional[str] = None
     router_port: Optional[int] = None
     rlve_config: Optional[Dict[str, Any]] = None
@@ -154,7 +153,7 @@ class _PoolOp:
     run their closure; 'stop' ends the dispatcher."""
 
     kind: str                                   # "fb" | "other" | "stop"
-    future: Optional[asyncio.Future] = None
+    future: asyncio.Future = field(default_factory=lambda: asyncio.get_running_loop().create_future())
     run: Any = None                             # "other": async closure
     tenant: Optional[str] = None                # model_id; None = barrier op
     # fb fields:
@@ -233,6 +232,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
     # sft_loss / policy_loss; PPO clip range is a boot-time Megatron arg (see forward_backward).
     SUPPORTED_LOSS_FNS = frozenset({"cross_entropy", "importance_sampling", "ppo"})
     """Thin adapter over existing Miles integration code (model_service.py / training_service.py)."""
+    config: MilesConfig
 
     def __init__(self, overrides: Optional[Dict[str, Any]] = None):
         self.overrides = overrides or {}
@@ -500,7 +500,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
                     backend="miles", operation="create_model",
                 )
 
-            rollout_manager = None
+            rollout_manager: Any = None   # RolloutManager actor; None only for debug_train_only
             router_ip = None
             router_port = None
             if not debug_train_only:
@@ -719,7 +719,6 @@ class MilesBackend(TrainingBackend[MilesHandle]):
             raise BackendError(
                 "pool dispatcher not running", backend="miles", operation="pool",
             )
-        op.future = asyncio.get_running_loop().create_future()
         pool.queue.put_nowait(op)
         return await op.future
 
@@ -761,11 +760,11 @@ class MilesBackend(TrainingBackend[MilesHandle]):
                 op = await pool.queue.get()
             if op.kind == "stop":
                 for p in pending:         # drain deferred before stopping
-                    if p.future is not None and not p.future.done():
+                    if not p.future.done():
                         p.future.set_exception(
                             BackendError("pool stopped", backend="miles", operation="pool")
                         )
-                if op.future is not None and not op.future.done():
+                if not op.future.done():
                     op.future.set_result(None)
                 return
             if op.kind == "other":
@@ -829,7 +828,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
                         o.future.set_result(r)
             except Exception as e:  # noqa: BLE001 — surfaced via the futures
                 for o in batch:
-                    if o.future is not None and not o.future.done():
+                    if not o.future.done():
                         o.future.set_exception(e)
 
     async def _execute_fb_batch(self, pool: MilesPool, batch: List[_PoolOp]) -> List[Dict[str, Any]]:
