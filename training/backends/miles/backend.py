@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 import ray
 
 from ..base import BackendError, BackendHandle, TrainingBackend, UnsupportedFeatureError
-from .config import MilesConfig
+from .config import NO_CLIP_EPS_HIGH, MilesConfig
 from ...core.loss_registry import clip_thresholds
 from ...checkpoints.interchange import export_hf_adapter
 from .model_setup import record_native_checkpoint, resolve_native_checkpoint
@@ -208,19 +208,30 @@ class MilesPool:
     cobatch_e0_tokens: int = 512
 
 
+def _boot_clip_range(args) -> tuple:
+    return 1.0 - args.eps_clip, 1.0 + args.eps_clip_high
+
+
 def _check_miles_clip_config(h: "MilesHandle", loss_fn: str, loss_fn_config: Optional[Dict[str, float]]) -> None:
-    """Megatron reads eps_clip / eps_clip_high once at actor boot; a per-call
-    clip range is honoured only if it is exactly that range."""
-    if loss_fn != "ppo" or not loss_fn_config or h.args is None:
+    """eps_clip is read once at actor boot and both RL losses share the clamp:
+    importance_sampling needs a range that cannot bind, ppo exactly the call's range."""
+    if loss_fn not in ("importance_sampling", "ppo"):
         return
+    boot_low, boot_high = _boot_clip_range(h.args)
+    if loss_fn == "importance_sampling":
+        if boot_low <= 0.0 and boot_high >= 1.0 + NO_CLIP_EPS_HIGH:
+            return
+        raise UnsupportedFeatureError(
+            "importance_sampling on a clipped actor group", backend="miles",
+            suggestion=f"booted with clip ({boot_low:g}, {boot_high:g}); unset SLIME_EPS_CLIP / "
+                       "SLIME_EPS_CLIP_HIGH before create_model (default boot is unclipped)",
+        )
     low, high = clip_thresholds(loss_fn_config)
-    boot_low = 1.0 - float(getattr(h.args, "eps_clip", 0.2))
-    boot_high = 1.0 + float(getattr(h.args, "eps_clip_high", getattr(h.args, "eps_clip", 0.2)))
     if abs(low - boot_low) > 1e-9 or abs(high - boot_high) > 1e-9:
         raise UnsupportedFeatureError(
             f"ppo clip thresholds ({low}, {high})", backend="miles",
             suggestion=f"this actor group was booted with ({boot_low:g}, {boot_high:g}); "
-                       "set SLIME_EPS_CLIP / SLIME_EPS_CLIP_HIGH before create_model",
+                       f"set SLIME_EPS_CLIP={1 - low:g} SLIME_EPS_CLIP_HIGH={high - 1:g} before create_model",
         )
 
 
