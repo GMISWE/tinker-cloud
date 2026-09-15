@@ -62,7 +62,6 @@ class NemoRLHandle(BackendHandle):
     generation_state: str = "generation_ready"  # "generation_ready" | "training_ready"
     _generation_state_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _training_lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # Serialize optim_step GPU lifecycle
-    weight_version: int = 0              # Optim steps applied; BUG-015 sampler pinning
     ref_logprob_accumulator: Any = None  # Lazy _RefLogprobAccumulator (BUG-015)
     staleness_k: int = 0                 # Declared max sampler staleness (A4, specs/012)
     generation_synced_version: int = 0   # ver(S): weight version the inference engine holds

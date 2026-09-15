@@ -63,7 +63,6 @@ class TestSingleTenantNativePublish:
             save = str(tmp_path / "nonexistent")
 
         _publish_native_adapter(Args(), str(tmp_path / "ckpt"))
-        _publish_native_adapter(None, str(tmp_path / "ckpt"))
         assert not os.path.exists(os.path.join(tmp_path / "ckpt", ci.HF_ADAPTER_DIRNAME))
 
 

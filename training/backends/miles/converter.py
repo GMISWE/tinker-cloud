@@ -54,7 +54,7 @@ class MilesDataConverter(DataConverter):
         adapter_slot: Any = None,
     ) -> Any:
         """Convert Tinker data to Miles rollout_data for training."""
-        is_rl = not getattr(args, "debug_train_only", False)
+        is_rl = not args.debug_train_only
         rollout_data = self._inner.forward_backward_to_rollout(data, is_rl=is_rl)
         self._add_tinker_seam_keys(rollout_data, len(data), adapter_slot=adapter_slot)
         # Per-request loss selection (upstream dispatches on args.loss_type at
