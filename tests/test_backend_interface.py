@@ -241,6 +241,22 @@ class TestSamplingContract:
         with pytest.raises(BackendError, match="generation engine not initialized"):
             asyncio.run(backend.prepare_for_generation(handle))
 
+    @pytest.mark.skipif(not HAS_NEMO_RL, reason="nemo_rl not installed")
+    def test_nemo_rl_configless_ppo_clips_at_contract_defaults(self):
+        from tinkercloud.training.backends.nemo_rl.backend import NemoRLHandle, _step_loss_fn
+        from tinkercloud.training.backends.nemo_rl.loss_config import TINKER_PG_LOSS_DEFAULTS
+        from tinkercloud.training.backends.nemo_rl.losses import TinkerSumPGLoss
+        h = NemoRLHandle(model_id="t", backend_type="nemo_rl",
+                         config={"loss_fn": dict(TINKER_PG_LOSS_DEFAULTS)},
+                         loss_fn=TinkerSumPGLoss(TINKER_PG_LOSS_DEFAULTS), loss_fn_name="ppo")
+        fn = _step_loss_fn(h, None)
+        assert fn is not h.loss_fn
+        assert (fn.ratio_clip_min, fn.ratio_clip_max) == pytest.approx((0.2, 0.2))
+        fn = _step_loss_fn(h, {"clip_low_threshold": 0.9, "clip_high_threshold": 1.3})
+        assert (fn.ratio_clip_min, fn.ratio_clip_max) == pytest.approx((0.1, 0.3))
+        h.loss_fn_name = "importance_sampling"
+        assert _step_loss_fn(h, None) is h.loss_fn
+
     def test_nemo_rl_delete_model_drops_accumulator(self):
         from tinkercloud.training.backends.nemo_rl.backend import NemoRLBackend, NemoRLHandle
         from tinkercloud.training.backends.nemo_rl.generation import NemoRLBatchAccumulator
