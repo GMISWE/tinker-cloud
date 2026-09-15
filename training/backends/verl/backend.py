@@ -361,7 +361,7 @@ class VerlBackend(TrainingBackend):
                     try:
                         ray.kill(server)
                     except Exception:
-                        pass
+                        logger.warning("delete_model: rollout server %r not killed", server, exc_info=True)
             h.llm_manager = None
             h.llm_client = None
             h.ckpt_manager = None
@@ -369,14 +369,14 @@ class VerlBackend(TrainingBackend):
                 try:
                     ray.kill(w)
                 except Exception:
-                    pass
+                    logger.warning("delete_model: worker %r not killed", w, exc_info=True)
             if h.resource_pool is not None:
                 pgs = getattr(h.resource_pool, "pgs", None) or []
                 for pg in pgs:
                     try:
                         ray.util.remove_placement_group(pg)
                     except Exception:
-                        pass
+                        logger.warning("delete_model: placement group %r not removed", pg, exc_info=True)
             h.worker_group = None
             h.resource_pool = None
         except Exception as e:
@@ -796,12 +796,12 @@ def _boot_worker_group(cfg: Dict[str, Any], model_id: str, enable_rollout: bool 
                 try:
                     ray.kill(w)
                 except Exception:
-                    pass
+                    logger.warning("boot failure teardown: worker %r not killed", w, exc_info=True)
             for pg in getattr(resource_pool, "pgs", None) or []:
                 try:
                     ray.util.remove_placement_group(pg)
                 except Exception:
-                    pass
+                    logger.warning("boot failure teardown: placement group %r not removed", pg, exc_info=True)
             raise
 
         sp = cfg["engine"]["ulysses_sequence_parallel_size"]

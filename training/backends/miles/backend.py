@@ -698,14 +698,14 @@ class MilesBackend(TrainingBackend):
                 try:
                     ray.kill(actor, no_restart=True)
                 except Exception:
-                    pass
+                    logger.warning("teardown: train actor %r not killed", actor, exc_info=True)
         for key in ("rollout_manager", "controller"):
             actor = cleanup.get(key)
             if actor is not None:
                 try:
                     ray.kill(actor, no_restart=True)
                 except Exception:
-                    pass
+                    logger.warning("teardown: %s not killed", key, exc_info=True)
         seen = set()
         for pg_tuple in (cleanup.get("pgs") or {}).values():
             pg_obj = pg_tuple[0] if isinstance(pg_tuple, tuple) else pg_tuple
@@ -714,7 +714,7 @@ class MilesBackend(TrainingBackend):
                 try:
                     ray.util.remove_placement_group(pg_obj)
                 except Exception:
-                    pass
+                    logger.warning("teardown: placement group %r not removed", pg_obj, exc_info=True)
         if cleanup:
             logger.info("create_model failure teardown: released %s", sorted(cleanup))
 

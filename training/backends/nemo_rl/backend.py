@@ -847,7 +847,9 @@ class NemoRLBackend(TrainingBackend):
                     await asyncio.to_thread(h.policy_generation.shutdown)
                     logger.info("NeMo RL generation shut down for %s", h.model_id)
                 except Exception:
-                    pass  # Generation may share resources with policy
+                    # The generation worker group can share actors with the policy,
+                    # which was shut down just above; log rather than hide it.
+                    logger.warning("delete_model: generation shutdown failed for %s", h.model_id, exc_info=True)
 
             self._batch_accumulators.pop(h.model_id, None)
 
