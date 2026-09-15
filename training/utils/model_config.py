@@ -40,36 +40,32 @@ def detect_num_gpus() -> int:
         logger.info("GPU count from SLIME_NUM_GPUS env: %d", n)
         return n
 
-    # 3. Ray cluster resources
-    try:
-        import ray
-        if ray.is_initialized():
-            resources = ray.cluster_resources()
-            n = int(resources.get("GPU", 0))
-            if n > 0:
-                logger.info("GPU count from Ray cluster: %d", n)
-                return n
-    except Exception:
-        pass
+    # 3. Ray cluster resources (a cluster with no GPU resource is not a source)
+    import ray
+    if ray.is_initialized():
+        n = int(ray.cluster_resources().get("GPU", 0))
+        if n > 0:
+            logger.info("GPU count from Ray cluster: %d", n)
+            return n
 
-    # 4. nvidia-smi
+    # 4. nvidia-smi; absent or hung binary means "not a source", any other failure propagates
+    import subprocess
     try:
-        import subprocess
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
             capture_output=True, text=True, timeout=5,
         )
-        if result.returncode == 0:
-            n = len(result.stdout.strip().splitlines())
-            if n > 0:
-                logger.info("GPU count from nvidia-smi: %d", n)
-                return n
-    except Exception:
-        pass
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        result = None
+    if result is not None and result.returncode == 0:
+        n = len(result.stdout.strip().splitlines())
+        if n > 0:
+            logger.info("GPU count from nvidia-smi: %d", n)
+            return n
 
-    # 5. Fallback
-    logger.warning("Could not detect GPUs, defaulting to 1")
-    return 1
+    raise RuntimeError(
+        "cannot determine the GPU count: set NUM_GPUS (no Ray GPU resources, no nvidia-smi devices)"
+    )
 
 
 def load_model_config(base_model: str) -> Dict[str, Any]:

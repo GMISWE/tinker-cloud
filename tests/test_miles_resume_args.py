@@ -20,7 +20,7 @@ def _configure(builder_mod, load_dir, save_dir=None):
     return b._configure_model_args(
         Namespace(), base_model="/tmp/model", megatron_checkpoint_path="/tmp/mcore",
         lora_config={"rank": 8}, debug_train_only=False, load_dir=load_dir,
-        model_config=MODEL_CONFIG, parallel_config={"tp": 1, "pp": 1, "cp": 1}, save_dir=save_dir,
+        model_config=MODEL_CONFIG, parallel_config={"tensor_parallel_size": 1, "pipeline_parallel_size": 1, "context_parallel_size": 1, "num_gpus": 1}, save_dir=save_dir,
     )
 
 

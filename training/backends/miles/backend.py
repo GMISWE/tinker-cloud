@@ -93,14 +93,7 @@ def _model_input_lens(data: List[Any]) -> List[int]:
     append the final target)."""
     from .rollout_data import TinkerDataConverter
 
-    lens = []
-    for d in data:
-        mi = d.get("model_input") if isinstance(d, dict) else getattr(d, "model_input", None)
-        try:
-            lens.append(len(TinkerDataConverter.extract_tokens_from_model_input(mi)))
-        except Exception:  # noqa: BLE001 — fall back to no-op alignment
-            lens.append(0)
-    return lens
+    return [len(TinkerDataConverter.extract_tokens_from_model_input(d["model_input"])) for d in data]
 
 
 def _engine_context_length(hf_path: str) -> Optional[int]:

@@ -236,8 +236,8 @@ class NemoRLBackend(TrainingBackend):
             batched_data = self.converter.forward_to_backend(data, h.config)
 
             # Pad for dp_size alignment (get_logprobs uses shard_by_batch_size)
-            dp_size = h.config.get("dp_size", 1)
-            mbs = h.config.get("policy", {}).get("train_micro_batch_size", 1)
+            dp_size = h.config["dp_size"]
+            mbs = h.config["policy"]["train_micro_batch_size"]
             batched_data = await asyncio.to_thread(
                 _maybe_pad_batch, batched_data, dp_size, mbs, h.image_preprocessor,
             )
@@ -479,7 +479,7 @@ class NemoRLBackend(TrainingBackend):
             # CHK027: Warn if buffered sample count doesn't match train_global_batch_size
             # (check BEFORE padding so the warning reflects actual data volume)
             original_size = all_data.size
-            gbs = h.config.get("policy", {}).get("train_global_batch_size", 0)
+            gbs = h.config["policy"]["train_global_batch_size"]
             if gbs > 0 and original_size != gbs:
                 logger.warning(
                     "Buffered %d samples but train_global_batch_size=%d. "
@@ -490,8 +490,8 @@ class NemoRLBackend(TrainingBackend):
             # Pad partial batch if needed — policy.train() → shard_by_batch_size()
             # asserts batch_size % dp_size == 0, so a partial batch will crash.
             # Use NeMo RL's maybe_pad_last_batch to pad with sample_mask=0.
-            dp_size = h.config.get("dp_size", 1)
-            mbs = h.config.get("policy", {}).get("train_micro_batch_size", 1)
+            dp_size = h.config["dp_size"]
+            mbs = h.config["policy"]["train_micro_batch_size"]
             all_data = await asyncio.to_thread(
                 _maybe_pad_batch, all_data, dp_size, mbs, h.image_preprocessor,
             )
@@ -656,8 +656,11 @@ class NemoRLBackend(TrainingBackend):
             # only cancels FSDP's mean-reduce for the backward) and all-reduces by
             # sum, so its global_loss is dp*cp times the batch loss. Report the
             # batch loss, which the API defines as the sum over the datums.
-            _scale = h.config.get("dp_size", 1) * h.config.get("policy", {}).get(
-                "dtensor_cfg", {}).get("context_parallel_size", 1)
+            _policy = h.config["policy"]
+            _cp = (_policy["megatron_cfg"]["context_parallel_size"]
+                   if _policy["megatron_cfg"]["enabled"]
+                   else _policy["dtensor_cfg"]["context_parallel_size"])
+            _scale = h.config["dp_size"] * _cp
             if isinstance(train_result, dict) and train_result.get("loss") is not None and _scale > 1:
                 train_result["loss"] = train_result["loss"] / _scale
             result = self.converter.backend_to_forward_backward_result(
@@ -738,10 +741,7 @@ class NemoRLBackend(TrainingBackend):
             local_path = str(root)
 
             weights_path = f"{local_path}/weights"
-            checkpointing_cfg = h.config.get("checkpointing", {
-                "model_save_format": "safetensors",
-                "save_consolidated": False,
-            })
+            checkpointing_cfg = h.config["checkpointing"]
 
             # Optimizer state rides beside the weights so load_weights(optimizer=true)
             # can restore it; LoRA moments are small.
@@ -986,8 +986,8 @@ class NemoRLBackend(TrainingBackend):
             "token_mask": token_mask,
             "sample_mask": torch.ones(batch_size, dtype=torch.float32),
         })
-        dp_size = h.config.get("dp_size", 1)
-        mbs = h.config.get("policy", {}).get("train_micro_batch_size", 1)
+        dp_size = h.config["dp_size"]
+        mbs = h.config["policy"]["train_micro_batch_size"]
         data = await asyncio.to_thread(_maybe_pad_batch, data, dp_size, mbs, None)
 
         async with h._training_lock:
@@ -1156,12 +1156,8 @@ def _init_nemo_rl_components(
             # output (renderers need them for parse_response) but strips stop ids.
             stop_strs = set()
             for token_str in ["<|im_end|>", "<|eot_id|>", "<|end▁of▁sentence|>"]:
-                try:
-                    ids = tokenizer.encode(token_str, add_special_tokens=False)
-                    if len(ids) == 1:
-                        stop_strs.add(token_str)
-                except Exception:
-                    pass
+                if len(tokenizer.encode(token_str, add_special_tokens=False)) == 1:
+                    stop_strs.add(token_str)
             if stop_strs:
                 generation_config["stop_strings"] = list(stop_strs)
                 logger.info("Set stop_strings from tokenizer: %s", list(stop_strs))
@@ -1290,13 +1286,13 @@ def _warn_on_adam_mismatch(h: "NemoRLHandle", adam_params: Dict[str, Any]) -> No
     """
     if getattr(h, "_adam_mismatch_warned", False):
         return
-    kwargs = h.config.get("policy", {}).get("optimizer", {}).get("kwargs", {})
+    kwargs = h.config["policy"]["optimizer"]["kwargs"]
     applied = {
-        "beta1": kwargs.get("betas", [0.9, 0.95])[0],
-        "beta2": kwargs.get("betas", [0.9, 0.95])[1],
-        "eps": kwargs.get("eps", 1e-8),
-        "weight_decay": kwargs.get("weight_decay", 0.0),
-        "grad_clip_norm": _applied_grad_clip(h.config.get("policy", {}).get("max_grad_norm")),
+        "beta1": kwargs["betas"][0],
+        "beta2": kwargs["betas"][1],
+        "eps": kwargs["eps"],
+        "weight_decay": kwargs["weight_decay"],
+        "grad_clip_norm": _applied_grad_clip(h.config["policy"]["max_grad_norm"]),
     }
     mismatches = {
         k: (v, applied[k]) for k, v in adam_params.items()
@@ -1324,10 +1320,10 @@ def _set_learning_rate(policy, learning_rate: float):
         ray.get(futures)
         logger.info("Set learning rate to %s", learning_rate)
     except Exception as e:
-        logger.warning(
-            "Could not set learning rate to %s: %s. Using default LR.",
-            learning_rate, e,
-        )
+        raise BackendError(
+            f"could not set learning rate {learning_rate} on the workers: {e}",
+            backend="nemo_rl", operation="apply_optimizer_step", original_error=e,
+        ) from e
 
 
 class _RefLogprobAccumulator:

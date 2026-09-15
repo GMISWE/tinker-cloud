@@ -606,10 +606,7 @@ def _wg_scalar_call(method, *args):
 
 def _scalar_metrics(out) -> Dict[str, Any]:
     from verl.utils import tensordict_utils as tu
-    try:
-        metrics = tu.get(out, "metrics") or {}
-    except Exception:
-        metrics = {}
+    metrics = tu.get(out, "metrics") or {}
     out_metrics = {}
     for k, v in dict(metrics).items():
         if k.startswith("perf/"):

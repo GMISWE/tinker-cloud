@@ -265,10 +265,9 @@ class TrainingConfig(BaseModel):
         env_models = os.getenv("SUPPORTED_MODELS")
         if env_models:
             try:
-                models_data = json.loads(env_models)
-                return [ModelInfo(**m) for m in models_data]
-            except (json.JSONDecodeError, ValueError) as e:
-                logger.error(f"Failed to parse SUPPORTED_MODELS: {e}")
+                return [ModelInfo(**m) for m in json.loads(env_models)]
+            except (json.JSONDecodeError, TypeError, ValueError) as e:
+                raise ValueError(f"SUPPORTED_MODELS is not a JSON list of ModelInfo: {e}") from e
 
         # Default models
         return [
