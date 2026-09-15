@@ -87,7 +87,7 @@ class ClassificationDataConverter(DataConverter):
         return batch
 
     def backend_to_forward_result(
-        self, result: Any, data: List[Dict],
+        self, result: Any, data: List[Datum],
     ) -> Dict[str, Any]:
         """Convert classification forward result (logits) to the SDK's
         ForwardBackwardOutput shape: loss_fn_outputs[i]["logits"] is a
@@ -109,7 +109,7 @@ class ClassificationDataConverter(DataConverter):
         }
 
     def backend_to_forward_backward_result(
-        self, result: Any, data: List[Dict],
+        self, result: Any, data: List[Datum],
     ) -> Dict[str, Any]:
         """Convert classification training result to the SDK's
         ForwardBackwardOutput shape. metrics stays EMPTY: the SDK combiner

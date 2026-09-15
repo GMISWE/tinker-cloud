@@ -7,8 +7,10 @@ must satisfy.
 """
 from abc import ABC, abstractmethod
 from pathlib import Path
-from dataclasses import dataclass, field
-from typing import Any, Dict, FrozenSet, List, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, FrozenSet, Generic, List, Optional, TypeVar
+
+from ..models.requests import Datum
 
 
 class BackendError(Exception):
@@ -45,13 +47,22 @@ class BackendHandle:
     weight_version: int = 0
 
 
-class TrainingBackend(ABC):
+# Each backend's handle subclass: a backend only ever receives the handles its
+# own create_model returned, so its methods are typed on that subclass.
+H = TypeVar("H", bound=BackendHandle)
+
+
+class TrainingBackend(ABC, Generic[H]):
     """
     Contract for post-training backends.
 
     TinkerCloud services call these methods; backend implementations
     translate to Miles or NeMo RL native APIs.
     """
+
+    def __init__(self, overrides: Optional[Dict[str, Any]] = None):
+        # The factory's constructor contract; backends keep their own __init__.
+        self.overrides = overrides or {}
 
     # False for in-process backends (no Ray actors); the server then skips ray.init.
     needs_ray: bool = True
@@ -81,7 +92,7 @@ class TrainingBackend(ABC):
         num_labels: Optional[int] = None,
         head_config: Optional[Dict[str, Any]] = None,
         native_root: Optional[Path] = None,
-    ) -> BackendHandle:
+    ) -> H:
         """
         Initialize training actors and inference engine.
 
@@ -112,8 +123,8 @@ class TrainingBackend(ABC):
     @abstractmethod
     async def forward(
         self,
-        handle: BackendHandle,
-        data: List[Dict],
+        handle: H,
+        data: List[Datum],
         loss_fn: str,
         loss_fn_config: Optional[Dict[str, float]] = None,
     ) -> Dict[str, Any]:
@@ -128,8 +139,8 @@ class TrainingBackend(ABC):
     @abstractmethod
     async def forward_backward(
         self,
-        handle: BackendHandle,
-        data: List[Dict],
+        handle: H,
+        data: List[Datum],
         loss_fn: str,
         loss_fn_config: Optional[Dict[str, float]] = None,
     ) -> Dict[str, Any]:
@@ -181,7 +192,7 @@ class TrainingBackend(ABC):
     @abstractmethod
     async def apply_optimizer_step(
         self,
-        handle: BackendHandle,
+        handle: H,
         learning_rate: Optional[float] = None,
         adam_params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -234,7 +245,7 @@ class TrainingBackend(ABC):
     @abstractmethod
     async def update_inference_weights(
         self,
-        handle: BackendHandle,
+        handle: H,
     ) -> None:
         """Sync training weights to inference engine without optimizer step."""
         ...
@@ -242,7 +253,7 @@ class TrainingBackend(ABC):
     @abstractmethod
     async def save_checkpoint(
         self,
-        handle: BackendHandle,
+        handle: H,
         root: Path,
         step: Optional[int] = None,
         persist: bool = True,
@@ -267,7 +278,7 @@ class TrainingBackend(ABC):
     @abstractmethod
     async def load_checkpoint(
         self,
-        handle: BackendHandle,
+        handle: H,
         root: Path,
         optimizer: bool = False,
     ) -> None:
@@ -300,7 +311,7 @@ class TrainingBackend(ABC):
     @abstractmethod
     async def delete_model(
         self,
-        handle: BackendHandle,
+        handle: H,
     ) -> None:
         """Release all GPU resources and Ray actors."""
         ...
@@ -308,8 +319,8 @@ class TrainingBackend(ABC):
     @abstractmethod
     async def get_logprobs(
         self,
-        handle: BackendHandle,
-        data: List[Dict],
+        handle: H,
+        data: List[Datum],
     ) -> List[Any]:
         """
         Compute log probabilities for given data using training model.
@@ -322,7 +333,7 @@ class TrainingBackend(ABC):
     @abstractmethod
     async def sample(
         self,
-        handle: BackendHandle,
+        handle: H,
         request_id: str,
         prompt_tokens: List[int],
         num_samples: int,
@@ -357,7 +368,7 @@ class TrainingBackend(ABC):
     @abstractmethod
     async def prepare_for_generation(
         self,
-        handle: BackendHandle,
+        handle: H,
     ) -> None:
         """
         Ensure the inference engine is ready to serve sampling requests.
@@ -429,7 +440,7 @@ class DataConverter(ABC):
     @abstractmethod
     def forward_to_backend(
         self,
-        data: List[Dict],
+        data: List[Datum],
         args: Any,
     ) -> Any:
         """
@@ -444,7 +455,7 @@ class DataConverter(ABC):
     @abstractmethod
     def forward_backward_to_backend(
         self,
-        data: List[Dict],
+        data: List[Datum],
         loss_fn: str,
         args: Any,
     ) -> Any:
@@ -460,7 +471,7 @@ class DataConverter(ABC):
     def backend_to_forward_result(
         self,
         result: Any,
-        data: List[Dict],
+        data: List[Datum],
     ) -> Dict[str, Any]:
         """
         Convert backend forward result to Tinker ForwardOutput format.
@@ -474,7 +485,7 @@ class DataConverter(ABC):
     def backend_to_forward_backward_result(
         self,
         result: Any,
-        data: List[Dict],
+        data: List[Datum],
     ) -> Dict[str, Any]:
         """
         Convert backend training result to Tinker ForwardBackwardOutput.

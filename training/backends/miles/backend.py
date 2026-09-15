@@ -128,6 +128,7 @@ class MilesHandle(BackendHandle):
     controller: Any = None            # MultiLoRAController (named Ray actor)
     adapter_name: Optional[str] = None
     adapter_slot: Optional[int] = None
+    seed_warned: bool = False         # the ignored-sampling-seed warning fired once
     # Where miles writes this adapter's per-step checkpoints (Megatron shard +
     # HF PEFT pair); source of the cross-backend interchange export.
     adapter_save_dir: Optional[Path] = None
@@ -228,7 +229,7 @@ def _check_miles_clip_config(h: "MilesHandle", loss_fn: str, loss_fn_config: Opt
         )
 
 
-class MilesBackend(TrainingBackend):
+class MilesBackend(TrainingBackend[MilesHandle]):
     # sft_loss / policy_loss; PPO clip range is a boot-time Megatron arg (see forward_backward).
     SUPPORTED_LOSS_FNS = frozenset({"cross_entropy", "importance_sampling", "ppo"})
     """Thin adapter over existing Miles integration code (model_service.py / training_service.py)."""
@@ -288,7 +289,7 @@ class MilesBackend(TrainingBackend):
                 "declaration accepted but unexploited (served staleness always 0)",
                 request_id, staleness_k,
             )
-        boot_kwargs = dict(
+        boot_kwargs: Dict[str, Any] = dict(
             model_id=model_id, request_id=request_id, base_model=base_model,
             num_gpus=num_gpus, lora_config=lora_config, parallelism=parallelism,
             rl_config=rl_config, rollout_config=rollout_config,
@@ -300,13 +301,12 @@ class MilesBackend(TrainingBackend):
         )
         # Mirror the builder's pool gate (configured slots + LoRA rank).
         slots = self.config.multilora_slots
-        pool_eligible = slots > 0 and bool(lora_config and lora_config.get("rank", 0) > 0)
-        if not pool_eligible:
+        if slots <= 0 or lora_config is None or lora_config.get("rank", 0) <= 0:
             return await self._boot_model(**boot_kwargs)
         async with self._pool_admin:
             if self._pool is not None:
                 return await self._join_pool(
-                    model_id=model_id, request_id=request_id,
+                    pool=self._pool, model_id=model_id, request_id=request_id,
                     base_model=base_model, lora_config=lora_config,
                     debug_train_only=debug_train_only,
                     resume_from=resume_from, rlve_config=rlve_config,
@@ -317,6 +317,7 @@ class MilesBackend(TrainingBackend):
 
     async def _join_pool(
         self,
+        pool: MilesPool,
         model_id: str,
         request_id: str,
         base_model: str,
@@ -330,7 +331,6 @@ class MilesBackend(TrainingBackend):
         """Register a new tenant adapter into the live pool (caller holds
         _pool_admin). The pool's boot args govern parallelism/batch shape;
         only the tenant's LoRA rank/alpha are per-adapter."""
-        pool = self._pool
         if objective != "language_modeling":
             raise BackendError(
                 f"Miles is a language-modeling backend; objective {objective!r} "
@@ -616,7 +616,7 @@ class MilesBackend(TrainingBackend):
                 created_from_checkpoint=bool(resume_from),
             )
 
-            if multi_lora:
+            if adapter_slot is not None:  # multi_lora: registered above
                 # First tenant boots the pool; later creates join it (M2).
                 pool = MilesPool(
                     train_group=train_group,
@@ -926,29 +926,28 @@ class MilesBackend(TrainingBackend):
 
     async def forward(
         self,
-        handle: BackendHandle,
-        data: List[Dict],
+        handle: MilesHandle,
+        data: List[Datum],
         loss_fn: str,
         loss_fn_config: Optional[Dict[str, float]] = None,
     ) -> Dict[str, Any]:
-        h: MilesHandle = handle  # type: ignore[assignment]
 
         async def _run() -> Dict[str, Any]:
             from miles.utils.ray_utils import Box
 
-            if h.rollout_manager is not None and h.args.offload_rollout:
-                await h.rollout_manager.offload.remote()
+            if handle.rollout_manager is not None and handle.args.offload_rollout:
+                await handle.rollout_manager.offload.remote()
 
-            rollout_data = self.converter.forward_to_backend(data, h.args, adapter_slot=h.adapter_slot)
+            rollout_data = self.converter.forward_to_backend(data, handle.args, adapter_slot=handle.adapter_slot)
             # Same DP alignment as fb: fewer samples than DP ranks gives an
             # actor an empty local batch (get_data_iterator divides by zero).
-            n_pad = self.converter.pad_rollout_data_to_dp(rollout_data, _dp_size(h.args))
+            n_pad = self.converter.pad_rollout_data_to_dp(rollout_data, _dp_size(handle.args))
             if n_pad:
                 logger.info("Padded forward with %d inert sample(s) to align with dp=%d",
-                            n_pad, _dp_size(h.args))
+                            n_pad, _dp_size(handle.args))
             # TinkerTrainGroup returns per-sample logprob tensors already
             # merged into the client's submission order.
-            logprobs = await h.train_group.forward_logprobs(0, Box(ray.put(rollout_data)))
+            logprobs = await handle.train_group.forward_logprobs(0, Box(ray.put(rollout_data)))
             if n_pad:
                 if len(logprobs) != len(data) + n_pad:
                     raise BackendError(
@@ -972,15 +971,15 @@ class MilesBackend(TrainingBackend):
         try:
             # Same sample-count gate as fb: a request smaller than the DP
             # width crashes get_data_iterator on the actors (num_local_gbs=0).
-            self._validate_fb(h, data)
+            self._validate_fb(handle, data)
             pool = self._pool
-            if h.adapter_slot is not None and pool is not None:
-                return await self._pool_run(pool, _run, tenant=h.model_id)
-            await h.lock.acquire()
+            if handle.adapter_slot is not None and pool is not None:
+                return await self._pool_run(pool, _run, tenant=handle.model_id)
+            await handle.lock.acquire()
             try:
                 return await _run()
             finally:
-                h.lock.release()
+                handle.lock.release()
         except (BackendError, ValueError):
             raise
         except Exception as e:
@@ -989,7 +988,7 @@ class MilesBackend(TrainingBackend):
             ) from e
 
     @staticmethod
-    def _validate_fb(h: MilesHandle, data: List[Dict]) -> None:
+    def _validate_fb(h: MilesHandle, data: List[Datum]) -> None:
         from ...core.validators import RequestValidator
         from ...config import get_config
 
@@ -1014,25 +1013,24 @@ class MilesBackend(TrainingBackend):
 
     async def forward_backward(
         self,
-        handle: BackendHandle,
-        data: List[Dict],
+        handle: MilesHandle,
+        data: List[Datum],
         loss_fn: str,
         loss_fn_config: Optional[Dict[str, float]] = None,
     ) -> Dict[str, Any]:
-        h: MilesHandle = handle  # type: ignore[assignment]
-        _check_miles_clip_config(h, loss_fn, loss_fn_config)
+        _check_miles_clip_config(handle, loss_fn, loss_fn_config)
         pool = self._pool
-        if h.adapter_slot is not None and pool is not None:
+        if handle.adapter_slot is not None and pool is not None:
             # Pool path: validate + convert here (CPU), then queue the GPU
             # work — the dispatcher serializes and may co-batch it (M3).
             try:
-                self._validate_fb(h, data)
+                self._validate_fb(handle, data)
                 rollout_data = self.converter.forward_backward_to_backend(
-                    data, loss_fn, h.args, adapter_slot=h.adapter_slot,
+                    data, loss_fn, handle.args, adapter_slot=handle.adapter_slot,
                 )
                 return await self._pool_submit(pool, _PoolOp(
-                    kind="fb", handle=h, rollout_data=rollout_data,
-                    loss_fn=loss_fn, num_samples=len(data), tenant=h.model_id,
+                    kind="fb", handle=handle, rollout_data=rollout_data,
+                    loss_fn=loss_fn, num_samples=len(data), tenant=handle.model_id,
                     input_lens=_model_input_lens(data),
                 ))
             except (BackendError, ValueError):
@@ -1041,26 +1039,26 @@ class MilesBackend(TrainingBackend):
                 raise BackendError(
                     str(e), backend="miles", operation="forward_backward", original_error=e,
                 ) from e
-        await h.lock.acquire()
+        await handle.lock.acquire()
         try:
             from miles.utils.ray_utils import Box
 
-            if h.rollout_manager is not None and h.args.offload_rollout:
-                await h.rollout_manager.offload.remote()
+            if handle.rollout_manager is not None and handle.args.offload_rollout:
+                await handle.rollout_manager.offload.remote()
 
-            self._validate_fb(h, data)
+            self._validate_fb(handle, data)
 
             rollout_data = self.converter.forward_backward_to_backend(
-                data, loss_fn, h.args, adapter_slot=h.adapter_slot,
+                data, loss_fn, handle.args, adapter_slot=handle.adapter_slot,
             )
-            n_pad = self.converter.pad_rollout_data_to_dp(rollout_data, _dp_size(h.args))
+            n_pad = self.converter.pad_rollout_data_to_dp(rollout_data, _dp_size(handle.args))
             if n_pad:
                 logger.info(
                     "Padded fb with %d inert sample(s) to align with dp=%d",
-                    n_pad, _dp_size(h.args),
+                    n_pad, _dp_size(handle.args),
                 )
 
-            results = await h.train_group.forward_backward_only(0, Box(ray.put(rollout_data)))
+            results = await handle.train_group.forward_backward_only(0, Box(ray.put(rollout_data)))
 
             # Only pipeline-last-stage actors return metrics; average across
             # the DP ranks that did. Per-sample logprobs are not emitted by the
@@ -1115,62 +1113,61 @@ class MilesBackend(TrainingBackend):
                 str(e), backend="miles", operation="forward_backward", original_error=e,
             ) from e
         finally:
-            h.lock.release()
+            handle.lock.release()
 
     async def apply_optimizer_step(
         self,
-        handle: BackendHandle,
+        handle: MilesHandle,
         learning_rate: Optional[float] = None,
         adam_params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         # adam_params accepted for contract uniformity (P4); Miles applies lr
         # only — betas/eps are Megatron args fixed at creation.
-        h: MilesHandle = handle  # type: ignore[assignment]
 
         async def _run() -> Dict[str, Any]:
             # TinkerTrainGroup: apply_optimizer_step(learning_rate) fans out to
             # the actors; _and_sync additionally pushes weights to SGLang.
-            offload_train = h.args.offload_train if h.args else True
-            offload_rollout = h.args.offload_rollout if h.args else True
+            offload_train = handle.args.offload_train if handle.args else True
+            offload_rollout = handle.args.offload_rollout if handle.args else True
 
-            step_kwargs = {"adapter_slot": h.adapter_slot, "adapter_name": h.adapter_name}
-            if h.rollout_manager is None:
-                results = await h.train_group.apply_optimizer_step(learning_rate, **step_kwargs)
+            step_kwargs = {"adapter_slot": handle.adapter_slot, "adapter_name": handle.adapter_name}
+            if handle.rollout_manager is None:
+                results = await handle.train_group.apply_optimizer_step(learning_rate, **step_kwargs)
             elif not offload_train and not offload_rollout:
                 # Pool mode rides this arm: the sync pushes exactly the stepped
                 # adapter (per-adapter upsert via the pending set).
-                results = await h.train_group.apply_optimizer_step_and_sync(learning_rate, **step_kwargs)
+                results = await handle.train_group.apply_optimizer_step_and_sync(learning_rate, **step_kwargs)
             else:
-                results = await h.train_group.apply_optimizer_step(learning_rate, **step_kwargs)
+                results = await handle.train_group.apply_optimizer_step(learning_rate, **step_kwargs)
 
                 # Mirror upstream train.py's offload dance around weight sync.
                 if offload_train:
-                    await h.train_group.offload()
+                    await handle.train_group.offload()
                 if offload_rollout:
-                    await h.rollout_manager.onload_weights.remote()
-                await h.train_group.update_weights()
+                    await handle.rollout_manager.onload_weights.remote()
+                await handle.train_group.update_weights()
                 if offload_rollout:
-                    await h.rollout_manager.onload_kv.remote()
+                    await handle.rollout_manager.onload_kv.remote()
 
             if results[0]["success"]:
-                h.weight_version += 1
+                handle.weight_version += 1
 
             return {
                 "success": results[0]["success"],
                 "grad_norm": results[0]["grad_norm"],
                 "learning_rates": [],
-                "model_id": h.model_id,
+                "model_id": handle.model_id,
             }
 
         try:
             pool = self._pool
-            if h.adapter_slot is not None and pool is not None:
-                return await self._pool_run(pool, _run, tenant=h.model_id)
-            await h.lock.acquire()
+            if handle.adapter_slot is not None and pool is not None:
+                return await self._pool_run(pool, _run, tenant=handle.model_id)
+            await handle.lock.acquire()
             try:
                 return await _run()
             finally:
-                h.lock.release()
+                handle.lock.release()
         except BackendError:
             raise
         except Exception as e:
@@ -1178,22 +1175,21 @@ class MilesBackend(TrainingBackend):
                 str(e), backend="miles", operation="apply_optimizer_step", original_error=e,
             ) from e
 
-    async def update_inference_weights(self, handle: BackendHandle) -> None:
-        h: MilesHandle = handle  # type: ignore[assignment]
+    async def update_inference_weights(self, handle: MilesHandle) -> None:
 
         async def _run() -> None:
-            await h.train_group.update_weights()
+            await handle.train_group.update_weights()
 
         try:
             pool = self._pool
-            if h.adapter_slot is not None and pool is not None:
-                await self._pool_run(pool, _run, tenant=h.model_id)
+            if handle.adapter_slot is not None and pool is not None:
+                await self._pool_run(pool, _run, tenant=handle.model_id)
                 return
-            await h.lock.acquire()
+            await handle.lock.acquire()
             try:
                 await _run()
             finally:
-                h.lock.release()
+                handle.lock.release()
         except Exception as e:
             raise BackendError(
                 str(e), backend="miles", operation="update_inference_weights", original_error=e,
@@ -1201,17 +1197,16 @@ class MilesBackend(TrainingBackend):
 
     async def save_checkpoint(
         self,
-        handle: BackendHandle,
+        handle: MilesHandle,
         root: Path,
         step: Optional[int] = None,
         persist: bool = True,
     ) -> None:
-        h: MilesHandle = handle  # type: ignore[assignment]
         if not persist:
             return  # ephemeral sampler save: update_weights already delivered them to SGLang
 
         async def _run() -> None:
-            offload_train = h.args.offload_train if h.args else False
+            offload_train = handle.args.offload_train if handle.args else False
             if offload_train:
                 # Never return a path nothing was written to.
                 raise UnsupportedFeatureError(
@@ -1225,34 +1220,34 @@ class MilesBackend(TrainingBackend):
             # training-loop counter and nothing advances it here — the CLIENT
             # owns the loop — so publish our weight version (= applied optimizer
             # steps) as the step this checkpoint represents.
-            if h.adapter_slot is not None and h.controller is not None:
-                if h.weight_version <= 0:
+            if handle.adapter_slot is not None and handle.controller is not None:
+                if handle.weight_version <= 0:
                     logger.info(
                         "Adapter %s has taken no optimizer step; nothing to checkpoint",
-                        h.adapter_name,
+                        handle.adapter_name,
                     )
                     return
-                await h.controller.set_adapter_step.remote(h.adapter_name, h.weight_version)
+                await handle.controller.set_adapter_step.remote(handle.adapter_name, handle.weight_version)
 
-            await h.train_group.save_model(step if step is not None else 0)
+            await handle.train_group.save_model(step if step is not None else 0)
 
-            if h.adapter_save_dir:
+            if handle.adapter_save_dir:
                 await asyncio.to_thread(
-                    _publish_adapter, h.adapter_save_dir, str(root), h.adapter_name,
+                    _publish_adapter, handle.adapter_save_dir, str(root), handle.adapter_name,
                 )
             else:
-                await asyncio.to_thread(_publish_native_adapter, h.args, str(root))
+                await asyncio.to_thread(_publish_native_adapter, handle.args, str(root))
 
         try:
             pool = self._pool
-            if h.adapter_slot is not None and pool is not None:
-                await self._pool_run(pool, _run, tenant=h.model_id)
+            if handle.adapter_slot is not None and pool is not None:
+                await self._pool_run(pool, _run, tenant=handle.model_id)
                 return
-            await h.lock.acquire()
+            await handle.lock.acquire()
             try:
                 await _run()
             finally:
-                h.lock.release()
+                handle.lock.release()
         except BackendError:
             raise
         except Exception as e:
@@ -1262,12 +1257,11 @@ class MilesBackend(TrainingBackend):
 
     async def load_checkpoint(
         self,
-        handle: BackendHandle,
+        handle: MilesHandle,
         root: Path,
         optimizer: bool = False,
     ) -> None:
-        h: MilesHandle = handle  # type: ignore[assignment]
-        if h.adapter_slot is not None:
+        if handle.adapter_slot is not None:
             # train_group.load_checkpoint is a full-model resume broadcast;
             # on shared rails it would clobber every co-tenant.
             raise BackendError(
@@ -1275,17 +1269,17 @@ class MilesBackend(TrainingBackend):
                 "(adapter-scoped resume unimplemented)",
                 backend="miles", operation="load_checkpoint",
             )
-        await h.lock.acquire()
+        await handle.lock.acquire()
         try:
             # The actors take Megatron's --load directory: the iter_* dir
             # recorded under the checkpoint root when it was published.
             load_dir = resolve_native_checkpoint(str(root))
-            await h.train_group.load_checkpoint(load_dir, load_optimizer=optimizer)
-            h.created_from_checkpoint = True
+            await handle.train_group.load_checkpoint(load_dir, load_optimizer=optimizer)
+            handle.created_from_checkpoint = True
 
             # Sync loaded weights to inference engine
-            if h.rollout_manager is not None:
-                await h.train_group.update_weights()
+            if handle.rollout_manager is not None:
+                await handle.train_group.update_weights()
 
             logger.info("Miles checkpoint loaded from %s", root)
 
@@ -1294,43 +1288,42 @@ class MilesBackend(TrainingBackend):
                 str(e), backend="miles", operation="load_checkpoint", original_error=e,
             ) from e
         finally:
-            h.lock.release()
+            handle.lock.release()
 
-    async def delete_model(self, handle: BackendHandle) -> None:
-        h: MilesHandle = handle  # type: ignore[assignment]
-        if h.adapter_slot is not None and self._pool is not None:
-            await self._delete_pool_tenant(h)
+    async def delete_model(self, handle: MilesHandle) -> None:
+        if handle.adapter_slot is not None and self._pool is not None:
+            await self._delete_pool_tenant(handle)
             return
         # Hold the op lock so teardown can't interleave with an in-flight
         # fb/step (delete-during-optim_step crash class).
-        await h.lock.acquire()
+        await handle.lock.acquire()
         try:
             resources_freed = []
             # Fallback for a pool handle that outlived its pool record:
             # kill the named controller so the next create_model can
             # register a fresh one.
-            if h.controller is not None:
+            if handle.controller is not None:
                 try:
-                    await h.controller.stop.remote()
+                    await handle.controller.stop.remote()
                 except Exception:
                     logger.warning("Multi-LoRA controller stop failed; killing", exc_info=True)
-                ray.kill(h.controller, no_restart=True)
+                ray.kill(handle.controller, no_restart=True)
                 resources_freed.append("multi_lora_controller")
 
-            for actor in h.train_group._actor_handles:
+            for actor in handle.train_group._actor_handles:
                 ray.kill(actor, no_restart=True)
                 resources_freed.append("actor")
 
-            if h.rollout_manager is not None:
-                ray.kill(h.rollout_manager, no_restart=True)
+            if handle.rollout_manager is not None:
+                ray.kill(handle.rollout_manager, no_restart=True)
                 resources_freed.append("rollout_manager")
 
             # placement_group holds the create_placement_groups() dict of
             # (pg, bundle_indices, gpu_ids) tuples; pgs may be shared between
             # roles (colocate), so dedupe before removal.
-            if h.placement_group:
+            if handle.placement_group:
                 seen = set()
-                for pg_tuple in h.placement_group.values():
+                for pg_tuple in handle.placement_group.values():
                     pg_obj = pg_tuple[0] if isinstance(pg_tuple, tuple) else pg_tuple
                     # debug_train_only leaves the rollout entry as None
                     if pg_obj is not None and id(pg_obj) not in seen:
@@ -1338,14 +1331,14 @@ class MilesBackend(TrainingBackend):
                         ray.util.remove_placement_group(pg_obj)
                         resources_freed.append("placement_group")
 
-            logger.info("Miles model %s deleted, freed %d resources", h.model_id, len(resources_freed))
+            logger.info("Miles model %s deleted, freed %d resources", handle.model_id, len(resources_freed))
 
         except Exception as e:
             raise BackendError(
                 str(e), backend="miles", operation="delete_model", original_error=e,
             ) from e
         finally:
-            h.lock.release()
+            handle.lock.release()
 
     async def _delete_pool_tenant(self, h: MilesHandle) -> None:
         """Pool-mode delete (M2): deregister this tenant's adapter; the last
@@ -1417,8 +1410,8 @@ class MilesBackend(TrainingBackend):
 
     async def get_logprobs(
         self,
-        handle: BackendHandle,
-        data: List[Dict],
+        handle: MilesHandle,
+        data: List[Datum],
     ) -> List[Any]:
         # Miles computes logprobs internally during forward_backward.
         # Expose via forward-only path for explicit logprob requests.
@@ -1431,7 +1424,7 @@ class MilesBackend(TrainingBackend):
 
     async def sample(
         self,
-        handle: BackendHandle,
+        handle: MilesHandle,
         request_id: str,
         prompt_tokens: List[int],
         num_samples: int,
@@ -1450,18 +1443,17 @@ class MilesBackend(TrainingBackend):
         """
         from ...utils.sglang_client import SGLangClient
 
-        h: MilesHandle = handle  # type: ignore[assignment]
-        if not h.router_ip or not h.router_port:
+        if not handle.router_ip or not handle.router_port:
             raise BackendError(
                 "SGLang router not available",
                 backend="miles", operation="sample",
             )
-        client = SGLangClient(base_url=f"http://{h.router_ip}:{h.router_port}")
+        client = SGLangClient(base_url=f"http://{handle.router_ip}:{handle.router_port}")
 
         # Pool mode: route to this model's adapter by engine-side slot name.
         lora_path = None
-        if h.adapter_slot is not None:
-            if pinned_version == 0 and not h.created_from_checkpoint:
+        if handle.adapter_slot is not None:
+            if pinned_version == 0 and not handle.created_from_checkpoint:
                 pass  # v0 == base: no lora_path
             else:
                 if pinned_version is not None:
@@ -1469,24 +1461,24 @@ class MilesBackend(TrainingBackend):
                         "[%s] pinned_version=%s not honorable for %s "
                         "(nonzero or checkpoint-created); serving LIVE slot "
                         "weights (v%d) — BUG-015 aliasing risk",
-                        request_id, pinned_version, h.model_id, h.weight_version,
+                        request_id, pinned_version, handle.model_id, handle.weight_version,
                     )
                 from miles.utils.multi_lora import slot_lora_name
 
-                lora_path = slot_lora_name(h.adapter_slot)
-        elif pinned_version is not None and pinned_version != h.weight_version:
+                lora_path = slot_lora_name(handle.adapter_slot)
+        elif pinned_version is not None and pinned_version != handle.weight_version:
             logger.warning(
                 "[%s] pinned_version=%s not honored for %s (non-pool miles "
                 "serves the live engine, v%d) — BUG-015 aliasing risk",
-                request_id, pinned_version, h.model_id, h.weight_version,
+                request_id, pinned_version, handle.model_id, handle.weight_version,
             )
 
         sequences = []
         prompt_logprobs_result = None
         base_params = dict(sampling_params or {})
-        if base_params.get("seed") is not None and not h.args.sglang_enable_deterministic_inference:
-            if not getattr(h, "_seed_warned", False):
-                h._seed_warned = True
+        if base_params.get("seed") is not None and not handle.args.sglang_enable_deterministic_inference:
+            if not handle.seed_warned:
+                handle.seed_warned = True
                 logger.warning(
                     "[%s] sampling seed given but SGLang was booted without deterministic "
                     "inference: the seed is ignored. Set SLIME_SGLANG_DETERMINISTIC=1 before create_model.",
@@ -1516,10 +1508,9 @@ class MilesBackend(TrainingBackend):
             "prompt_logprobs": prompt_logprobs_result,
         }
 
-    async def prepare_for_generation(self, handle: BackendHandle) -> None:
+    async def prepare_for_generation(self, handle: MilesHandle) -> None:
         """SGLang router is always live for Miles — just validate it exists."""
-        h: MilesHandle = handle  # type: ignore[assignment]
-        if not h.router_ip or not h.router_port:
+        if not handle.router_ip or not handle.router_port:
             raise BackendError(
                 "SGLang router not available",
                 backend="miles", operation="prepare_for_generation",

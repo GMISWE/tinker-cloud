@@ -156,8 +156,6 @@ class TinkerDataConverter:
             if loss_fn_inputs:
                 has_advantages = loss_fn_inputs.get("advantages") is not None
                 has_logprobs = loss_fn_inputs.get("logprobs") is not None
-                has_weights = loss_fn_inputs.get("weights") is not None or loss_fn_inputs.get("weight") is not None
-                has_target = loss_fn_inputs.get("target_tokens") is not None or loss_fn_inputs.get("target") is not None
 
                 # If we have advantages or logprobs, it's RL data
                 # If we have weights+target but no logprobs, it's SFT data (including DPO backward pass)
@@ -368,7 +366,7 @@ class TinkerDataConverter:
                 log_probs_list.append(torch.zeros(response_len, dtype=torch.float32))
 
         # Build rollout_data
-        rollout_data = {
+        rollout_data: Dict[str, Any] = {
             "tokens": tokens_list,
             "loss_masks": loss_masks_list,
             "loss_weights": loss_weights_list,
@@ -398,12 +396,6 @@ class TinkerDataConverter:
         if "_loss_type_override" in rollout_data:
             logger.info(f"_loss_type_override set to: {rollout_data['_loss_type_override']}")
 
-        # DEBUG: Print totals to diagnose mismatch
-        if is_rl:
-            total_response_len = sum(response_lengths_list)
-            total_advantages_len = sum(len(a) for a in advantages_list)
-            total_logprobs_len = sum(len(lp) for lp in log_probs_list)
-            total_tokens_len = sum(len(t) for t in tokens_list)
             # print(f"[CONVERTER DEBUG] TOTALS: num_samples={len(tokens_list)}, "
             #       f"response_lengths_sum={total_response_len}, "
             #       f"advantages_sum={total_advantages_len}, "

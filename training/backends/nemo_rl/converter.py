@@ -23,7 +23,7 @@ SFT path (NLLLoss, loss_fn="cross_entropy"):
   (all ones)                             → sample_mask   [B]
 """
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import torch
 
@@ -268,7 +268,7 @@ class NemoRLDataConverter(DataConverter):
     def backend_to_forward_result(
         self,
         result: Any,
-        data: List[Dict],
+        data: List[Datum],
         loss_fn: str = "",
     ) -> Dict[str, Any]:
         """
@@ -324,7 +324,7 @@ class NemoRLDataConverter(DataConverter):
     def backend_to_forward_backward_result(
         self,
         result: Any,
-        data: List[Dict],
+        data: List[Datum],
         loss_fn: str = "",
     ) -> Dict[str, Any]:
         """
@@ -495,7 +495,7 @@ def _place_right_aligned(row: torch.Tensor, values: torch.Tensor, seq_len: int) 
         row[seq_len - n:seq_len] = values[-n:]
 
 
-def _extract_field(datum: Datum, field_name: str):
+def _extract_field(datum: Datum, field_name: str) -> Optional[torch.Tensor]:
     """A per-token float tensor from loss_fn_inputs (unresized), or None when
     the client did not send that input."""
     tensor = datum.loss_fn_inputs.get(_FIELD_NAME_MAP.get(field_name, field_name))
@@ -504,7 +504,7 @@ def _extract_field(datum: Datum, field_name: str):
     return torch.tensor(tensor.data, dtype=torch.float32)
 
 
-def _extract_target_tokens(datum: Datum) -> torch.Tensor:
+def _extract_target_tokens(datum: Datum) -> Optional[torch.Tensor]:
     """loss_fn_inputs["target_tokens"] as a long tensor, or None when absent."""
     tensor = datum.loss_fn_inputs.get("target_tokens")
     if tensor is None:
@@ -512,7 +512,7 @@ def _extract_target_tokens(datum: Datum) -> torch.Tensor:
     return torch.tensor(tensor.data, dtype=torch.long)
 
 
-def _extract_sft_weights(datum: Datum) -> torch.Tensor:
+def _extract_sft_weights(datum: Datum) -> Optional[torch.Tensor]:
     """loss_fn_inputs["weights"] (= weights[1:] of the cookbook's SFT datum) as
     a float tensor, or None when absent."""
     tensor = datum.loss_fn_inputs.get("weights")

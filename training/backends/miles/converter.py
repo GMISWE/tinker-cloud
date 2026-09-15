@@ -8,6 +8,7 @@ re-exports it through the backend interface.
 from typing import Any, Dict, List
 
 from ..base import DataConverter
+from ...models.requests import Datum
 from .rollout_data import TinkerDataConverter
 
 
@@ -37,7 +38,7 @@ class MilesDataConverter(DataConverter):
 
     def forward_to_backend(
         self,
-        data: List[Dict],
+        data: List[Datum],
         args: Any,
         adapter_slot: Any = None,
     ) -> Any:
@@ -48,7 +49,7 @@ class MilesDataConverter(DataConverter):
 
     def forward_backward_to_backend(
         self,
-        data: List[Dict],
+        data: List[Datum],
         loss_fn: str,
         args: Any,
         adapter_slot: Any = None,
@@ -208,8 +209,8 @@ class MilesDataConverter(DataConverter):
                 merged[key] = v0
         return merged
 
-    def backend_to_forward_result(self, result: Any, data: List[Dict]) -> Dict[str, Any]:
+    def backend_to_forward_result(self, result: Any, data: List[Datum]) -> Dict[str, Any]:
         raise NotImplementedError("MilesBackend builds Tinker results inline (backend.py)")
 
-    def backend_to_forward_backward_result(self, result: Any, data: List[Dict]) -> Dict[str, Any]:
+    def backend_to_forward_backward_result(self, result: Any, data: List[Datum]) -> Dict[str, Any]:
         raise NotImplementedError("MilesBackend builds Tinker results inline (backend.py)")

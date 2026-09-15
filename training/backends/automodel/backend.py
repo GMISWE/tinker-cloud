@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from ..base import BackendError, BackendHandle, TrainingBackend
+from ...models.requests import Datum
 from ..objectives import Objective, is_classification
 
 logger = logging.getLogger(__name__)
@@ -46,7 +47,7 @@ class AutomodelHandle(BackendHandle):
     lock: Any = field(default_factory=asyncio.Lock)
 
 
-class AutomodelBackend(TrainingBackend):
+class AutomodelBackend(TrainingBackend[AutomodelHandle]):
     SUPPORTED_LOSS_FNS = frozenset({"cross_entropy", "classification_ce"})
     """HF-encoder classification backend (no generation plane)."""
 
@@ -194,17 +195,16 @@ class AutomodelBackend(TrainingBackend):
         )
 
     async def forward(
-        self, handle: BackendHandle, data: List[Dict], loss_fn: str,
+        self, handle: AutomodelHandle, data: List[Datum], loss_fn: str,
         loss_fn_config: Optional[Dict[str, float]] = None,
     ) -> Dict[str, Any]:
         """Forward-only logits pass (no gradient)."""
         import asyncio
-        h: AutomodelHandle = handle  # type: ignore[assignment]
         batch = self.converter.forward_to_backend(
-            data, {"objective": h.objective},
+            data, {"objective": handle.objective},
         )
-        async with h.lock:
-            result = await asyncio.to_thread(self._forward_only, h, batch)
+        async with handle.lock:
+            result = await asyncio.to_thread(self._forward_only, handle, batch)
         return self.converter.backend_to_forward_result(result, data)
 
     def _forward_only(self, h: AutomodelHandle, batch) -> Dict[str, Any]:
@@ -218,22 +218,21 @@ class AutomodelBackend(TrainingBackend):
         return {"logits": out.logits.float()}
 
     async def forward_backward(
-        self, handle: BackendHandle, data: List[Dict], loss_fn: str,
+        self, handle: AutomodelHandle, data: List[Datum], loss_fn: str,
         loss_fn_config: Optional[Dict[str, float]] = None,
     ) -> Dict[str, Any]:
         """Convert a classification Datum, run forward + loss.backward()
         immediately, and return the real loss (deferred=False)."""
         import asyncio
-        h: AutomodelHandle = handle  # type: ignore[assignment]
         batch = self.converter.forward_backward_to_backend(
-            data, loss_fn, {"objective": h.objective},
+            data, loss_fn, {"objective": handle.objective},
         )
         logger.info(
             "Automodel forward_backward: %d samples, input_ids=%s",
             len(data), tuple(batch["input_ids"].shape),
         )
-        async with h.lock:
-            result = await asyncio.to_thread(self._forward_backward, h, batch)
+        async with handle.lock:
+            result = await asyncio.to_thread(self._forward_backward, handle, batch)
         return self.converter.backend_to_forward_backward_result(result, data)
 
     def _forward_backward(self, h: AutomodelHandle, batch) -> Dict[str, Any]:
@@ -247,16 +246,15 @@ class AutomodelBackend(TrainingBackend):
         return {"loss": out.loss.detach().float().item()}
 
     async def apply_optimizer_step(
-        self, handle: BackendHandle, learning_rate: Optional[float] = None,
+        self, handle: AutomodelHandle, learning_rate: Optional[float] = None,
         adam_params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Optimizer step over accumulated grads, then zero them.
 
         adam_params is accepted for contract uniformity; betas/eps are fixed at creation.
         """
-        h: AutomodelHandle = handle  # type: ignore[assignment]
-        async with h.lock:
-            return await asyncio.to_thread(self._optimizer_step, h, learning_rate)
+        async with handle.lock:
+            return await asyncio.to_thread(self._optimizer_step, handle, learning_rate)
 
     def _optimizer_step(
         self, h: AutomodelHandle, learning_rate: Optional[float],
@@ -284,55 +282,53 @@ class AutomodelBackend(TrainingBackend):
 
     # --- generation plane: N/A for classification ---
 
-    async def update_inference_weights(self, handle: BackendHandle) -> None:
+    async def update_inference_weights(self, handle: AutomodelHandle) -> None:
         raise _no_generation("update_inference_weights")
 
     async def sample(
-        self, handle: BackendHandle, request_id: str, prompt_tokens: List[int],
+        self, handle: AutomodelHandle, request_id: str, prompt_tokens: List[int],
         num_samples: int, sampling_params: Optional[Dict[str, Any]] = None,
         prompt_logprobs: bool = False, pinned_version: Optional[int] = None,
     ) -> Dict[str, Any]:
         raise _no_generation("sample")
 
     async def get_logprobs(
-        self, handle: BackendHandle, data: List[Dict],
+        self, handle: AutomodelHandle, data: List[Datum],
     ) -> List[Any]:
         raise _no_generation("get_logprobs")
 
-    async def prepare_for_generation(self, handle: BackendHandle) -> None:
+    async def prepare_for_generation(self, handle: AutomodelHandle) -> None:
         raise _no_generation("prepare_for_generation")
 
     # --- checkpoint / teardown ---
 
     async def save_checkpoint(
-        self, handle: BackendHandle, root: Path,
+        self, handle: AutomodelHandle, root: Path,
         step: Optional[int] = None, persist: bool = True,
     ) -> None:
         """Save the LoRA adapter + classification head (HF safetensors)."""
         import asyncio
-        h: AutomodelHandle = handle  # type: ignore[assignment]
         if not persist:
             return  # no generation engine: an ephemeral sampler save has nothing to deliver
 
         def _save() -> None:
             # PeftModel.save_pretrained writes the adapter; task_type SEQ_CLS/
             # TOKEN_CLS keeps the classifier in modules_to_save so it is saved too.
-            h.model.save_pretrained(str(root))
-            if h.tokenizer is not None:
-                h.tokenizer.save_pretrained(str(root))
+            handle.model.save_pretrained(str(root))
+            if handle.tokenizer is not None:
+                handle.tokenizer.save_pretrained(str(root))
 
         await asyncio.to_thread(_save)
         logger.info("Automodel checkpoint saved: %s (step=%s)", root, step)
 
     async def load_checkpoint(
-        self, handle: BackendHandle, root: Path, optimizer: bool = False,
+        self, handle: AutomodelHandle, root: Path, optimizer: bool = False,
     ) -> None:
         import asyncio
-        h: AutomodelHandle = handle  # type: ignore[assignment]
         if optimizer:
             raise BackendError("automodel restores adapter weights only; optimizer state is not restored",
                                backend="automodel", operation="load_checkpoint")
-        await asyncio.to_thread(self._load_adapter, h, str(root))
+        await asyncio.to_thread(self._load_adapter, handle, str(root))
         logger.info("Automodel checkpoint loaded: %s", root)
 
     def _load_adapter(self, h: AutomodelHandle, checkpoint_path: str) -> None:
@@ -346,16 +342,15 @@ class AutomodelBackend(TrainingBackend):
                 original_error=e,
             )
 
-    async def delete_model(self, handle: BackendHandle) -> None:
+    async def delete_model(self, handle: AutomodelHandle) -> None:
         """Release model + buffered data (no Ray actors in scaffold)."""
-        h: AutomodelHandle = handle  # type: ignore[assignment]
-        h.data_buffer.clear()
-        h.model = None
-        h.optimizer = None
+        handle.data_buffer.clear()
+        handle.model = None
+        handle.optimizer = None
         import torch
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        logger.info("Automodel model %s deleted", h.model_id)
+        logger.info("Automodel model %s deleted", handle.model_id)
 
 
 def _apply_lora(model, objective: str, lora_config, head_config: Dict[str, Any]):

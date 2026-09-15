@@ -6,11 +6,12 @@ import asyncio
 import logging
 from pathlib import Path
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from ..base import BackendError, BackendHandle, TrainingBackend
+from ...models.requests import Datum
 from ..objectives import Objective, is_classification
 
 logger = logging.getLogger(__name__)
@@ -37,13 +38,13 @@ class MegatronBridgeHandle(BackendHandle):
     created_at: str = ""
 
 
-async def _get(ref):
+async def _get(ref) -> Any:
     """Await a Ray object ref without blocking the event loop."""
     import ray
     return await asyncio.to_thread(ray.get, ref)
 
 
-class MegatronBridgeBackend(TrainingBackend):
+class MegatronBridgeBackend(TrainingBackend[MegatronBridgeHandle]):
     SUPPORTED_LOSS_FNS = frozenset({"cross_entropy", "classification_ce"})
     """Megatron-native classification backend (Ray-actor delegation, no gen plane)."""
 
@@ -126,7 +127,9 @@ class MegatronBridgeBackend(TrainingBackend):
                 f"deploy_tinkercloud.sh --profile megatron_bridge (cu13 recipe env).",
                 backend="megatron_bridge", operation="create_model")
 
-        worker = MegatronBridgeWorker.remote(cfg_kwargs, _RECIPE_EXAMPLES)
+        # ray.remote's actor-class type is only known where ray is installed.
+        worker_actor: Any = MegatronBridgeWorker
+        worker = worker_actor.remote(cfg_kwargs, _RECIPE_EXAMPLES)
         await _get(worker.ready.remote())   # blocks (in a thread) until setup() done
         if resume_from:
             await _get(worker.load_checkpoint.remote(str(resume_from), False))
@@ -141,78 +144,72 @@ class MegatronBridgeBackend(TrainingBackend):
             request_id, model_id, base_model, num_labels, seq_length, lc.get("rank", 16))
         return handle
 
-    async def forward(self, handle: BackendHandle, data: List[Dict], loss_fn: str,
+    async def forward(self, handle: MegatronBridgeHandle, data: List[Datum], loss_fn: str,
                       loss_fn_config: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
-        h: MegatronBridgeHandle = handle  # type: ignore[assignment]
-        batch = self.converter.forward_to_backend(data, {"seq_length": h.seq_length})
-        return await _get(h.worker.forward.remote(batch))
+        batch = self.converter.forward_to_backend(data, {"seq_length": handle.seq_length})
+        return await _get(handle.worker.forward.remote(batch))
 
-    async def forward_backward(self, handle: BackendHandle, data: List[Dict], loss_fn: str,
+    async def forward_backward(self, handle: MegatronBridgeHandle, data: List[Datum], loss_fn: str,
                                loss_fn_config: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
-        h: MegatronBridgeHandle = handle  # type: ignore[assignment]
-        batch = self.converter.forward_backward_to_backend(data, loss_fn, {"seq_length": h.seq_length})
-        return await _get(h.worker.forward_backward.remote(batch))
+        batch = self.converter.forward_backward_to_backend(data, loss_fn, {"seq_length": handle.seq_length})
+        return await _get(handle.worker.forward_backward.remote(batch))
 
     async def apply_optimizer_step(
         self,
-        handle: BackendHandle,
+        handle: MegatronBridgeHandle,
         learning_rate: Optional[float] = None,
         adam_params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         # adam_params accepted for contract uniformity; betas/eps are fixed at creation.
-        h: MegatronBridgeHandle = handle  # type: ignore[assignment]
-        return await _get(h.worker.apply_optimizer_step.remote(learning_rate))
+        return await _get(handle.worker.apply_optimizer_step.remote(learning_rate))
 
     # --- generation plane: N/A for classification ---
 
-    async def update_inference_weights(self, handle: BackendHandle) -> None:
+    async def update_inference_weights(self, handle: MegatronBridgeHandle) -> None:
         raise _no_generation("update_inference_weights")
 
-    async def sample(self, handle: BackendHandle, request_id: str, prompt_tokens: List[int],
+    async def sample(self, handle: MegatronBridgeHandle, request_id: str, prompt_tokens: List[int],
                      num_samples: int, sampling_params: Optional[Dict[str, Any]] = None,
                      prompt_logprobs: bool = False,
                      pinned_version: Optional[int] = None) -> Dict[str, Any]:
         raise _no_generation("sample")
 
-    async def get_logprobs(self, handle: BackendHandle, data: List[Dict]) -> List[Any]:
+    async def get_logprobs(self, handle: MegatronBridgeHandle, data: List[Datum]) -> List[Any]:
         raise _no_generation("get_logprobs")
 
-    async def prepare_for_generation(self, handle: BackendHandle) -> None:
+    async def prepare_for_generation(self, handle: MegatronBridgeHandle) -> None:
         raise _no_generation("prepare_for_generation")
 
     # --- checkpoint / teardown ---
 
-    async def save_checkpoint(self, handle: BackendHandle, root: Path,
+    async def save_checkpoint(self, handle: MegatronBridgeHandle, root: Path,
                               step: Optional[int] = None, persist: bool = True) -> None:
-        h: MegatronBridgeHandle = handle  # type: ignore[assignment]
         if not persist:
             return
         try:
-            await _get(h.worker.save_checkpoint.remote(str(root)))
+            await _get(handle.worker.save_checkpoint.remote(str(root)))
         except Exception as e:
             raise BackendError(f"save_checkpoint failed: {e!r}",
                                backend="megatron_bridge", operation="save_checkpoint")
 
-    async def load_checkpoint(self, handle: BackendHandle, root: Path,
+    async def load_checkpoint(self, handle: MegatronBridgeHandle, root: Path,
                               optimizer: bool = False) -> None:
-        h: MegatronBridgeHandle = handle  # type: ignore[assignment]
         try:
-            await _get(h.worker.load_checkpoint.remote(str(root), optimizer))
+            await _get(handle.worker.load_checkpoint.remote(str(root), optimizer))
         except Exception as e:
             raise BackendError(f"load_checkpoint failed: {e!r}",
                                backend="megatron_bridge", operation="load_checkpoint")
 
-    async def delete_model(self, handle: BackendHandle) -> None:
+    async def delete_model(self, handle: MegatronBridgeHandle) -> None:
         """Kill the model's GPU actor (frees its megatron state + GPU)."""
-        h: MegatronBridgeHandle = handle  # type: ignore[assignment]
-        if h.worker is not None:
+        if handle.worker is not None:
             import ray
-            ray.kill(h.worker)
-            h.worker = None
-        logger.info("megatron_bridge model %s deleted (actor killed)", h.model_id)
+            ray.kill(handle.worker)
+            handle.worker = None
+        logger.info("megatron_bridge model %s deleted (actor killed)", handle.model_id)
 
 
-def _objective(handle: BackendHandle) -> str:
+def _objective(handle: MegatronBridgeHandle) -> str:
     return handle.objective
 
 

@@ -33,7 +33,8 @@ def _reduce(losses, key: str) -> float:
     for d in losses:
         if isinstance(d, dict) and key in d:
             v = d[key]
-            num += float(v[0]); den += float(v[1])
+            num += float(v[0])
+            den += float(v[1])
     return num / den if den else float("nan")
 
 
@@ -138,8 +139,9 @@ class MegatronBridgeWorker:
         metrics = {}
         if grad_norm is not None:
             metrics["grad_norm:mean"] = float(grad_norm)
-        if lr is not None or learning_rate is not None:
-            metrics["learning_rate:mean"] = float(lr if lr is not None else learning_rate)
+        applied_lr = lr if lr is not None else learning_rate
+        if applied_lr is not None:
+            metrics["learning_rate:mean"] = float(applied_lr)
         return {"metrics": metrics}
 
     def save_checkpoint(self, checkpoint_path: str) -> str:

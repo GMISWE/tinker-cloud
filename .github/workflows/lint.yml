@@ -1,0 +1,20 @@
+name: lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff==0.15.11 pyright==1.1.405
+      - run: ruff check training/
+      # Type check of the backend seam (pyproject [tool.pyright]); engine
+      # packages are not installed here, so only our own types are checked.
+      - run: pyright

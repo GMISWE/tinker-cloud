@@ -8,9 +8,12 @@ the effective configuration is logged at startup with each value's source.
 An empty environment variable counts as unset.
 """
 import os
-from typing import Any, ClassVar, Dict, Optional
+from typing import Any, ClassVar, Dict, Optional, Type, TypeVar
 
 from pydantic import BaseModel, ConfigDict, PrivateAttr
+
+
+T = TypeVar("T", bound="EnvConfig")
 
 
 class EnvConfig(BaseModel):
@@ -22,8 +25,8 @@ class EnvConfig(BaseModel):
     _sources: Dict[str, str] = PrivateAttr(default_factory=dict)
 
     @classmethod
-    def from_env(cls, overrides: Optional[Dict[str, Any]] = None,
-                 environ: Optional[Dict[str, str]] = None) -> "EnvConfig":
+    def from_env(cls: Type[T], overrides: Optional[Dict[str, Any]] = None,
+                 environ: Optional[Dict[str, str]] = None) -> T:
         env = os.environ if environ is None else environ
         values: Dict[str, Any] = {}
         sources: Dict[str, str] = {}

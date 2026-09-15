@@ -13,7 +13,7 @@ ForwardBackwardDatum OR plain dict — handle both):
   RL:  model_input.tokens = full rollout, loss_fn_inputs = {advantages,
        logprobs (sampling), ...} aligned to tokens[1:].
 """
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import torch
 
@@ -21,7 +21,7 @@ from ..base import DataConverter
 from ...models.requests import Datum
 
 
-def _tensor_data(tensor, dtype) -> torch.Tensor:
+def _tensor_data(tensor, dtype) -> Optional[torch.Tensor]:
     """A TensorData -> 1-D tensor; None stays None (the input was not sent)."""
     if tensor is None:
         return None
