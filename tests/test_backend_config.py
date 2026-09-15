@@ -2,13 +2,13 @@
 import pytest
 from pydantic import ValidationError
 
-from tinkercloud.training.backends.miles.config import MilesConfig
+from tinkercloud.training.backends.miles.config import NO_CLIP_EPS, MilesConfig
 from tinkercloud.training.backends.nemo_rl.config import NemoRLConfig
 
 
 def test_defaults_when_nothing_is_set():
     cfg = MilesConfig.from_env(environ={})
-    assert (cfg.multilora_slots, cfg.eps_clip, cfg.dyn_batch, cfg.cobatch_e0_tokens, cfg.tp) == (0, 0.2, True, None, None)
+    assert (cfg.multilora_slots, cfg.eps_clip, cfg.dyn_batch, cfg.cobatch_e0_tokens, cfg.tp) == (0, NO_CLIP_EPS, True, None, None)
     assert cfg.source_of("eps_clip") == "default"
 
 
@@ -34,7 +34,7 @@ def test_describe_lists_every_field_with_source():
     text = MilesConfig.from_env({"train_gpus": 2}, environ={"SLIME_WEIGHT_DECAY": "0.01"}).describe()
     assert "train_gpus=2 (override)" in text
     assert "weight_decay=0.01 (env SLIME_WEIGHT_DECAY)" in text
-    assert "eps_clip=0.2 (default)" in text
+    assert f"eps_clip={NO_CLIP_EPS!r} (default)" in text
     assert text.count("\n") + 1 == len(MilesConfig.model_fields)
 
 
