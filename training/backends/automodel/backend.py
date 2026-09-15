@@ -352,12 +352,9 @@ class AutomodelBackend(TrainingBackend):
         h.data_buffer.clear()
         h.model = None
         h.optimizer = None
-        try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception:  # noqa: BLE001 — teardown best-effort
-            pass
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         logger.info("Automodel model %s deleted", h.model_id)
 
 
