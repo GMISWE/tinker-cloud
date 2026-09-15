@@ -8,13 +8,12 @@ Handles:
 
 All model lifecycle operations delegate to the TrainingBackend instance.
 """
-import asyncio
 import logging
 import ray
 from datetime import datetime
 from typing import Dict, Any, Optional
 
-from ..backends.base import TrainingBackend, BackendHandle
+from ..backends.base import TrainingBackend
 from ..checkpoints import CheckpointStore
 from ..storage import MetadataStorage
 from ..utils.model_config import extract_model_name, detect_architecture, detect_num_gpus

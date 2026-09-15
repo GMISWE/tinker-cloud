@@ -20,6 +20,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from ..base import BackendError, BackendHandle, TrainingBackend
+from ...models.requests import Datum
 from .config import NemoRLConfig
 from ...core.loss_registry import clip_thresholds
 from ...checkpoints.interchange import export_hf_adapter, stage_hf_adapter
@@ -66,13 +67,14 @@ class NemoRLHandle(BackendHandle):
     staleness_k: int = 0                 # Declared max sampler staleness (A4, specs/012)
     generation_synced_version: int = 0   # ver(S): weight version the inference engine holds
     dyn_mb_base: int = 0                 # Base dynamic-batching token budget (A5, specs/013)
+    adam_mismatch_warned: bool = False   # the P4 AdamParams-mismatch warning fired once
     training_resident: bool = False      # model+optimizer GPU-resident in train mode; when
                                          # True the per-step prepare_for_training (BUG-005,
                                          # ~0.35 s/call, Q3-R2 phase decomposition) is skipped.
                                          # Invalidated by every offload path (refit, ckpt load).
 
 
-class NemoRLBackend(TrainingBackend):
+class NemoRLBackend(TrainingBackend[NemoRLHandle]):
     # TinkerSumCELoss / TinkerSumPGLoss; cispo and dro have no NeMo RL loss.
     SUPPORTED_LOSS_FNS = frozenset({"cross_entropy", "importance_sampling", "ppo"})
     """
@@ -221,8 +223,8 @@ class NemoRLBackend(TrainingBackend):
 
     async def forward(
         self,
-        handle: BackendHandle,
-        data: List[Dict],
+        handle: NemoRLHandle,
+        data: List[Datum],
         loss_fn: str,
         loss_fn_config: Optional[Dict[str, float]] = None,
     ) -> Dict[str, Any]:
@@ -231,34 +233,33 @@ class NemoRLBackend(TrainingBackend):
         After init+refit, training workers have offloaded weights to CPU.
         Must sleep vLLM, move model to GPU, compute, then refit to restore.
         """
-        h: NemoRLHandle = handle  # type: ignore[assignment]
         try:
-            batched_data = self.converter.forward_to_backend(data, h.config)
+            batched_data = self.converter.forward_to_backend(data, handle.config)
 
             # Pad for dp_size alignment (get_logprobs uses shard_by_batch_size)
-            dp_size = h.config["dp_size"]
-            mbs = h.config["policy"]["train_micro_batch_size"]
+            dp_size = handle.config["dp_size"]
+            mbs = handle.config["policy"]["train_micro_batch_size"]
             batched_data = await asyncio.to_thread(
-                _maybe_pad_batch, batched_data, dp_size, mbs, h.image_preprocessor,
+                _maybe_pad_batch, batched_data, dp_size, mbs, handle.image_preprocessor,
             )
 
             # Sleep vLLM to free GPU memory for training workers. Recorded as
             # training_ready so a later sample wakes the engine first (weights
             # are still in sync, so that wake needs no refit).
-            if h.policy_generation is not None and h.colocated_inference:
-                async with h._generation_state_lock:
-                    h.generation_state = "training_ready"
-                await asyncio.to_thread(h.policy_generation.finish_generation)
+            if handle.policy_generation is not None and handle.colocated_inference:
+                async with handle._generation_state_lock:
+                    handle.generation_state = "training_ready"
+                await asyncio.to_thread(handle.policy_generation.finish_generation)
 
             # Use prepare_for_training(), not prepare_for_lp_inference(): the latter
             # offloads the optimizer, deadlocking a concurrent apply_optimizer_step
             # in pipelined SFT. train vs eval mode gives identical logprobs (no dropout).
-            if not h.training_resident:
-                await asyncio.to_thread(h.policy.prepare_for_training)
-                h.training_resident = True
+            if not handle.training_resident:
+                await asyncio.to_thread(handle.policy.prepare_for_training)
+                handle.training_resident = True
 
-            _ensure_dyn_mb_budget(h, batched_data)
-            result = await asyncio.to_thread(h.policy.get_logprobs, batched_data)
+            _ensure_dyn_mb_budget(handle, batched_data)
+            result = await asyncio.to_thread(handle.policy.get_logprobs, batched_data)
 
             # No refit after forward(): read-only pass, inference weights already in
             # sync. Refitting here crashes (stale DTensor sharding after CPU→CUDA →
@@ -277,8 +278,8 @@ class NemoRLBackend(TrainingBackend):
 
     async def forward_backward(
         self,
-        handle: BackendHandle,
-        data: List[Dict],
+        handle: NemoRLHandle,
+        data: List[Datum],
         loss_fn: str,
         loss_fn_config: Optional[Dict[str, float]] = None,
     ) -> Dict[str, Any]:
@@ -299,14 +300,13 @@ class NemoRLBackend(TrainingBackend):
         - All microbatches must have identical field keys
         - Microbatch ordering is preserved (FIFO)
         """
-        h: NemoRLHandle = handle  # type: ignore[assignment]
         try:
             # Empty data is a normal GRPO condition (all advantages zero in batch).
             # Return a no-op deferred result — training skips this batch.
             if not data:
                 logger.warning(
                     "forward_backward: empty data for %s — no-op (all advantages likely zero)",
-                    h.model_id,
+                    handle.model_id,
                 )
                 return {
                     "loss_fn_output_type": loss_fn,
@@ -318,26 +318,26 @@ class NemoRLBackend(TrainingBackend):
             # Convert data to NeMo RL BatchedDataDict (outside lock — CPU-bound)
             _t_conv = time.time()
             batched_data = self.converter.forward_backward_to_backend(
-                data, loss_fn, h.config,
-                image_preprocessor=h.image_preprocessor,
+                data, loss_fn, handle.config,
+                image_preprocessor=handle.image_preprocessor,
             )
             _dt_conv = time.time() - _t_conv
 
             # CHK018: Acquire lock for buffer access (concurrent requests)
-            async with h._buffer_lock:
+            async with handle._buffer_lock:
                 # CHK006: Enforce maximum buffer size to prevent unbounded memory growth
-                if len(h.data_buffer) >= h.max_buffer_size:
+                if len(handle.data_buffer) >= handle.max_buffer_size:
                     raise BackendError(
-                        f"Buffer full: {len(h.data_buffer)} microbatches buffered "
-                        f"(max_buffer_size={h.max_buffer_size}). "
+                        f"Buffer full: {len(handle.data_buffer)} microbatches buffered "
+                        f"(max_buffer_size={handle.max_buffer_size}). "
                         f"Call apply_optimizer_step() to flush the buffer.",
                         backend="nemo_rl",
                         operation="forward_backward",
                     )
 
                 # CHK016: Validate field compatibility with existing buffer
-                if h.data_buffer:
-                    existing_keys = set(h.data_buffer[0].keys())
+                if handle.data_buffer:
+                    existing_keys = set(handle.data_buffer[0].keys())
                     new_keys = set(batched_data.keys())
                     if existing_keys != new_keys:
                         raise BackendError(
@@ -349,21 +349,21 @@ class NemoRLBackend(TrainingBackend):
 
                 # One loss configuration per optimizer step: the buffer trains as
                 # a single policy.train() call, so a differing config cannot be honoured.
-                if h.data_buffer and (h.loss_fn_name, h.loss_fn_config or {}) != (loss_fn, loss_fn_config or {}):
+                if handle.data_buffer and (handle.loss_fn_name, handle.loss_fn_config or {}) != (loss_fn, loss_fn_config or {}):
                     raise BackendError(
                         f"loss mismatch within one optimizer step: buffered "
-                        f"{h.loss_fn_name!r} {h.loss_fn_config or {}}, new {loss_fn!r} {loss_fn_config or {}}",
+                        f"{handle.loss_fn_name!r} {handle.loss_fn_config or {}}, new {loss_fn!r} {loss_fn_config or {}}",
                         backend="nemo_rl", operation="forward_backward",
                     )
-                h.data_buffer.append(batched_data)
-                buffer_len = len(h.data_buffer)
+                handle.data_buffer.append(batched_data)
+                buffer_len = len(handle.data_buffer)
                 # Store loss_fn name + config for apply_optimizer_step()
-                h.loss_fn_name = loss_fn
-                h.loss_fn_config = dict(loss_fn_config) if loss_fn_config else None
+                handle.loss_fn_name = loss_fn
+                handle.loss_fn_config = dict(loss_fn_config) if loss_fn_config else None
 
             logger.info(
                 "Buffered microbatch %d for model %s (%d samples)",
-                buffer_len, h.model_id, len(data),
+                buffer_len, handle.model_id, len(data),
             )
 
             # CHK010: deferred contract — empty metrics, real metrics at optim_step.
@@ -405,7 +405,7 @@ class NemoRLBackend(TrainingBackend):
 
     async def apply_optimizer_step(
         self,
-        handle: BackendHandle,
+        handle: NemoRLHandle,
         learning_rate: Optional[float] = None,
         adam_params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -427,36 +427,35 @@ class NemoRLBackend(TrainingBackend):
         prevent stale data re-processing. If policy.train() fails (OOM),
         the client must re-send all forward_backward() data.
         """
-        h: NemoRLHandle = handle  # type: ignore[assignment]
         try:
             # CHK018: Acquire lock to drain buffer atomically.
             # Snapshot and clear under the lock; concatenate outside it.
-            async with h._buffer_lock:
-                if not h.data_buffer:
+            async with handle._buffer_lock:
+                if not handle.data_buffer:
                     # Empty buffer is normal when forward_backward received
                     # empty data (GRPO all-zero advantages). No-op — no GPU work.
                     logger.warning(
                         "apply_optimizer_step: empty buffer for %s — no-op",
-                        h.model_id,
+                        handle.model_id,
                     )
                     return {
                         "success": True,
                         "grad_norm": 0.0,
                         "learning_rates": [],
-                        "model_id": h.model_id,
+                        "model_id": handle.model_id,
                         "metrics": {},
                         "loss_fn_outputs": [],
                     }
 
                 # Atomic swap: take ownership of buffer, give handle a fresh one.
                 # This ensures the buffer is cleared even if concatenation fails (CHK024).
-                buffered_batches = h.data_buffer
-                h.data_buffer = []
+                buffered_batches = handle.data_buffer
+                handle.data_buffer = []
                 num_buffered = len(buffered_batches)
                 # The config that governed this buffer; a pipelined fb(N+1) may
                 # overwrite h.loss_fn_config before we reach policy.train().
-                step_loss_config = h.loss_fn_config
-                h.loss_fn_config = None
+                step_loss_config = handle.loss_fn_config
+                handle.loss_fn_config = None
 
             # Concatenate outside the lock (CPU-bound, no contention needed)
             phases: Dict[str, float] = {}  # Q3-R2 per-step cost decomposition
@@ -467,7 +466,7 @@ class NemoRLBackend(TrainingBackend):
             # CHK027: Warn if buffered sample count doesn't match train_global_batch_size
             # (check BEFORE padding so the warning reflects actual data volume)
             original_size = all_data.size
-            gbs = h.config["policy"]["train_global_batch_size"]
+            gbs = handle.config["policy"]["train_global_batch_size"]
             if gbs > 0 and original_size != gbs:
                 logger.warning(
                     "Buffered %d samples but train_global_batch_size=%d. "
@@ -478,10 +477,10 @@ class NemoRLBackend(TrainingBackend):
             # Pad partial batch if needed — policy.train() → shard_by_batch_size()
             # asserts batch_size % dp_size == 0, so a partial batch will crash.
             # Use NeMo RL's maybe_pad_last_batch to pad with sample_mask=0.
-            dp_size = h.config["dp_size"]
-            mbs = h.config["policy"]["train_micro_batch_size"]
+            dp_size = handle.config["dp_size"]
+            mbs = handle.config["policy"]["train_micro_batch_size"]
             all_data = await asyncio.to_thread(
-                _maybe_pad_batch, all_data, dp_size, mbs, h.image_preprocessor,
+                _maybe_pad_batch, all_data, dp_size, mbs, handle.image_preprocessor,
             )
             if all_data.size != original_size:
                 logger.info(
@@ -492,28 +491,28 @@ class NemoRLBackend(TrainingBackend):
 
             logger.info(
                 "Executing policy.train() with %d buffered microbatches for %s",
-                num_buffered, h.model_id,
+                num_buffered, handle.model_id,
             )
 
             if learning_rate is not None:
-                _set_learning_rate(h.policy, learning_rate)
+                _set_learning_rate(handle.policy, learning_rate)
 
             # P4: betas/eps are fixed at creation (builder defaults match the
             # Tinker AdamParams contract: 0.9/0.95/1e-8); the worker exposes no
             # setter, so warn loudly if a client requests different values.
             if adam_params:
-                _warn_on_adam_mismatch(h, adam_params)
+                _warn_on_adam_mismatch(handle, adam_params)
 
             # Serialize GPU lifecycle: sleep vLLM → train → refit.
             # Pipelined SFT loops fire multiple optim_step calls concurrently;
             # without this lock they race on the same Ray actors/GPU memory,
             # causing "No backend type associated with device type cpu" during refit.
             # The lock only gates GPU work — buffer drain + padding above run freely.
-            async with h._training_lock:
+            async with handle._training_lock:
                 # Transition to training state — generation requests after this
                 # point will hit the safety net path in _ensure_generation_ready().
-                async with h._generation_state_lock:
-                    h.generation_state = "training_ready"
+                async with handle._generation_state_lock:
+                    handle.generation_state = "training_ready"
 
                 try:
                     # BUG-006 fix: In colocated mode, vLLM generation engine holds
@@ -521,21 +520,21 @@ class NemoRLBackend(TrainingBackend):
                     # finish_generation() to sleep vLLM workers and free GPU memory
                     # before loading the training model. Native NeMo RL does this
                     # explicitly in grpo.py after generation completes (line 1352).
-                    if h.policy_generation is not None and h.colocated_inference:
+                    if handle.policy_generation is not None and handle.colocated_inference:
                         logger.info("Finishing generation (sleep vLLM to free GPU memory)")
-                        await asyncio.to_thread(h.policy_generation.finish_generation)
+                        await asyncio.to_thread(handle.policy_generation.finish_generation)
 
                     # BUG-005 fix: NeMo RL requires prepare_for_training() before
                     # policy.train() to move model+optimizer from CPU→CUDA and set
                     # model.train(). Without this, the model stays on CPU after
                     # generation's offload_after_refit() and loss.backward() fails
                     # with "element 0 of tensors does not require grad".
-                    if not h.training_resident:
+                    if not handle.training_resident:
                         logger.info("Preparing policy for training (CPU→CUDA + train mode)")
                         _t = time.time()
-                        await asyncio.to_thread(h.policy.prepare_for_training)
+                        await asyncio.to_thread(handle.policy.prepare_for_training)
                         phases["prepare"] = time.time() - _t
-                        h.training_resident = True
+                        handle.training_resident = True
                     else:
                         # Q3-R2 adoption fix: nothing offloaded since the last train
                         # call, so the BUG-005 invariant already holds.
@@ -547,32 +546,32 @@ class NemoRLBackend(TrainingBackend):
                     # train/sample mismatch; the ~0.003 ratio it masked was the
                     # BUG-012 alignment defect, fixed in the converter.
 
-                    if h.loss_fn_name == "cross_entropy":
+                    if handle.loss_fn_name == "cross_entropy":
                         # Pure-sum CE (Tinker contract), not NeMo RL's mean-normalized
                         # NLLLoss — see BUG-015 and losses.TinkerSumCELoss. Ships to
                         # Ray workers by reference (training is pip install -e'd, so
                         # importable in the shared venv on server + workers).
                         from .losses import TinkerSumCELoss
                         active_loss_fn = TinkerSumCELoss()
-                    elif h.loss_fn_name == "ppo" and step_loss_config:
+                    elif handle.loss_fn_name == "ppo" and step_loss_config:
                         # Per-call clip range: rebuild the pure-sum PG loss from the
                         # create-time config with the client's thresholds.
                         from .losses import TinkerSumPGLoss
                         low, high = clip_thresholds(step_loss_config)
                         active_loss_fn = TinkerSumPGLoss({
-                            **h.config["loss_fn"],
+                            **handle.config["loss_fn"],
                             "ratio_clip_min": 1.0 - low,
                             "ratio_clip_max": high - 1.0,
                         })
                     else:
-                        active_loss_fn = h.loss_fn  # TinkerSumPGLoss (importance_sampling)
+                        active_loss_fn = handle.loss_fn  # TinkerSumPGLoss (importance_sampling)
 
                     # Pass gbs=actual size so NeMo RL shards correctly instead of
                     # defaulting to config train_global_batch_size.
-                    _ensure_dyn_mb_budget(h, all_data)
+                    _ensure_dyn_mb_budget(handle, all_data)
                     _t = time.time()
                     train_result = await asyncio.to_thread(
-                        h.policy.train,
+                        handle.policy.train,
                         data=all_data,
                         loss_fn=active_loss_fn,
                         eval_mode=False,
@@ -589,70 +588,70 @@ class NemoRLBackend(TrainingBackend):
 
                     # BUG-015: weights advanced — bump version so pinned samplers
                     # (e.g. DPO's frozen reference) stop matching the live engine.
-                    h.weight_version += 1
+                    handle.weight_version += 1
 
-                    if h.policy_generation is not None and not h.debug_train_only:
+                    if handle.policy_generation is not None and not handle.debug_train_only:
                         # A4 staleness-k: refit only when the engine would exceed
                         # the declared bound; otherwise wake it with the (stale)
                         # weights its level-1 sleep backed up. k=0 == old behavior.
-                        staleness = h.weight_version - h.generation_synced_version
-                        if staleness > h.staleness_k:
+                        staleness = handle.weight_version - handle.generation_synced_version
+                        if staleness > handle.staleness_k:
                             logger.info(
                                 "Refitting policy generation for %s (engine v%d -> v%d)",
-                                h.model_id, h.generation_synced_version, h.weight_version,
+                                handle.model_id, handle.generation_synced_version, handle.weight_version,
                             )
                             await asyncio.to_thread(
                                 _refit_policy_generation,
-                                h.policy,
-                                h.policy_generation,
-                                h.colocated_inference,
-                                h.refit_memory_ratio,
+                                handle.policy,
+                                handle.policy_generation,
+                                handle.colocated_inference,
+                                handle.refit_memory_ratio,
                             )
-                            h.generation_synced_version = h.weight_version
-                            h.training_resident = False  # refit offloaded the policy
+                            handle.generation_synced_version = handle.weight_version
+                            handle.training_resident = False  # refit offloaded the policy
                         else:
                             logger.info(
                                 "ver(S): refit deferred for %s — engine stays at v%d, "
                                 "latest v%d (staleness %d <= k=%d)",
-                                h.model_id, h.generation_synced_version,
-                                h.weight_version, staleness, h.staleness_k,
+                                handle.model_id, handle.generation_synced_version,
+                                handle.weight_version, staleness, handle.staleness_k,
                             )
                             await asyncio.to_thread(
                                 _wake_generation_stale,
-                                h.policy,
-                                h.policy_generation,
-                                h.colocated_inference,
+                                handle.policy,
+                                handle.policy_generation,
+                                handle.colocated_inference,
                             )
 
                     # Transition back to generation_ready — sampling can now
                     # call generate() directly without offload/refit overhead.
-                    async with h._generation_state_lock:
-                        h.generation_state = "generation_ready"
+                    async with handle._generation_state_lock:
+                        handle.generation_state = "generation_ready"
                 finally:
                     # If training failed before refit, reset state so sampling
                     # doesn't get permanently stuck in training_ready.
-                    async with h._generation_state_lock:
-                        if h.generation_state == "training_ready":
+                    async with handle._generation_state_lock:
+                        if handle.generation_state == "training_ready":
                             logger.warning(
                                 "apply_optimizer_step failed before refit for %s "
                                 "— resetting generation_state to generation_ready",
-                                h.model_id,
+                                handle.model_id,
                             )
-                            h.generation_state = "generation_ready"
+                            handle.generation_state = "generation_ready"
 
             # The worker records each microbatch loss after `loss *= dp*cp` (which
             # only cancels FSDP's mean-reduce for the backward) and all-reduces by
             # sum, so its global_loss is dp*cp times the batch loss. Report the
             # batch loss, which the API defines as the sum over the datums.
-            _policy = h.config["policy"]
+            _policy = handle.config["policy"]
             _cp = (_policy["megatron_cfg"]["context_parallel_size"]
                    if _policy["megatron_cfg"]["enabled"]
                    else _policy["dtensor_cfg"]["context_parallel_size"])
-            _scale = h.config["dp_size"] * _cp
+            _scale = handle.config["dp_size"] * _cp
             if isinstance(train_result, dict) and train_result.get("loss") is not None and _scale > 1:
                 train_result["loss"] = train_result["loss"] / _scale
             result = self.converter.backend_to_forward_backward_result(
-                train_result, [], loss_fn=h.loss_fn_name,
+                train_result, [], loss_fn=handle.loss_fn_name,
             )
 
             # Extract per-sample training logprobs from curr_logprobs [B, S-1].
@@ -669,7 +668,7 @@ class NemoRLBackend(TrainingBackend):
             )
 
             metrics = dict(result.get("metrics", {}))
-            if h.loss_fn_name == "ppo":
+            if handle.loss_fn_name == "ppo":
                 low, high = clip_thresholds(step_loss_config)
                 metrics["clip_low_threshold"] = low
                 metrics["clip_high_threshold"] = high
@@ -678,12 +677,12 @@ class NemoRLBackend(TrainingBackend):
                 "success": True,
                 "grad_norm": result.get("grad_norm", 0.0),
                 "learning_rates": [],
-                "model_id": h.model_id,
+                "model_id": handle.model_id,
                 "metrics": metrics,
                 "loss_fn_outputs": loss_fn_outputs,
                 # A4 ver(S): post-step version state for driver-side accounting
-                "weight_version": h.weight_version,
-                "generation_synced_version": h.generation_synced_version,
+                "weight_version": handle.weight_version,
+                "generation_synced_version": handle.generation_synced_version,
             }
 
         except BackendError:
@@ -693,21 +692,20 @@ class NemoRLBackend(TrainingBackend):
                 str(e), backend="nemo_rl", operation="apply_optimizer_step", original_error=e,
             ) from e
 
-    async def update_inference_weights(self, handle: BackendHandle) -> None:
+    async def update_inference_weights(self, handle: NemoRLHandle) -> None:
         """Sync weights between training policy and inference engine."""
-        h: NemoRLHandle = handle  # type: ignore[assignment]
         try:
-            if h.policy_generation is not None:
+            if handle.policy_generation is not None:
                 await asyncio.to_thread(
                     _refit_policy_generation,
-                    h.policy,
-                    h.policy_generation,
-                    h.colocated_inference,
-                    h.refit_memory_ratio,
+                    handle.policy,
+                    handle.policy_generation,
+                    handle.colocated_inference,
+                    handle.refit_memory_ratio,
                 )
-                h.training_resident = False  # refit offloaded the policy
-                async with h._generation_state_lock:
-                    h.generation_state = "generation_ready"
+                handle.training_resident = False  # refit offloaded the policy
+                async with handle._generation_state_lock:
+                    handle.generation_state = "generation_ready"
         except Exception as e:
             raise BackendError(
                 str(e), backend="nemo_rl", operation="update_inference_weights",
@@ -716,25 +714,24 @@ class NemoRLBackend(TrainingBackend):
 
     async def save_checkpoint(
         self,
-        handle: BackendHandle,
+        handle: NemoRLHandle,
         root: Path,
         step: Optional[int] = None,
         persist: bool = True,
     ) -> None:
         """Save model checkpoint via policy.save_checkpoint()."""
-        h: NemoRLHandle = handle  # type: ignore[assignment]
         if not persist:
             return  # ephemeral sampler save: the refit already delivered the weights
         try:
             local_path = str(root)
 
             weights_path = f"{local_path}/weights"
-            checkpointing_cfg = h.config["checkpointing"]
+            checkpointing_cfg = handle.config["checkpointing"]
 
             # Optimizer state rides beside the weights so load_weights(optimizer=true)
             # can restore it; LoRA moments are small.
             await asyncio.to_thread(
-                h.policy.save_checkpoint,
+                handle.policy.save_checkpoint,
                 weights_path=weights_path,
                 optimizer_path=f"{local_path}/optimizer",
                 checkpointing_cfg=checkpointing_cfg,
@@ -755,7 +752,7 @@ class NemoRLBackend(TrainingBackend):
 
     async def load_checkpoint(
         self,
-        handle: BackendHandle,
+        handle: NemoRLHandle,
         root: Path,
         optimizer: bool = False,
     ) -> None:
@@ -763,7 +760,6 @@ class NemoRLBackend(TrainingBackend):
         policy workers, then sync to the inference engine."""
         import os
 
-        h: NemoRLHandle = handle  # type: ignore[assignment]
         try:
             local_path = str(root)
             weights_path = _stage_foreign_adapter(local_path)
@@ -777,30 +773,30 @@ class NemoRLBackend(TrainingBackend):
                     )
 
             await asyncio.to_thread(
-                _policy_load_checkpoint, h.policy, weights_path, optimizer_path,
+                _policy_load_checkpoint, handle.policy, weights_path, optimizer_path,
             )
 
-            if h.policy_generation is not None and not h.debug_train_only:
+            if handle.policy_generation is not None and not handle.debug_train_only:
                 # The policy was offloaded after the last refit, so the loaded
                 # parameters sit on CPU; the refit streams DTensors and needs
                 # them on GPU (all_gather has no CPU backend). Same sequence as
                 # after an optimizer step: prepare_for_training, refit, offload.
-                if not h.training_resident:
-                    await asyncio.to_thread(h.policy.prepare_for_training)
-                    h.training_resident = True
-                logger.info("Refitting policy generation after checkpoint load for %s", h.model_id)
+                if not handle.training_resident:
+                    await asyncio.to_thread(handle.policy.prepare_for_training)
+                    handle.training_resident = True
+                logger.info("Refitting policy generation after checkpoint load for %s", handle.model_id)
                 await asyncio.to_thread(
                     _refit_policy_generation,
-                    h.policy,
-                    h.policy_generation,
-                    h.colocated_inference,
-                    h.refit_memory_ratio,
+                    handle.policy,
+                    handle.policy_generation,
+                    handle.colocated_inference,
+                    handle.refit_memory_ratio,
                 )
-                h.training_resident = False  # the refit offloaded the policy
+                handle.training_resident = False  # the refit offloaded the policy
             else:
-                h.training_resident = False  # loaded state may not be GPU-resident
-                async with h._generation_state_lock:
-                    h.generation_state = "generation_ready"
+                handle.training_resident = False  # loaded state may not be GPU-resident
+                async with handle._generation_state_lock:
+                    handle.generation_state = "generation_ready"
 
             logger.info("NeMo RL checkpoint loaded from %s", root)
 
@@ -811,37 +807,36 @@ class NemoRLBackend(TrainingBackend):
                 str(e), backend="nemo_rl", operation="load_checkpoint", original_error=e,
             ) from e
 
-    async def delete_model(self, handle: BackendHandle) -> None:
+    async def delete_model(self, handle: NemoRLHandle) -> None:
         """Tear down NeMo RL Policy and release GPU resources."""
-        h: NemoRLHandle = handle  # type: ignore[assignment]
         try:
             # CHK007: Warn and discard pending buffered data on deletion.
             # CHK018: Acquire lock to prevent race with concurrent forward_backward.
-            async with h._buffer_lock:
-                if h.data_buffer:
+            async with handle._buffer_lock:
+                if handle.data_buffer:
                     logger.warning(
                         "Deleting model %s with %d buffered microbatches "
                         "(data will be discarded without training)",
-                        h.model_id, len(h.data_buffer),
+                        handle.model_id, len(handle.data_buffer),
                     )
-                    h.data_buffer.clear()
+                    handle.data_buffer.clear()
 
-            if h.policy is not None:
-                await asyncio.to_thread(h.policy.shutdown)
-                logger.info("NeMo RL policy shut down for %s", h.model_id)
+            if handle.policy is not None:
+                await asyncio.to_thread(handle.policy.shutdown)
+                logger.info("NeMo RL policy shut down for %s", handle.model_id)
 
-            if h.policy_generation is not None and h.policy_generation is not h.policy:
+            if handle.policy_generation is not None and handle.policy_generation is not handle.policy:
                 try:
-                    await asyncio.to_thread(h.policy_generation.shutdown)
-                    logger.info("NeMo RL generation shut down for %s", h.model_id)
+                    await asyncio.to_thread(handle.policy_generation.shutdown)
+                    logger.info("NeMo RL generation shut down for %s", handle.model_id)
                 except Exception:
                     # The generation worker group can share actors with the policy,
                     # which was shut down just above; log rather than hide it.
-                    logger.warning("delete_model: generation shutdown failed for %s", h.model_id, exc_info=True)
+                    logger.warning("delete_model: generation shutdown failed for %s", handle.model_id, exc_info=True)
 
-            self._batch_accumulators.pop(h.model_id, None)
+            self._batch_accumulators.pop(handle.model_id, None)
 
-            logger.info("NeMo RL model %s deleted", h.model_id)
+            logger.info("NeMo RL model %s deleted", handle.model_id)
 
         except Exception as e:
             raise BackendError(
@@ -850,8 +845,8 @@ class NemoRLBackend(TrainingBackend):
 
     async def get_logprobs(
         self,
-        handle: BackendHandle,
-        data: List[Dict],
+        handle: NemoRLHandle,
+        data: List[Datum],
     ) -> List[Any]:
         """Compute logprobs via policy.get_logprobs()."""
         result = await self.forward(handle, data, loss_fn="cross_entropy")
@@ -863,7 +858,7 @@ class NemoRLBackend(TrainingBackend):
 
     async def sample(
         self,
-        handle: BackendHandle,
+        handle: NemoRLHandle,
         request_id: str,
         prompt_tokens: List[int],
         num_samples: int,
@@ -884,30 +879,29 @@ class NemoRLBackend(TrainingBackend):
         """
         from .generation import NemoRLBatchAccumulator
 
-        h: NemoRLHandle = handle  # type: ignore[assignment]
 
         # BUG-015 routing: version-pinned logprob reads
-        if prompt_logprobs and pinned_version is not None and pinned_version != h.weight_version:
+        if prompt_logprobs and pinned_version is not None and pinned_version != handle.weight_version:
             if pinned_version == 0:
-                return await self._reference_prompt_logprobs(h, prompt_tokens)
+                return await self._reference_prompt_logprobs(handle, prompt_tokens)
             logger.warning(
                 "[%s] sampler pinned at v%s but live weights at v%s — serving from "
                 "LIVE weights (known-wrong; needs version-pinned sampling, 003)",
-                request_id, pinned_version, h.weight_version,
+                request_id, pinned_version, handle.weight_version,
             )
 
-        if h.policy_generation is None:
+        if handle.policy_generation is None:
             raise BackendError(
                 "generation engine not initialized (debug_train_only mode?)",
                 backend="nemo_rl", operation="sample",
             )
         # Wake/refit an engine a forward-only pass left asleep (fast path: one lock).
-        await _ensure_generation_ready(h)
+        await _ensure_generation_ready(handle)
         accumulator = self._batch_accumulators.setdefault(
-            h.model_id, NemoRLBatchAccumulator()
+            handle.model_id, NemoRLBatchAccumulator()
         )
         result = await accumulator.submit(
-            handle=h,
+            handle=handle,
             request_id=request_id,
             prompt_tokens=prompt_tokens,
             num_samples=num_samples,
@@ -919,13 +913,13 @@ class NemoRLBackend(TrainingBackend):
         # post-serve; sampling is not part of the model's ordered training
         # program (services.ordering), so a concurrent optim_step can bump
         # weight_version between flush and here — the stamp is best-effort.
-        served_v = h.generation_synced_version
-        latest_v = h.weight_version
-        if latest_v - served_v > h.staleness_k:
+        served_v = handle.generation_synced_version
+        latest_v = handle.weight_version
+        if latest_v - served_v > handle.staleness_k:
             raise BackendError(
                 f"ver(S) certificate violation: served v{served_v}, latest "
                 f"v{latest_v}, staleness {latest_v - served_v} > declared "
-                f"k={h.staleness_k}",
+                f"k={handle.staleness_k}",
                 backend="nemo_rl", operation="sample",
             )
         result["weight_version"] = served_v
@@ -998,18 +992,17 @@ class NemoRLBackend(TrainingBackend):
             results.append([None] + [float(v) for v in vals])
         return results
 
-    async def prepare_for_generation(self, handle: BackendHandle) -> None:
+    async def prepare_for_generation(self, handle: NemoRLHandle) -> None:
         """Safety-net refit + wake if the engine was left in training state."""
-        h: NemoRLHandle = handle  # type: ignore[assignment]
-        if h.policy_generation is None:
+        if handle.policy_generation is None:
             raise BackendError(
                 "generation engine not initialized (debug_train_only mode?)",
                 backend="nemo_rl", operation="prepare_for_generation",
             )
-        await _ensure_generation_ready(h)
+        await _ensure_generation_ready(handle)
 
 
-async def _ensure_generation_ready(handle) -> None:
+async def _ensure_generation_ready(handle: NemoRLHandle) -> None:
     """Ensure the handle is ready for generation.
 
     Fast path (normal case): generation_state is already "generation_ready"
@@ -1274,7 +1267,7 @@ def _warn_on_adam_mismatch(h: "NemoRLHandle", adam_params: Dict[str, Any]) -> No
     NeMo RL's worker only exposes set_learning_rate, so differing requests
     cannot be honored per-step without an upstream setter. Warn once per handle.
     """
-    if getattr(h, "_adam_mismatch_warned", False):
+    if h.adam_mismatch_warned:
         return
     kwargs = h.config["policy"]["optimizer"]["kwargs"]
     applied = {
@@ -1295,7 +1288,7 @@ def _warn_on_adam_mismatch(h: "NemoRLHandle", adam_params: Dict[str, Any]) -> No
             "model creation (builder) or add an upstream NeMo RL setter.",
             mismatches,
         )
-    h._adam_mismatch_warned = True
+    h.adam_mismatch_warned = True
 
 
 def _set_learning_rate(policy, learning_rate: float):

@@ -66,7 +66,7 @@ def logprobs_for(tokens: List[int]) -> List[float]:
     return [-(t % 7) / 7.0 for t in tokens]
 
 
-class FakeBackend(TrainingBackend):
+class FakeBackend(TrainingBackend[FakeHandle]):
     needs_ray = False
     SUPPORTED_LOSS_FNS = frozenset(LOSS_FNS)
 
@@ -82,7 +82,7 @@ class FakeBackend(TrainingBackend):
         with open(self._trace_path, "a") as f:
             f.write(json.dumps({"op": op, "model_id": model_id, **kw}, default=str) + "\n")
 
-    def _handle(self, handle: BackendHandle, op: str) -> FakeHandle:
+    def _handle(self, handle: FakeHandle, op: str) -> FakeHandle:
         h = self._models.get(handle.model_id)
         if h is None:
             raise BackendError(f"Model {handle.model_id} not found", backend="fake", operation=op)
@@ -99,7 +99,7 @@ class FakeBackend(TrainingBackend):
         staleness_k: int = 0, objective: str = "language_modeling",
         num_labels: Optional[int] = None, head_config: Optional[Dict[str, Any]] = None,
         native_root: Optional[Path] = None,
-    ) -> BackendHandle:
+    ) -> FakeHandle:
         if objective != "language_modeling":
             raise BackendError(f"objective {objective!r} unsupported", backend="fake", operation="create_model")
         h = FakeHandle(model_id=model_id, backend_type="fake", base_model=base_model,
@@ -111,12 +111,12 @@ class FakeBackend(TrainingBackend):
                     resume_from=resume_from, native_root=native_root)
         return h
 
-    async def delete_model(self, handle: BackendHandle) -> None:
+    async def delete_model(self, handle: FakeHandle) -> None:
         self._models.pop(handle.model_id, None)
         self._trace("delete_model", handle.model_id)
 
     # --- training --------------------------------------------------------
-    def _outputs(self, data: List[Any]):
+    def _outputs(self, data: List[Datum]):
         outputs, losses = [], []
         for datum in data:
             model_input, _ = _datum_parts(datum)
@@ -125,14 +125,14 @@ class FakeBackend(TrainingBackend):
             outputs.append({"logprobs": {"data": lp, "shape": [len(lp)], "dtype": "float32"}})
         return outputs, (sum(losses) / len(losses) if losses else 0.0)
 
-    async def forward(self, handle: BackendHandle, data: List[Any], loss_fn: str,
+    async def forward(self, handle: FakeHandle, data: List[Datum], loss_fn: str,
                       loss_fn_config: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
         h = self._handle(handle, "forward")
         outputs, _ = self._outputs(data)
         self._trace("forward", h.model_id, n=len(data), loss_fn=loss_fn, loss_fn_config=loss_fn_config)
         return {"type": "forward", "loss_fn_output_type": loss_fn, "loss_fn_outputs": outputs, "metrics": {}}
 
-    async def forward_backward(self, handle: BackendHandle, data: List[Any], loss_fn: str,
+    async def forward_backward(self, handle: FakeHandle, data: List[Datum], loss_fn: str,
                                loss_fn_config: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
         h = self._handle(handle, "forward_backward")
         outputs, loss = self._outputs(data)
@@ -150,7 +150,7 @@ class FakeBackend(TrainingBackend):
         }
 
     async def apply_optimizer_step(
-        self, handle: BackendHandle, learning_rate: Optional[float] = None,
+        self, handle: FakeHandle, learning_rate: Optional[float] = None,
         adam_params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         h = self._handle(handle, "apply_optimizer_step")
@@ -169,19 +169,19 @@ class FakeBackend(TrainingBackend):
             "weight_version": h.weight_version,
         }
 
-    async def get_logprobs(self, handle: BackendHandle, data: List[Any]) -> List[Any]:
+    async def get_logprobs(self, handle: FakeHandle, data: List[Datum]) -> List[Any]:
         self._handle(handle, "get_logprobs")
         return [logprobs_for(_tokens_of(_datum_parts(d)[0])) for d in data]
 
     # --- generation ------------------------------------------------------
-    async def update_inference_weights(self, handle: BackendHandle) -> None:
+    async def update_inference_weights(self, handle: FakeHandle) -> None:
         self._trace("update_inference_weights", handle.model_id)
 
-    async def prepare_for_generation(self, handle: BackendHandle) -> None:
+    async def prepare_for_generation(self, handle: FakeHandle) -> None:
         self._handle(handle, "prepare_for_generation")
 
     async def sample(
-        self, handle: BackendHandle, request_id: str, prompt_tokens: List[int], num_samples: int,
+        self, handle: FakeHandle, request_id: str, prompt_tokens: List[int], num_samples: int,
         sampling_params: Optional[Dict[str, Any]] = None, prompt_logprobs: bool = False,
         pinned_version: Optional[int] = None,
     ) -> Dict[str, Any]:
@@ -216,7 +216,7 @@ class FakeBackend(TrainingBackend):
         return out
 
     # --- checkpoints -----------------------------------------------------
-    async def save_checkpoint(self, handle: BackendHandle, root: Path, step: Optional[int] = None,
+    async def save_checkpoint(self, handle: FakeHandle, root: Path, step: Optional[int] = None,
                               persist: bool = True) -> None:
         h = self._handle(handle, "save_checkpoint")
         if persist:
@@ -245,7 +245,7 @@ class FakeBackend(TrainingBackend):
         if optimizer:
             h.step_count = st["optimizer"]["step_count"]
 
-    async def load_checkpoint(self, handle: BackendHandle, root: Path,
+    async def load_checkpoint(self, handle: FakeHandle, root: Path,
                               optimizer: bool = False) -> None:
         h = self._handle(handle, "load_checkpoint")
         self._load_into(h, root, optimizer=optimizer)

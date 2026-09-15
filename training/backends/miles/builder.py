@@ -79,7 +79,7 @@ class MilesArgumentBuilder(ArgumentBuilder):
         logger.info(f"Loaded model config: {model_config}")
 
         # Determine parallelism - use new unified auto-detection
-        rlve_enabled = rlve_config and rlve_config.get("enabled", False)
+        rlve_enabled = bool(rlve_config and rlve_config.get("enabled", False))
         num_gpus = num_gpus or detect_num_gpus()
         if parallelism_config:
             num_gpus = parallelism_config.get("num_gpus", num_gpus)
@@ -104,8 +104,9 @@ class MilesArgumentBuilder(ArgumentBuilder):
 
         # Get max sequence length for CP decision
         # Use parameter value (from tinker-cookbook), but allow rlve_config to override for RLVE mode
-        if rlve_config and rlve_config.get('rollout_max_response_len'):
-            max_seq_len = rlve_config.get('rollout_max_response_len')
+        rlve_max_response_len = rlve_config.get('rollout_max_response_len') if rlve_config else None
+        if rlve_max_response_len:
+            max_seq_len = int(rlve_max_response_len)
 
         # Auto-detect all parallelism dimensions
         parallel = auto_detect_all_parallelism(
@@ -187,7 +188,7 @@ class MilesArgumentBuilder(ArgumentBuilder):
     ) -> list:
         """Build minimal CLI arguments for Slime's parse_args."""
         # Check if RLVE mode is enabled
-        rlve_enabled = rlve_config and rlve_config.get("enabled", False)
+        rlve_enabled = bool(rlve_config and rlve_config.get("enabled", False))
 
         # Batch size configuration - satisfies Slime's assertion:
         # rollout_batch_size * n_samples_per_prompt % global_batch_size == 0
@@ -405,7 +406,7 @@ class MilesArgumentBuilder(ArgumentBuilder):
     ) -> Namespace:
         """Configure model-specific argument overrides."""
         # Check if RLVE mode is enabled
-        rlve_enabled = rlve_config and rlve_config.get("enabled", False)
+        rlve_enabled = bool(rlve_config and rlve_config.get("enabled", False))
         # Model architecture flags
         args.swiglu = True
         args.use_rotary_position_embeddings = True

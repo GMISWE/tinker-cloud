@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional
 import torch
 
 from ..base import BackendError, BackendHandle, TrainingBackend, UnsupportedFeatureError
+from ...models.requests import Datum
 from ...checkpoints.interchange import (
     HF_ADAPTER_DIRNAME,
     find_hf_adapter,
@@ -68,7 +69,7 @@ class VerlHandle(BackendHandle):
     _samplers_drained: asyncio.Event = field(default_factory=_set_event)
 
 
-class VerlBackend(TrainingBackend):
+class VerlBackend(TrainingBackend[VerlHandle]):
     SUPPORTED_LOSS_FNS = frozenset({"cross_entropy", "importance_sampling", "ppo"})  # losses.LOSS_FNS
     """veRL backend using upstream TinkerTrainingWorker split primitives."""
 
@@ -187,19 +188,18 @@ class VerlBackend(TrainingBackend):
 
     async def forward_backward(
         self,
-        handle: BackendHandle,
-        data: List[Dict],
+        handle: VerlHandle,
+        data: List[Datum],
         loss_fn: str,
         loss_fn_config: Optional[Dict[str, float]] = None,
     ) -> Dict[str, Any]:
-        h: VerlHandle = handle  # type: ignore[assignment]
-        async with h._lock:
+        async with handle._lock:
             try:
-                await self._quiesce_samplers(h)
-                await asyncio.to_thread(self._ensure_training_ready, h)
-                await asyncio.to_thread(self._ensure_loss_fn, h, loss_fn)
-                td = await asyncio.to_thread(self._to_tensordict, h, data, loss_fn)
-                out = await asyncio.to_thread(_wg_call, h.worker_group.forward_backward, td)
+                await self._quiesce_samplers(handle)
+                await asyncio.to_thread(self._ensure_training_ready, handle)
+                await asyncio.to_thread(self._ensure_loss_fn, handle, loss_fn)
+                td = await asyncio.to_thread(self._to_tensordict, handle, data, loss_fn)
+                out = await asyncio.to_thread(_wg_call, handle.worker_group.forward_backward, td)
                 logprobs = await asyncio.to_thread(self._model_output_logprobs, out, td)
                 loss_fn_outputs = self.converter.extract_logprobs(logprobs, data)
                 metrics = _scalar_metrics(out)
@@ -216,15 +216,14 @@ class VerlBackend(TrainingBackend):
 
     async def apply_optimizer_step(
         self,
-        handle: BackendHandle,
+        handle: VerlHandle,
         learning_rate: Optional[float] = None,
         adam_params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        h: VerlHandle = handle  # type: ignore[assignment]
-        async with h._lock:
+        async with handle._lock:
             try:
-                await self._quiesce_samplers(h)
-                await asyncio.to_thread(self._ensure_training_ready, h)
+                await self._quiesce_samplers(handle)
+                await asyncio.to_thread(self._ensure_training_ready, handle)
                 params: Dict[str, Any] = {}
                 if learning_rate is not None:
                     params["lr"] = float(learning_rate)
@@ -243,9 +242,9 @@ class VerlBackend(TrainingBackend):
                     logger.warning("verl optim_step: grad_clip_norm set at engine build, not per step")
 
                 metrics = await asyncio.to_thread(
-                    _wg_scalar_call, h.worker_group.optimizer_step, params or None,
+                    _wg_scalar_call, handle.worker_group.optimizer_step, params or None,
                 )
-                h.weight_version += 1
+                handle.weight_version += 1
                 grad_norm = metrics.get("grad_norm")
                 return {"success": True, "grad_norm": grad_norm, "metrics": metrics}
             except BackendError:
@@ -255,8 +254,8 @@ class VerlBackend(TrainingBackend):
 
     async def forward(
         self,
-        handle: BackendHandle,
-        data: List[Dict],
+        handle: VerlHandle,
+        data: List[Datum],
         loss_fn: str,
         loss_fn_config: Optional[Dict[str, float]] = None,
     ) -> Dict[str, Any]:
@@ -265,19 +264,18 @@ class VerlBackend(TrainingBackend):
 
     async def get_logprobs(
         self,
-        handle: BackendHandle,
-        data: List[Dict],
+        handle: VerlHandle,
+        data: List[Datum],
     ) -> List[Any]:
-        h: VerlHandle = handle  # type: ignore[assignment]
-        async with h._lock:
+        async with handle._lock:
             try:
-                await self._quiesce_samplers(h)
-                await asyncio.to_thread(self._ensure_training_ready, h)
-                td = await asyncio.to_thread(self._to_tensordict, h, data, "cross_entropy", True)
+                await self._quiesce_samplers(handle)
+                await asyncio.to_thread(self._ensure_training_ready, handle)
+                td = await asyncio.to_thread(self._to_tensordict, handle, data, "cross_entropy", True)
                 from verl.utils import tensordict_utils as tu
                 tu.assign_non_tensor(td, compute_loss=False)
                 # rollout worker exposes the actor's infer path as compute_log_prob
-                infer = getattr(h.worker_group, "infer_batch", None) or h.worker_group.compute_log_prob
+                infer = getattr(handle.worker_group, "infer_batch", None) or handle.worker_group.compute_log_prob
                 out = await asyncio.to_thread(_wg_call, infer, td)
                 logprobs = await asyncio.to_thread(self._model_output_logprobs, out, td)
                 return self.converter.extract_logprobs(logprobs, data)
@@ -288,36 +286,34 @@ class VerlBackend(TrainingBackend):
 
     # ------------------------------------------------------------ lifecycle
 
-    async def update_inference_weights(self, handle: BackendHandle) -> None:
+    async def update_inference_weights(self, handle: VerlHandle) -> None:
         # Lazy: weight_version already advanced at optim_step; the actual
         # vLLM sync happens on the next sample/prepare_for_generation
         # (version-gated), so pure-training runs never pay wake/sync cost.
-        h: VerlHandle = handle  # type: ignore[assignment]
-        if h.has_rollout:
+        if handle.has_rollout:
             logger.debug(
                 "verl update_inference_weights deferred (v%d, synced v%d)",
-                h.weight_version, h.rollout_synced_version,
+                handle.weight_version, handle.rollout_synced_version,
             )
         return None
 
     async def save_checkpoint(
         self,
-        handle: BackendHandle,
+        handle: VerlHandle,
         root: Path,
         step: Optional[int] = None,
         persist: bool = True,
     ) -> None:
-        h: VerlHandle = handle  # type: ignore[assignment]
         if not persist:
             return  # ephemeral sampler save: the engines already hold the weights
-        async with h._lock:
+        async with handle._lock:
             try:
-                await self._quiesce_samplers(h)
+                await self._quiesce_samplers(handle)
                 local_path = str(root)
                 await asyncio.to_thread(
-                    h.worker_group.save_checkpoint, local_path, None, step or h.weight_version,
+                    handle.worker_group.save_checkpoint, local_path, None, step or handle.weight_version,
                 )
-                if h.lora_rank > 0:
+                if handle.lora_rank > 0:
                     # verl writes FSDP-sharded .pt only; no PEFT export path
                     # yet (specs/007 §3.5) — say so rather than leaving a
                     # silently unmigratable checkpoint behind.
@@ -329,15 +325,14 @@ class VerlBackend(TrainingBackend):
             except Exception as e:
                 raise BackendError(str(e), backend="verl", operation="save_checkpoint", original_error=e) from e
 
-    async def load_checkpoint(self, handle: BackendHandle, root: Path,
+    async def load_checkpoint(self, handle: VerlHandle, root: Path,
                               optimizer: bool = False) -> None:
-        h: VerlHandle = handle  # type: ignore[assignment]
         if optimizer:
             raise BackendError("verl restores weights only; optimizer state is not restored",
                                backend="verl", operation="load_checkpoint")
-        async with h._lock:
+        async with handle._lock:
             try:
-                await self._quiesce_samplers(h)
+                await self._quiesce_samplers(handle)
                 local_path = str(root)
                 if find_hf_adapter(local_path):
                     # PeftModel.from_pretrained wraps pre-FSDP: only create_model
@@ -347,44 +342,43 @@ class VerlBackend(TrainingBackend):
                         "(lora_adapter_path), not via load_checkpoint",
                         backend="verl", operation="load_checkpoint",
                     )
-                await asyncio.to_thread(h.worker_group.load_checkpoint, local_path)
+                await asyncio.to_thread(handle.worker_group.load_checkpoint, local_path)
             except Exception as e:
                 raise BackendError(str(e), backend="verl", operation="load_checkpoint", original_error=e) from e
 
-    async def delete_model(self, handle: BackendHandle) -> None:
-        h: VerlHandle = handle  # type: ignore[assignment]
+    async def delete_model(self, handle: VerlHandle) -> None:
         try:
             import ray
             # rollout server actors first (they hold engine refs into workers)
-            for replica in (h.llm_manager.get_replicas() if h.llm_manager else []):
+            for replica in (handle.llm_manager.get_replicas() if handle.llm_manager else []):
                 for server in getattr(replica, "servers", []) or []:
                     try:
                         ray.kill(server)
                     except Exception:
                         logger.warning("delete_model: rollout server %r not killed", server, exc_info=True)
-            h.llm_manager = None
-            h.llm_client = None
-            h.ckpt_manager = None
-            for w in getattr(h.worker_group, "workers", []) or []:
+            handle.llm_manager = None
+            handle.llm_client = None
+            handle.ckpt_manager = None
+            for w in getattr(handle.worker_group, "workers", []) or []:
                 try:
                     ray.kill(w)
                 except Exception:
                     logger.warning("delete_model: worker %r not killed", w, exc_info=True)
-            if h.resource_pool is not None:
-                pgs = getattr(h.resource_pool, "pgs", None) or []
+            if handle.resource_pool is not None:
+                pgs = getattr(handle.resource_pool, "pgs", None) or []
                 for pg in pgs:
                     try:
                         ray.util.remove_placement_group(pg)
                     except Exception:
                         logger.warning("delete_model: placement group %r not removed", pg, exc_info=True)
-            h.worker_group = None
-            h.resource_pool = None
+            handle.worker_group = None
+            handle.resource_pool = None
         except Exception as e:
             raise BackendError(str(e), backend="verl", operation="delete_model", original_error=e) from e
 
     async def sample(
         self,
-        handle: BackendHandle,
+        handle: VerlHandle,
         request_id: str,
         prompt_tokens: List[int],
         num_samples: int,
@@ -392,8 +386,7 @@ class VerlBackend(TrainingBackend):
         prompt_logprobs: bool = False,
         pinned_version: Optional[int] = None,
     ) -> Dict[str, Any]:
-        h: VerlHandle = handle  # type: ignore[assignment]
-        if not h.has_rollout:
+        if not handle.has_rollout:
             raise UnsupportedFeatureError(
                 "sample", backend="verl",
                 suggestion="model was created debug_train_only; recreate with rollout enabled",
@@ -403,26 +396,26 @@ class VerlBackend(TrainingBackend):
         # serializes the wake/weight-sync), then generate WITHOUT the lock so
         # concurrent sample requests batch inside vLLM; training ops quiesce
         # samplers via _quiesce_samplers before touching the GPUs.
-        async with h._lock:
+        async with handle._lock:
             try:
-                await asyncio.to_thread(self._ensure_rollout_ready, h)
+                await asyncio.to_thread(self._ensure_rollout_ready, handle)
 
-                if pinned_version is not None and pinned_version != h.weight_version:
+                if pinned_version is not None and pinned_version != handle.weight_version:
                     # vLLM serves the live (base+adapter) route; a pinned
                     # nonzero version is not honorable — BUG-015 aliasing
                     # class, logged loudly rather than silently aliased.
                     logger.warning(
                         "[%s] pinned_version=%s not honored for %s (verl serves "
                         "the live engine, v%d) — BUG-015 aliasing risk",
-                        request_id, pinned_version, h.model_id, h.weight_version,
+                        request_id, pinned_version, handle.model_id, handle.weight_version,
                     )
                 if prompt_logprobs:
                     logger.warning(
                         "[%s] prompt_logprobs unsupported on verl sample path "
                         "(use forward/get_logprobs); returning None", request_id,
                     )
-                h._active_samplers += 1
-                h._samplers_drained.clear()
+                handle._active_samplers += 1
+                handle._samplers_drained.clear()
             except (BackendError, UnsupportedFeatureError):
                 raise
             except Exception as e:
@@ -439,7 +432,7 @@ class VerlBackend(TrainingBackend):
                         # num_samples fanout would return identical samples.
                         # Derive per-sample seeds (deterministic across reruns).
                         sp_i["seed"] = int(sp_i["seed"]) + i
-                    out = await h.llm_client.generate(
+                    out = await handle.llm_client.generate(
                         f"{request_id}_{i}",
                         prompt_ids=list(prompt_tokens),
                         sampling_params=sp_i,
@@ -448,9 +441,9 @@ class VerlBackend(TrainingBackend):
 
                 outs = await asyncio.gather(*[_one(i) for i in range(num_samples)])
             finally:
-                h._active_samplers -= 1
-                if h._active_samplers == 0:
-                    h._samplers_drained.set()
+                handle._active_samplers -= 1
+                if handle._active_samplers == 0:
+                    handle._samplers_drained.set()
             sequences = []
             for out in outs:
                 if out.stop_reason == "aborted":
@@ -471,16 +464,15 @@ class VerlBackend(TrainingBackend):
         except Exception as e:
             raise BackendError(str(e), backend="verl", operation="sample", original_error=e) from e
 
-    async def prepare_for_generation(self, handle: BackendHandle) -> None:
-        h: VerlHandle = handle  # type: ignore[assignment]
-        if not h.has_rollout:
+    async def prepare_for_generation(self, handle: VerlHandle) -> None:
+        if not handle.has_rollout:
             raise UnsupportedFeatureError(
                 "prepare_for_generation", backend="verl",
                 suggestion="model was created debug_train_only; recreate with rollout enabled",
             )
-        async with h._lock:
+        async with handle._lock:
             try:
-                await asyncio.to_thread(self._ensure_rollout_ready, h)
+                await asyncio.to_thread(self._ensure_rollout_ready, handle)
             except Exception as e:
                 raise BackendError(
                     str(e), backend="verl", operation="prepare_for_generation", original_error=e,
@@ -526,7 +518,7 @@ class VerlBackend(TrainingBackend):
         _ = get_loss_fn(loss_fn)  # validate name eagerly
         h.loss_fn_name = loss_fn
 
-    def _to_tensordict(self, h: VerlHandle, data: List[Dict], loss_fn: str, infer: bool = False):
+    def _to_tensordict(self, h: VerlHandle, data: List[Datum], loss_fn: str, infer: bool = False):
         from tensordict import TensorDict
         from verl.utils import tensordict_utils as tu
         from verl.workers.utils.padding import left_right_2_no_padding
@@ -623,9 +615,11 @@ def _scalar_metrics(out) -> Dict[str, Any]:
 def _to_vllm_sampling_params(sampling_params: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Tinker SamplingParams dict -> vLLM server generate sampling_params."""
     sp = dict(sampling_params or {})
+    temperature = sp.get("temperature")
+    top_p = sp.get("top_p")
     out: Dict[str, Any] = {
-        "temperature": float(sp.get("temperature") if sp.get("temperature") is not None else 1.0),
-        "top_p": float(sp.get("top_p") if sp.get("top_p") is not None else 1.0),
+        "temperature": float(1.0 if temperature is None else temperature),
+        "top_p": float(1.0 if top_p is None else top_p),
         "logprobs": True,
     }
     top_k = sp.get("top_k")
