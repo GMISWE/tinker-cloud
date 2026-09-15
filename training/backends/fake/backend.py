@@ -37,7 +37,6 @@ STATE_FILE = "fake_state.json"
 class FakeHandle(BackendHandle):
     base_model: str = ""
     lora_config: Optional[Dict[str, Any]] = None
-    hf_path: str = ""
     w: float = 0.0
     step_count: int = 0
     pending: int = 0

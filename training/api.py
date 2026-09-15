@@ -132,7 +132,7 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
             backend_overrides=config_obj.backend.backend_overrides,
         )
         logger.info("Backend initialized: %s", backend_type)
-        backend_cfg = getattr(backend, "config", None)
+        backend_cfg = backend.config
         if backend_cfg is not None:
             logger.info("Effective %s backend config (value, source):\n%s", backend_type, backend_cfg.describe())
 

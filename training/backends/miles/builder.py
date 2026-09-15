@@ -79,7 +79,8 @@ class MilesArgumentBuilder(ArgumentBuilder):
         logger.info(f"Loaded model config: {model_config}")
 
         # Determine parallelism - use new unified auto-detection
-        rlve_enabled = bool(rlve_config and rlve_config.get("enabled", False))
+        rlve = rlve_config if rlve_config and rlve_config.get("enabled", False) else None
+        rlve_enabled = rlve is not None
         num_gpus = num_gpus or detect_num_gpus()
         if parallelism_config:
             num_gpus = parallelism_config.get("num_gpus", num_gpus)
@@ -188,14 +189,14 @@ class MilesArgumentBuilder(ArgumentBuilder):
     ) -> list:
         """Build minimal CLI arguments for Slime's parse_args."""
         # Check if RLVE mode is enabled
-        rlve_enabled = bool(rlve_config and rlve_config.get("enabled", False))
+        rlve = rlve_config if rlve_config and rlve_config.get("enabled", False) else None
 
         # Batch size configuration - satisfies Slime's assertion:
         # rollout_batch_size * n_samples_per_prompt % global_batch_size == 0
-        if rlve_enabled:
+        if rlve is not None:
             # RLVE mode: use RLVE-specific rollout settings
-            rollout_batch_size = rlve_config.get("rollout_batch_size", 32)
-            n_samples_per_prompt = rlve_config.get("n_samples_per_prompt", 8)
+            rollout_batch_size = rlve.get("rollout_batch_size", 32)
+            n_samples_per_prompt = rlve.get("n_samples_per_prompt", 8)
             global_batch_size = rollout_batch_size * n_samples_per_prompt
             logger.info(f"RLVE mode: rollout_batch_size={rollout_batch_size}, n_samples_per_prompt={n_samples_per_prompt}")
         else:
@@ -337,36 +338,36 @@ class MilesArgumentBuilder(ArgumentBuilder):
             minimal_args.append('--untie-embeddings-and-output-weights')
 
         # Add RLVE-specific CLI arguments when enabled
-        if rlve_enabled:
-            environment_list = rlve_config.get("environment_list", [])
+        if rlve is not None:
+            environment_list = rlve.get("environment_list", [])
             if not environment_list:
                 raise ValueError("RLVE enabled but environment_list is empty")
 
             minimal_args.extend([
                 '--rlve',
                 '--environment-list', *environment_list,
-                '--custom-prompt-preprocessor', rlve_config.get("custom_prompt_preprocessor", "TinyZero"),
-                '--answer-marker-type', rlve_config.get("answer_marker_type", "<answer></answer>"),
-                '--initial-difficulty', str(rlve_config.get("initial_difficulty", 0)),
-                '--difficulty-sliding-window-size', str(rlve_config.get("difficulty_sliding_window_size", 4)),
-                '--min-metric-to-increase-difficulty', str(rlve_config.get("min_metric_to_increase_difficulty", 0.9)),
-                '--min-prompts-before-difficulty-check', str(rlve_config.get("min_prompts_before_difficulty_check", 8)),
+                '--custom-prompt-preprocessor', rlve.get("custom_prompt_preprocessor", "TinyZero"),
+                '--answer-marker-type', rlve.get("answer_marker_type", "<answer></answer>"),
+                '--initial-difficulty', str(rlve.get("initial_difficulty", 0)),
+                '--difficulty-sliding-window-size', str(rlve.get("difficulty_sliding_window_size", 4)),
+                '--min-metric-to-increase-difficulty', str(rlve.get("min_metric_to_increase_difficulty", 0.9)),
+                '--min-prompts-before-difficulty-check', str(rlve.get("min_prompts_before_difficulty_check", 8)),
                 '--rm-type', 'rlve',  # Required for RLVE reward routing
                 '--reward-key', 'reward',
                 '--disable-rollout-global-dataset',  # RLVE uses procedural generation, not global dataset
-                '--rollout-max-response-len', str(rlve_config.get("rollout_max_response_len", 4096)),
-                '--rollout-temperature', str(rlve_config.get("rollout_temperature", 1.0)),
+                '--rollout-max-response-len', str(rlve.get("rollout_max_response_len", 4096)),
+                '--rollout-temperature', str(rlve.get("rollout_temperature", 1.0)),
                 # GB200-specific args
-                '--num-rollout', str(rlve_config.get("num_rollout", 500)),
-                '--over-sampling-batch-size', str(rlve_config.get("over_sampling_batch_size", 384)),
+                '--num-rollout', str(rlve.get("num_rollout", 500)),
+                '--over-sampling-batch-size', str(rlve.get("over_sampling_batch_size", 384)),
             ])
 
             # Add conditional boolean flags
-            if rlve_config.get("balance_data", True):
+            if rlve.get("balance_data", True):
                 minimal_args.append('--balance-data')
-            if rlve_config.get("partial_rollout", True):
+            if rlve.get("partial_rollout", True):
                 minimal_args.append('--partial-rollout')
-            if rlve_config.get("use_dynamic_sampling_filter", True):
+            if rlve.get("use_dynamic_sampling_filter", True):
                 minimal_args.extend([
                     '--dynamic-sampling-filter-path',
                     'miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std',
@@ -406,7 +407,8 @@ class MilesArgumentBuilder(ArgumentBuilder):
     ) -> Namespace:
         """Configure model-specific argument overrides."""
         # Check if RLVE mode is enabled
-        rlve_enabled = bool(rlve_config and rlve_config.get("enabled", False))
+        rlve = rlve_config if rlve_config and rlve_config.get("enabled", False) else None
+        rlve_enabled = rlve is not None
         # Model architecture flags
         args.swiglu = True
         args.use_rotary_position_embeddings = True
@@ -613,7 +615,7 @@ class MilesArgumentBuilder(ArgumentBuilder):
         # Environment variables to propagate to Ray workers
         # Ray workers need PYTHONPATH to import megatron.training
         # (megatron-core only installs megatron.core, not megatron.training)
-        if rlve_enabled:
+        if rlve is not None:
             # RLVE mode: include RLVE Gym environments path
             args.train_env_vars = {
                 "PYTHONPATH": "/root/Megatron-LM:/root/miles:/root/miles/examples/RLVE",
@@ -621,7 +623,7 @@ class MilesArgumentBuilder(ArgumentBuilder):
             # RLVE-specific dataset settings (override defaults)
             args.rollout_global_dataset = False  # Use procedural generation
             args.rlve = True
-            args.environment_list = rlve_config.get("environment_list", [])
+            args.environment_list = rlve.get("environment_list", [])
             args.rm_type = "rlve"
             logger.info(f"RLVE mode configured with {len(args.environment_list)} environments")
         else:

@@ -175,9 +175,9 @@ class TinkerDataConverter:
         # RL-specific fields
         advantages_list = []
         log_probs_list = []
-        ref_log_probs_list = [] if is_rl else None
-        values_list = [] if is_rl else None
-        returns_list = [] if is_rl else None
+        ref_log_probs_list = []
+        values_list = []
+        returns_list = []
 
         # print(f"[CONVERTER] Converting {len(data)} forward_backward samples (is_rl={is_rl})", flush=True)
         logger.info(f"Converting {len(data)} forward_backward samples (is_rl={is_rl})")

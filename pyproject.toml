@@ -37,6 +37,3 @@ pythonVersion = "3.10"
 typeCheckingMode = "basic"
 reportMissingImports = false
 reportMissingModuleSource = false
-# Optional-narrowing debt on the Miles path (pool / _PoolOp.future / rlve_config
-# reads after a truthiness alias): reported, not yet enforced.
-reportOptionalMemberAccess = "warning"
