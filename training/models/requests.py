@@ -291,10 +291,15 @@ class ModelInput(BaseModel):
     input_ids: Optional[List[int]] = Field(default=None, description="Input IDs")
 
 
-class ForwardDatum(BaseModel):
-    """Single forward data sample."""
+class Datum(BaseModel):
+    """The wire datum after boundary validation: what every backend converter
+    reads. JSON and proto bodies both validate into this shape."""
     model_input: ModelInput = Field(..., description="Input tokens")
     loss_fn_inputs: Dict[str, TensorData] = Field(..., description="Loss function inputs")
+
+
+class ForwardDatum(Datum):
+    """Single forward data sample."""
 
 
 class ForwardInput(BaseModel):
@@ -304,10 +309,8 @@ class ForwardInput(BaseModel):
     loss_fn_config: Optional[LossFnConfig] = Field(default=None, description="Loss hyperparameters (see core.loss_registry)")
 
 
-class ForwardBackwardDatum(BaseModel):
+class ForwardBackwardDatum(Datum):
     """Single forward_backward data sample."""
-    model_input: ModelInput = Field(..., description="Input tokens")
-    loss_fn_inputs: Dict[str, TensorData] = Field(..., description="Loss inputs")
 
 
 class ForwardBackwardInput(BaseModel):

@@ -379,20 +379,8 @@ class NemoRLBackend(TrainingBackend):
             #   entries here would make that branch unreachable (001-P3 gap).
             placeholder_outputs = []
             for datum in data if loss_fn == "cross_entropy" else []:
-                # Handle both Pydantic ForwardBackwardDatum and plain dict
-                lfi = getattr(datum, "loss_fn_inputs", None) or (
-                    datum.get("loss_fn_inputs") if isinstance(datum, dict) else None
-                ) or {}
-                weights = getattr(lfi, "weights", None) or (
-                    lfi.get("weights") if isinstance(lfi, dict) else None
-                )
-                if weights is not None:
-                    w_data = getattr(weights, "data", None) or (
-                        weights.get("data") if isinstance(weights, dict) else None
-                    )
-                    n = len(w_data) if w_data is not None else 0
-                else:
-                    n = 0
+                weights = datum.loss_fn_inputs.get("weights")
+                n = len(weights.data) if weights is not None else 0
                 placeholder_outputs.append({
                     "logprobs": {"data": [0.0] * n, "shape": [n], "dtype": "float32"},
                 })

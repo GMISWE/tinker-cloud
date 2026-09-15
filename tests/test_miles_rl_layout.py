@@ -7,6 +7,7 @@ if importlib.util.find_spec("torch") is None:
     pytest.skip("torch not installed", allow_module_level=True)
 
 from tinkercloud.training.backends.miles.rollout_data import TinkerDataConverter
+from tinkercloud.training.models.requests import Datum
 
 
 def _datum(T=6, with_target=True):
@@ -19,7 +20,7 @@ def _datum(T=6, with_target=True):
     }
     if with_target:
         inputs["target_tokens"] = {"data": target, "dtype": "int64", "shape": [T]}
-    return {"model_input": {"tokens": tokens}, "loss_fn_inputs": inputs}, tokens, target
+    return Datum.model_validate({"model_input": {"tokens": tokens}, "loss_fn_inputs": inputs}), tokens, target
 
 
 def test_rl_datum_appends_final_target_and_keeps_tensors_aligned():

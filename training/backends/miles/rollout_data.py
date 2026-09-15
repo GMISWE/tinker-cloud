@@ -8,6 +8,8 @@ import logging
 import torch
 from typing import Any, Dict, List
 
+from ...models.requests import Datum, ModelInput, TensorData
+
 logger = logging.getLogger(__name__)
 
 
@@ -20,76 +22,37 @@ class TinkerDataConverter:
     """
 
     @staticmethod
-    def _get_field(obj: Any, field: str) -> Any:
-        """Get field from either dict or Pydantic model. Dict lookup FIRST:
-        hasattr-first returns bound methods for key names that collide with
-        dict methods (e.g. "values" -> dict.values, hit by the RL path)."""
-        if isinstance(obj, dict):
-            return obj.get(field)
-        if hasattr(obj, field):
-            return getattr(obj, field)
-        return None
-
-    @staticmethod
-    def extract_tokens_from_model_input(model_input: Any) -> List[int]:
-        """
-        Extract token list from flexible model_input format.
-
-        Supports multiple formats:
-        - {"chunks": [{"tokens": [1,2,3], "type": "encoded_text"}]}
-        - {"tokens": [1,2,3]}
-        - {"input_ids": [1,2,3]}
-
-        Works with both dict and Pydantic model inputs.
-        """
-        # Try chunks first. A ModelInput may carry MULTIPLE chunks (the SDK
-        # splits inputs); concatenate them all — taking only chunks[0]
-        # silently truncates the sample (e.g. 4-token tokens vs 438-token
-        # weights, crashing the miles loss on shape mismatch).
-        chunks = TinkerDataConverter._get_field(model_input, "chunks")
-        if chunks:
+    def extract_tokens_from_model_input(model_input: ModelInput) -> List[int]:
+        """Token ids from a validated ModelInput: every text chunk concatenated
+        (a ModelInput may carry several; taking only chunks[0] silently
+        truncates the sample), else the flat `tokens` / `input_ids` form."""
+        if model_input.chunks:
             tokens: List[int] = []
-            for chunk in chunks:
-                chunk_tokens = TinkerDataConverter._get_field(chunk, "tokens")
-                if chunk_tokens is None:
+            for chunk in model_input.chunks:
+                if chunk.tokens is None:
                     raise ValueError(
                         "model_input chunk without tokens (non-text chunks are "
                         "not supported by the miles backend)"
                     )
-                tokens.extend(chunk_tokens)
+                tokens.extend(chunk.tokens)
             return tokens
-
-        # Try tokens
-        tokens = TinkerDataConverter._get_field(model_input, "tokens")
-        if tokens is not None:
-            return tokens
-
-        # Try input_ids
-        input_ids = TinkerDataConverter._get_field(model_input, "input_ids")
-        if input_ids is not None:
-            return input_ids
-
-        raise ValueError("Unknown model_input format")
+        if model_input.tokens is not None:
+            return model_input.tokens
+        if model_input.input_ids is not None:
+            return model_input.input_ids
+        raise ValueError("model_input carries no chunks, tokens or input_ids")
 
     @staticmethod
-    def extract_tensor_data(tensor_dict: Any) -> List[Any]:
-        """
-        Extract data from Tinker tensor format.
-
-        Format: {"data": [1,2,3], "shape": [3], "dtype": "int64"}
-        Returns just the data list.
-        Works with both dict and Pydantic model inputs.
-        """
-        data = TinkerDataConverter._get_field(tensor_dict, "data")
-        return data if data is not None else tensor_dict
+    def extract_tensor_data(tensor: TensorData) -> List[Any]:
+        return tensor.data
 
     @classmethod
-    def forward_to_rollout(cls, data: List[Any]) -> Dict[str, Any]:
+    def forward_to_rollout(cls, data: List[Datum]) -> Dict[str, Any]:
         """
         Convert Tinker forward data to Slime rollout_data format.
 
         Args:
-            data: List of forward data samples (dicts or Pydantic models), each with:
+            data: validated wire datums, each with:
                 - model_input: {"chunks": [{"tokens": [...]}]}
                 - loss_fn_inputs: {"target_tokens": {"data": [...]}, "mask": {"data": [...]}}
 
@@ -103,16 +66,16 @@ class TinkerDataConverter:
 
         for datum in data:
             # Extract input tokens
-            model_input = cls._get_field(datum, "model_input")
+            model_input = datum.model_input
             tokens = cls.extract_tokens_from_model_input(model_input)
             tokens_list.append(torch.tensor(tokens, dtype=torch.long))
 
             # Extract loss function inputs
-            loss_fn_inputs = cls._get_field(datum, "loss_fn_inputs")
+            loss_fn_inputs = datum.loss_fn_inputs
 
             # Get mask (optional)
-            mask = cls._get_field(loss_fn_inputs, "mask")
-            weights = cls._get_field(loss_fn_inputs, "weights")
+            mask = loss_fn_inputs.get("mask")
+            weights = loss_fn_inputs.get("weights")
 
             # loss_mask is Miles' 0/1 response region; client per-token weights
             # travel beside it as loss_weights (the loss multiplies them in).
@@ -133,9 +96,9 @@ class TinkerDataConverter:
             # Same layout as the forward_backward RL path: append the final
             # target so the response is the T wire targets and the returned
             # logprobs are T-long, entry k = logprob of target k.
-            target = cls._get_field(loss_fn_inputs, "target_tokens")
+            target = loss_fn_inputs.get("target_tokens")
             if target is None:
-                target = cls._get_field(loss_fn_inputs, "target")
+                target = loss_fn_inputs.get("target")
             target_data = cls.extract_tensor_data(target) if target is not None else None
             if target_data and len(loss_mask) == len(tokens) and len(tokens) > 0:
                 tokens_list[-1] = torch.cat([tokens_list[-1], torch.tensor(target_data[-1:], dtype=torch.long)])
@@ -171,14 +134,14 @@ class TinkerDataConverter:
     @classmethod
     def forward_backward_to_rollout(
         cls,
-        data: List[Any],
+        data: List[Datum],
         is_rl: bool = False
     ) -> Dict[str, Any]:
         """
         Convert Tinker forward_backward data to Slime rollout_data format.
 
         Args:
-            data: List of training data samples (dicts or Pydantic models)
+            data: validated wire datums
             is_rl: True for RL training (PPO/GRPO), False for SFT
 
         Returns:
@@ -189,12 +152,12 @@ class TinkerDataConverter:
         # even when the model was created for RL training
         if data and len(data) > 0:
             first_datum = data[0]
-            loss_fn_inputs = cls._get_field(first_datum, "loss_fn_inputs")
+            loss_fn_inputs = first_datum.loss_fn_inputs
             if loss_fn_inputs:
-                has_advantages = cls._get_field(loss_fn_inputs, "advantages") is not None
-                has_logprobs = cls._get_field(loss_fn_inputs, "logprobs") is not None
-                has_weights = cls._get_field(loss_fn_inputs, "weights") is not None or cls._get_field(loss_fn_inputs, "weight") is not None
-                has_target = cls._get_field(loss_fn_inputs, "target_tokens") is not None or cls._get_field(loss_fn_inputs, "target") is not None
+                has_advantages = loss_fn_inputs.get("advantages") is not None
+                has_logprobs = loss_fn_inputs.get("logprobs") is not None
+                has_weights = loss_fn_inputs.get("weights") is not None or loss_fn_inputs.get("weight") is not None
+                has_target = loss_fn_inputs.get("target_tokens") is not None or loss_fn_inputs.get("target") is not None
 
                 # If we have advantages or logprobs, it's RL data
                 # If we have weights+target but no logprobs, it's SFT data (including DPO backward pass)
@@ -241,7 +204,7 @@ class TinkerDataConverter:
         for idx, datum in enumerate(data):
             # print(f"[CONVERTER] Processing datum {idx}, type={type(datum)}", flush=True)
             # Extract input tokens
-            model_input = cls._get_field(datum, "model_input")
+            model_input = datum.model_input
             # print(f"[CONVERTER] model_input type={type(model_input)}, value={model_input}", flush=True)
             tokens = cls.extract_tokens_from_model_input(model_input)
             # print(f"[CONVERTER] Extracted {len(tokens)} input tokens: {tokens}", flush=True)
@@ -249,7 +212,7 @@ class TinkerDataConverter:
             tokens_list.append(torch.tensor(tokens, dtype=torch.long))
 
             # Extract loss function inputs
-            loss_fn_inputs = cls._get_field(datum, "loss_fn_inputs")
+            loss_fn_inputs = datum.loss_fn_inputs
 
             if is_rl:
                 # RL mode: Extract logprobs, mask, advantages, values, returns
@@ -258,14 +221,14 @@ class TinkerDataConverter:
                 # (loss_mask, log_probs, advantages, etc.) that Miles uses in loss computation.
 
                 # Step 1: Extract raw data from loss_fn_inputs
-                logprobs = cls._get_field(loss_fn_inputs, "logprobs")
+                logprobs = loss_fn_inputs.get("logprobs")
                 logprobs_data = cls.extract_tensor_data(logprobs) if logprobs is not None else None
                 # Loss mask: `mask` when the client sends one; otherwise the
                 # target-aligned `weights` (custom-loss datums); otherwise all ones
                 # (the cookbook's RL datums strip the mask and rely on zero
                 # advantages outside the response).
-                mask = cls._get_field(loss_fn_inputs, "mask")
-                weights = cls._get_field(loss_fn_inputs, "weights")
+                mask = loss_fn_inputs.get("mask")
+                weights = loss_fn_inputs.get("weights")
                 weights_data = cls.extract_tensor_data(weights) if weights is not None else None
                 mask_from_weights = mask is None and weights is not None
                 mask_data = cls.extract_tensor_data(mask) if mask is not None else weights_data
@@ -289,9 +252,9 @@ class TinkerDataConverter:
                 # and the NeMo RL converter do, so the response is exactly the T
                 # targets and every tensor lines up untouched.
                 token_length = len(tokens)
-                target = cls._get_field(loss_fn_inputs, "target_tokens")
+                target = loss_fn_inputs.get("target_tokens")
                 if target is None:
-                    target = cls._get_field(loss_fn_inputs, "target")
+                    target = loss_fn_inputs.get("target")
                 target_data = cls.extract_tensor_data(target) if target is not None else None
                 needs_causal_trim = False
                 if target_data and response_len == token_length and token_length > 0:
@@ -327,14 +290,14 @@ class TinkerDataConverter:
                 else:
                     log_probs_list.append(torch.zeros(response_len, dtype=torch.float32))
 
-                advantages = cls._get_field(loss_fn_inputs, "advantages")
+                advantages = loss_fn_inputs.get("advantages")
                 if advantages is not None:
                     adv_data = cls.extract_tensor_data(advantages)
                     advantages_list.append(torch.tensor(maybe_trim(adv_data), dtype=torch.float32))
                 else:
                     advantages_list.append(torch.zeros(response_len, dtype=torch.float32))
 
-                ref_logprobs = cls._get_field(loss_fn_inputs, "ref_logprobs")
+                ref_logprobs = loss_fn_inputs.get("ref_logprobs")
                 if ref_logprobs is not None:
                     ref_data = cls.extract_tensor_data(ref_logprobs)
                     ref_log_probs_list.append(torch.tensor(maybe_trim(ref_data), dtype=torch.float32))
@@ -344,14 +307,14 @@ class TinkerDataConverter:
                     # This enables proper KL penalty computation in Miles
                     ref_log_probs_list.append(log_probs_list[-1].clone())
 
-                values = cls._get_field(loss_fn_inputs, "values")
+                values = loss_fn_inputs.get("values")
                 if values is not None:
                     val_data = cls.extract_tensor_data(values)
                     values_list.append(torch.tensor(maybe_trim(val_data), dtype=torch.float32))
                 else:
                     values_list.append(torch.zeros(response_len, dtype=torch.float32))
 
-                returns = cls._get_field(loss_fn_inputs, "returns")
+                returns = loss_fn_inputs.get("returns")
                 if returns is not None:
                     ret_data = cls.extract_tensor_data(returns)
                     returns_list.append(torch.tensor(maybe_trim(ret_data), dtype=torch.float32))
@@ -372,13 +335,13 @@ class TinkerDataConverter:
 
             else:
                 # SFT mode: Extract target and weights
-                target = cls._get_field(loss_fn_inputs, "target_tokens")
+                target = loss_fn_inputs.get("target_tokens")
                 if target is None:
-                    target = cls._get_field(loss_fn_inputs, "target")
+                    target = loss_fn_inputs.get("target")
 
-                weights = cls._get_field(loss_fn_inputs, "weights")
+                weights = loss_fn_inputs.get("weights")
                 if weights is None:
-                    weights = cls._get_field(loss_fn_inputs, "weight")
+                    weights = loss_fn_inputs.get("weight")
 
                 if not weights or not target:
                     raise ValueError("SFT loss_fn_inputs must contain weights and target_tokens/target")

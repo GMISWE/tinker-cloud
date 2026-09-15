@@ -8,6 +8,7 @@ if importlib.util.find_spec("torch") is None:
 
 from tinkercloud.training.backends.miles.converter import MilesDataConverter
 from tinkercloud.training.backends.miles.rollout_data import TinkerDataConverter
+from tinkercloud.training.models.requests import Datum
 
 
 def _td(vals, dtype="float32"):
@@ -16,8 +17,8 @@ def _td(vals, dtype="float32"):
 
 def _sft_datum(weights, T=6):
     tokens = list(range(10, 10 + T))
-    return {"model_input": {"tokens": tokens},
-            "loss_fn_inputs": {"weights": _td(weights), "target_tokens": _td([t + 1 for t in tokens], "int64")}}
+    return Datum.model_validate({"model_input": {"tokens": tokens},
+            "loss_fn_inputs": {"weights": _td(weights), "target_tokens": _td([t + 1 for t in tokens], "int64")}})
 
 
 def test_sft_weights_split_into_binary_mask_and_weights():
@@ -31,8 +32,8 @@ def test_rl_weights_split_and_trim_together():
     T = 6
     tokens = list(range(10, 10 + T))
     w = [0.0, 0.0, 0.5, 1.0, 1.5, 1.0]
-    d = {"model_input": {"tokens": tokens},
-         "loss_fn_inputs": {"weights": _td(w), "logprobs": _td([-0.1] * T), "advantages": _td([1.0] * T)}}
+    d = Datum.model_validate({"model_input": {"tokens": tokens},
+         "loss_fn_inputs": {"weights": _td(w), "logprobs": _td([-0.1] * T), "advantages": _td([1.0] * T)}})
     rd = TinkerDataConverter().forward_backward_to_rollout([d], is_rl=True)  # no target: causal trim
     assert rd["response_lengths"] == [T - 1]
     assert rd["loss_masks"][0].tolist() == [0.0, 0.0, 1.0, 1.0, 1.0]
@@ -41,9 +42,9 @@ def test_rl_weights_split_and_trim_together():
 
 def test_rl_without_weights_gets_unit_weights():
     T = 4
-    d = {"model_input": {"tokens": list(range(T))},
+    d = Datum.model_validate({"model_input": {"tokens": list(range(T))},
          "loss_fn_inputs": {"logprobs": _td([-0.1] * T), "advantages": _td([1.0] * T),
-                            "target_tokens": _td(list(range(1, T + 1)), "int64")}}
+                            "target_tokens": _td(list(range(1, T + 1)), "int64")}})
     rd = TinkerDataConverter().forward_backward_to_rollout([d], is_rl=True)
     assert rd["loss_weights"][0].tolist() == [1.0] * T
     assert rd["loss_masks"][0].tolist() == [1.0] * T

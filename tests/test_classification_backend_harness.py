@@ -23,6 +23,7 @@ from tinkercloud.training.backends.automodel.converter import (
     IGNORE_INDEX,
 )
 from tinkercloud.training.backends.base import BackendError
+from tinkercloud.training.models.requests import Datum
 from tinkercloud.training.backends.factory import BackendFactory
 from tinkercloud.training.backends.megatron_bridge.backend import (
     MegatronBridgeBackend,
@@ -39,10 +40,10 @@ from tinkercloud.training.backends.objectives import (
 
 
 def _datum(tokens, labels):
-    return {
+    return Datum.model_validate({
         "model_input": {"tokens": tokens},
         "loss_fn_inputs": {"labels": {"data": labels}},
-    }
+    })
 
 
 # --- factory ---------------------------------------------------------------
@@ -116,8 +117,8 @@ def test_forward_only_without_labels_omits_labels():
     (input_ids/attention_mask only), not IndexError on the seq-cls path."""
     conv = ClassificationDataConverter()
     data = [
-        {"model_input": {"tokens": [5, 6, 7]}, "loss_fn_inputs": {}},
-        {"model_input": {"tokens": [8, 9]}, "loss_fn_inputs": {}},
+        Datum.model_validate({"model_input": {"tokens": [5, 6, 7]}, "loss_fn_inputs": {}}),
+        Datum.model_validate({"model_input": {"tokens": [8, 9]}, "loss_fn_inputs": {}}),
     ]
     batch = conv.forward_to_backend(data, {"objective": "sequence_classification"})
     assert "labels" not in batch

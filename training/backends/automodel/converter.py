@@ -15,6 +15,7 @@ from typing import Any, Dict, List
 import torch
 
 from ..base import DataConverter
+from ...models.requests import Datum
 from ..objectives import Objective
 
 logger = logging.getLogger(__name__)
@@ -26,17 +27,17 @@ IGNORE_INDEX = -100
 class ClassificationDataConverter(DataConverter):
     """Converts Tinker classification Datums to a padded HF batch dict."""
 
-    def forward_to_backend(self, data: List[Dict], args: Any) -> Any:
+    def forward_to_backend(self, data: List[Datum], args: Any) -> Any:
         """Forward-only batch (input_ids + attention_mask; labels if present)."""
         return self._to_batch(data, args)
 
     def forward_backward_to_backend(
-        self, data: List[Dict], loss_fn: str, args: Any,
+        self, data: List[Datum], loss_fn: str, args: Any,
     ) -> Any:
         """Training batch: input_ids, attention_mask, labels."""
         return self._to_batch(data, args)
 
-    def _to_batch(self, data: List[Dict], args: Any) -> Dict[str, torch.Tensor]:
+    def _to_batch(self, data: List[Datum], args: Any) -> Dict[str, torch.Tensor]:
         if not data:
             return {
                 "input_ids": torch.zeros(0, 0, dtype=torch.long),
@@ -91,7 +92,7 @@ class ClassificationDataConverter(DataConverter):
         """Convert classification forward result (logits) to the SDK's
         ForwardBackwardOutput shape: loss_fn_outputs[i]["logits"] is a
         TensorData dict ({data, shape, dtype}) of per-position class logits."""
-        logits = result.get("logits") if hasattr(result, "get") else result
+        logits = result["logits"]
         outputs = []
         if logits is not None:
             for i in range(len(data)):
@@ -130,7 +131,7 @@ class ClassificationDataConverter(DataConverter):
 
 def _is_token_classification(args: Any, tokens_B, labels_B) -> bool:
     """Prefer explicit objective from args; else infer from label shape."""
-    objective = args.get("objective") if isinstance(args, dict) else None
+    objective = args["objective"]
     if objective is not None:
         return Objective(objective) == Objective.TOKEN_CLASSIFICATION
     # Fallback inference: per-token labels are as long as their sequence.
@@ -145,59 +146,27 @@ def _to_python_scalar(val):
     return float(val)
 
 
-def _get(obj, field):
-    if isinstance(obj, dict):
-        return obj.get(field)
-    return getattr(obj, field, None)
+def _extract_tokens(datum: Datum) -> torch.Tensor:
+    """Token IDs from model_input: text chunks concatenated, else tokens / input_ids."""
+    mi = datum.model_input
+    if mi.chunks:
+        parts = [_as_long(c.tokens) for c in mi.chunks if c.type != "image" and c.tokens is not None]
+        if parts:
+            return torch.cat(parts)
+    if mi.tokens is not None:
+        return _as_long(mi.tokens)
+    if mi.input_ids is not None:
+        return _as_long(mi.input_ids)
+    raise ValueError("model_input carries no chunks, tokens or input_ids")
 
 
-def _extract_tokens(datum) -> torch.Tensor:
-    """Token IDs from model_input (chunks / tokens / input_ids) or flat datum."""
-    model_input = _get(datum, "model_input")
-    if model_input is not None:
-        chunks = _get(model_input, "chunks")
-        if chunks:
-            all_tokens = []
-            for chunk in chunks:
-                if _get(chunk, "type") == "image":
-                    continue
-                toks = _get(chunk, "tokens")
-                if toks is not None:
-                    all_tokens.append(_as_long(toks))
-            if all_tokens:
-                return torch.cat(all_tokens)
-        for key in ("tokens", "input_ids"):
-            toks = _get(model_input, key)
-            if toks is not None:
-                return _as_long(toks)
-    toks = _get(datum, "tokens")
-    if toks is None:
-        toks = _get(datum, "input_ids") or []
-    return _as_long(toks)
-
-
-def _extract_labels(datum) -> torch.Tensor:
-    """Labels from loss_fn_inputs["labels"] (TensorData or raw), or flat datum."""
-    loss_fn_inputs = _get(datum, "loss_fn_inputs")
-    labels = None
-    if loss_fn_inputs is not None:
-        obj = _get(loss_fn_inputs, "labels")
-        if obj is not None:
-            labels = _tensor_data(obj)
-    if labels is None:
-        labels = _get(datum, "labels")
+def _extract_labels(datum: Datum) -> torch.Tensor:
+    """loss_fn_inputs["labels"], or an empty tensor when the datum carries none
+    (forward-only inputs may)."""
+    labels = datum.loss_fn_inputs.get("labels")
     if labels is None:
         return torch.zeros(0, dtype=torch.long)
-    return _as_long(labels)
-
-
-def _tensor_data(obj):
-    """Unwrap a TensorData-like value: Pydantic (.data), dict ({"data": ...}), raw."""
-    if hasattr(obj, "data"):
-        return obj.data
-    if isinstance(obj, dict) and "data" in obj:
-        return obj["data"]
-    return obj
+    return _as_long(labels.data)
 
 
 def _as_long(val) -> torch.Tensor:
