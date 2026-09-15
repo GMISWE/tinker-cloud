@@ -192,9 +192,6 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
                     ignore_reinit_error=True,
                 )
                 logger.info("Ray initialized successfully")
-            except Exception as e:  # pylint: disable=broad-except
-                logger.error("Failed to initialize Ray: %s", e)
-                # Continue anyway - Ray might be available later
             finally:
                 if signal.getsignal(signal.SIGTERM) is not prev_sigterm:
                     signal.signal(signal.SIGTERM, prev_sigterm)
