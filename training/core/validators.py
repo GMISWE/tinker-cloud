@@ -30,8 +30,8 @@ class RequestValidator:
         """
         self.dp_size = slime_args.data_parallel_size
         self.global_batch_size = slime_args.global_batch_size
-        self.balance_data = getattr(slime_args, 'balance_data', False)
-        self.n_samples_per_prompt = getattr(slime_args, 'n_samples_per_prompt', 1)
+        self.balance_data = slime_args.balance_data
+        self.n_samples_per_prompt = slime_args.n_samples_per_prompt
         self.allow_partial_batches = allow_partial_batches
 
     def validate_sample_count(

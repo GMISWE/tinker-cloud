@@ -178,7 +178,7 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
                         config_obj.session_timeout_s, config_obj.session_reap_interval_s)
 
         # Initialize Ray
-        if not getattr(backend, "needs_ray", True):
+        if not backend.needs_ray:
             logger.info("Backend %s does not use Ray; skipping ray.init", backend_type)
         elif not ray.is_initialized():
             logger.info("Initializing Ray with address=%s", config_obj.ray.address)

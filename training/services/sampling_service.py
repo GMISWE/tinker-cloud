@@ -26,11 +26,11 @@ def _check_sample_request(handle, prompt_tokens, sampling_params) -> None:
     """
     from ..backends.base import SampleRequestError
 
-    backend = getattr(handle, "backend_type", "?")
+    backend = handle.backend_type
     max_tokens = (sampling_params or {}).get("max_tokens")
     if max_tokens is None:
         raise SampleRequestError("sampling_params.max_tokens is required", backend=backend)
-    ctx = getattr(handle, "context_length", None)
+    ctx = handle.context_length
     if ctx is not None and len(prompt_tokens) + int(max_tokens) > ctx:
         raise SampleRequestError(
             f"prompt_len {len(prompt_tokens)} + max_tokens {int(max_tokens)} = "

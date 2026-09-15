@@ -56,7 +56,7 @@ class CheckpointService:
         name = path or f"checkpoint_{int(time.time())}"
         ticket = self.store.begin_save(
             model_id, CheckpointKind.WEIGHTS, name,
-            weight_version=getattr(handle, "weight_version", None),
+            weight_version=handle.weight_version,
         )
         logger.info("[%s] Saving weights for %s to %s (step %s)", request_id, model_id, ticket.ref.uri, ticket.step)
         await self._save(handle, ticket)
@@ -120,7 +120,7 @@ class CheckpointService:
         client_info = self._client(training_clients, model_id)
         handle = client_info["backend_handle"]
         ephemeral = sampling_session_seq_id is not None and path is None and name is None
-        weight_version = getattr(handle, "weight_version", None)
+        weight_version = handle.weight_version
 
         if ephemeral:
             name = f"{model_id}_{sampling_session_seq_id}_{uuid.uuid4().hex[:8]}"
