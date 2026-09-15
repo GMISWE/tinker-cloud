@@ -18,65 +18,41 @@ from typing import Any, Dict, List
 import torch
 
 from ..base import DataConverter
+from ...models.requests import Datum
 
 
-def _attr_or_key(obj, field: str):
-    if obj is None:
+def _tensor_data(tensor, dtype) -> torch.Tensor:
+    """A TensorData -> 1-D tensor; None stays None (the input was not sent)."""
+    if tensor is None:
         return None
-    if isinstance(obj, dict):
-        return obj.get(field)
-    return getattr(obj, field, None)
+    return torch.tensor(tensor.data, dtype=dtype).flatten()
 
 
-def _tensor_data(obj, dtype) -> torch.Tensor:
-    """TensorData (pydantic .data / wire {'data': ...}) or raw list -> 1-D tensor."""
-    if obj is None:
-        return None
-    data = obj
-    if not isinstance(obj, (list, tuple, torch.Tensor)):
-        inner = _attr_or_key(obj, "data")
-        if inner is not None:
-            data = inner
-    if isinstance(data, torch.Tensor):
-        return data.detach().cpu().to(dtype).flatten()
-    try:
-        return torch.tensor(data, dtype=dtype).flatten()
-    except (TypeError, ValueError):
-        return None
-
-
-def _loss_input(datum, *names):
-    lfi = _attr_or_key(datum, "loss_fn_inputs")
+def _loss_input(datum: Datum, *names):
+    """The first of `names` the client sent in loss_fn_inputs, else None."""
     for name in names:
-        v = _attr_or_key(lfi, name)
+        v = datum.loss_fn_inputs.get(name)
         if v is not None:
             return v
     return None
 
 
-def _extract_tokens(datum) -> torch.Tensor:
-    toks: List[int] = []
-    model_input = _attr_or_key(datum, "model_input")
-    if model_input is not None:
-        chunks = _attr_or_key(model_input, "chunks")
-        if chunks:
-            for c in chunks:
-                t = _attr_or_key(c, "tokens")
-                if t is not None:
-                    toks.extend(t.tolist() if isinstance(t, torch.Tensor) else list(t))
-        else:
-            t = _attr_or_key(model_input, "tokens")
-            if t is not None:
-                toks = t.tolist() if isinstance(t, torch.Tensor) else list(t)
+def _extract_tokens(datum: Datum) -> torch.Tensor:
+    mi = datum.model_input
+    if mi.chunks:
+        toks = [t for c in mi.chunks for t in (c.tokens or [])]
+    elif mi.tokens is not None:
+        toks = list(mi.tokens)
+    elif mi.input_ids is not None:
+        toks = list(mi.input_ids)
+    else:
+        raise ValueError("model_input carries no chunks, tokens or input_ids")
     if not toks:
-        t = _attr_or_key(datum, "tokens")
-        if t is not None:
-            toks = t.tolist() if isinstance(t, torch.Tensor) else list(t)
-    assert toks, "datum has no tokens"
+        raise ValueError("datum has no tokens")
     return torch.tensor(toks, dtype=torch.long)
 
 
-def _full_tokens(datum) -> torch.Tensor:
+def _full_tokens(datum: Datum) -> torch.Tensor:
     tokens = _extract_tokens(datum)
     target = _tensor_data(_loss_input(datum, "target_tokens"), torch.long)
     if target is not None and target.numel() > 0:
@@ -91,7 +67,7 @@ class VerlDataConverter(DataConverter):
 
     def forward_backward_to_backend(
         self,
-        data: List[Any],
+        data: List[Datum],
         loss_fn: str,
         args: Any,
     ) -> Dict[str, torch.Tensor]:
@@ -142,7 +118,7 @@ class VerlDataConverter(DataConverter):
             out["old_log_probs"] = old_log_probs
         return out
 
-    def forward_to_backend(self, data: List[Any], args: Any) -> Any:
+    def forward_to_backend(self, data: List[Datum], args: Any) -> Any:
         return self.forward_backward_to_backend(data, "cross_entropy", args)
 
     def backend_to_forward_result(self, result: Any, data: List[Any]) -> Dict[str, Any]:

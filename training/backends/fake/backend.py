@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..base import BackendError, BackendHandle, TrainingBackend
+from ...models.requests import Datum, ModelInput
 from ...core.loss_registry import LOSS_FNS
 
 logger = logging.getLogger(__name__)
@@ -43,24 +44,16 @@ class FakeHandle(BackendHandle):
     metrics: Dict[str, Any] = field(default_factory=dict)
 
 
-def _tokens_of(model_input: Any) -> List[int]:
-    """Accept the router's pydantic ModelInput or a plain dict."""
-    get = (lambda k: getattr(model_input, k, None)) if not isinstance(model_input, dict) else model_input.get
-    if get("tokens"):
-        return list(get("tokens"))
-    if get("input_ids"):
-        return list(get("input_ids"))
-    out: List[int] = []
-    for chunk in get("chunks") or []:
-        toks = chunk.get("tokens") if isinstance(chunk, dict) else getattr(chunk, "tokens", None)
-        out.extend(toks or [])
-    return out
+def _tokens_of(model_input: ModelInput) -> List[int]:
+    if model_input.tokens:
+        return list(model_input.tokens)
+    if model_input.input_ids:
+        return list(model_input.input_ids)
+    return [t for chunk in model_input.chunks or [] for t in (chunk.tokens or [])]
 
 
-def _datum_parts(datum: Any):
-    if isinstance(datum, dict):
-        return datum["model_input"], datum.get("loss_fn_inputs") or {}
-    return datum.model_input, datum.loss_fn_inputs or {}
+def _datum_parts(datum: Datum):
+    return datum.model_input, datum.loss_fn_inputs
 
 
 def decode(tokens: List[int]) -> str:

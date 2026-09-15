@@ -34,30 +34,34 @@ HAS_NEMO_RL = importlib.util.find_spec("nemo_rl") is not None
 # Fixtures: synthetic data for contract testing
 # ---------------------------------------------------------------------------
 
-def make_synthetic_datum(seq_len: int = 128, response_len: int = 64) -> dict:
-    """Create a synthetic Tinker Datum dict for testing."""
+def make_synthetic_datum(seq_len: int = 128, response_len: int = 64):
+    """A synthetic wire datum (what the router hands the backends): a full
+    sequence of `seq_len` tokens sent pre-shifted, with response-length RL
+    inputs. Per-token inputs are right-aligned by the converters."""
     import torch
+    from tinkercloud.training.models.requests import Datum
 
     prompt_len = seq_len - response_len
     tokens = torch.randint(0, 32000, (seq_len,), dtype=torch.long).tolist()
     loss_masks = [0.0] * prompt_len + [1.0] * response_len
-    advantages = [0.1] * response_len
-    log_probs = [-5.0 + 0.1 * i for i in range(response_len)]
-    rollout_log_probs = [-5.5 + 0.1 * i for i in range(response_len)]
-    ref_log_probs = [-5.2 + 0.1 * i for i in range(response_len)]
 
-    return {
-        "tokens": tokens,
-        "loss_masks": loss_masks,
-        "advantages": advantages,
-        "log_probs": log_probs,
-        "rollout_log_probs": rollout_log_probs,
-        "ref_log_probs": ref_log_probs,
-    }
+    def td(vals, dtype="float32"):
+        return {"data": vals, "shape": [len(vals)], "dtype": dtype}
+
+    return Datum.model_validate({
+        "model_input": {"tokens": tokens[:-1]},
+        "loss_fn_inputs": {
+            "target_tokens": td(tokens[1:], "int64"),
+            "mask": td(loss_masks[1:]),
+            "advantages": td([0.1] * response_len),
+            "logprobs": td([-5.0 + 0.1 * i for i in range(response_len)]),
+            "ref_logprobs": td([-5.2 + 0.1 * i for i in range(response_len)]),
+        },
+    })
 
 
 def make_synthetic_batch(batch_size: int = 4, seq_len: int = 128) -> list:
-    """Create a batch of synthetic Tinker Datum dicts."""
+    """A batch of synthetic wire datums."""
     return [make_synthetic_datum(seq_len=seq_len) for _ in range(batch_size)]
 
 

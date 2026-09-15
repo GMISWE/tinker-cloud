@@ -28,6 +28,7 @@ from typing import Any, Dict, List
 import torch
 
 from ..base import DataConverter
+from ...models.requests import Datum
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ class NemoRLDataConverter(DataConverter):
 
     def forward_to_backend(
         self,
-        data: List[Dict],
+        data: List[Datum],
         args: Any,
     ) -> Any:
         """
@@ -79,7 +80,7 @@ class NemoRLDataConverter(DataConverter):
 
     def forward_backward_to_backend(
         self,
-        data: List[Dict],
+        data: List[Datum],
         loss_fn: str,
         args: Any,
         image_preprocessor=None,
@@ -150,7 +151,7 @@ class NemoRLDataConverter(DataConverter):
             "sample_mask": sample_mask,
         })
 
-    def _forward_backward_sft(self, data: List[Dict], image_preprocessor=None) -> Any:
+    def _forward_backward_sft(self, data: List[Datum], image_preprocessor=None) -> Any:
         """Convert SFT data to NeMo RL BatchedDataDict for NLLLoss.
 
         SFT datum provides (from datum_from_tokens_weights in tinker-cookbook):
@@ -402,78 +403,31 @@ def _to_python_scalar(val):
 
 
 # ---------------------------------------------------------------------------
-# Helper functions for extracting fields from Tinker Datum dicts / objects
-#
-# Datum can arrive in two formats:
-#   1. Pydantic ForwardBackwardDatum: datum.model_input has tokens,
-#      datum.loss_fn_inputs is Dict[str, TensorData]
-#   2. Flat dict: datum["tokens"], datum["log_probs"] (raw lists)
+# Field access on the validated wire Datum (models.requests.Datum): model_input
+# is a ModelInput, loss_fn_inputs a Dict[str, TensorData]. Optional loss inputs
+# are a real domain state (an SFT datum has no advantages), hence .get on the
+# dict; the model fields themselves are read directly.
 # ---------------------------------------------------------------------------
 
 
-def _get_attr_or_key(obj, field: str):
-    """Get a field from a dict or object (used for datum-level access)."""
-    if isinstance(obj, dict):
-        return obj.get(field)
-    return getattr(obj, field, None)
+def _extract_tokens(datum: Datum) -> torch.Tensor:
+    """Token ids from model_input: the text chunks concatenated (image chunks
+    skipped: their placeholder tokens already sit in adjacent text chunks),
+    else the flat tokens / input_ids form."""
+    mi = datum.model_input
+    if mi.chunks:
+        parts = [torch.tensor(c.tokens, dtype=torch.long) for c in mi.chunks
+                 if c.type != "image" and c.tokens is not None]
+        if parts:
+            return torch.cat(parts)
+    if mi.tokens is not None:
+        return torch.tensor(mi.tokens, dtype=torch.long)
+    if mi.input_ids is not None:
+        return torch.tensor(mi.input_ids, dtype=torch.long)
+    raise ValueError("model_input carries no chunks, tokens or input_ids")
 
 
-def _extract_tokens(datum) -> torch.Tensor:
-    """Extract token IDs from datum (Pydantic ForwardBackwardDatum, dict, or flat object)."""
-    # Try nested model_input first (Pydantic ForwardBackwardDatum format)
-    model_input = _get_attr_or_key(datum, "model_input")
-    if model_input is not None:
-        chunks = _get_attr_or_key(model_input, "chunks")
-        if chunks:
-            # Fast path: text-only models have a single text chunk
-            if len(chunks) == 1:
-                tokens = _get_attr_or_key(chunks[0], "tokens")
-                if tokens is not None:
-                    if isinstance(tokens, torch.Tensor):
-                        return tokens.detach().cpu().long()
-                    return torch.tensor(tokens, dtype=torch.long)
-            else:
-                # Multi-chunk path: VLM with interleaved text/image chunks.
-                # Concatenate tokens from all text chunks; skip image chunks
-                # (their placeholder tokens are already in adjacent text chunks).
-                all_tokens = []
-                for chunk in chunks:
-                    chunk_type = _get_attr_or_key(chunk, "type")
-                    if chunk_type == "image":
-                        continue
-                    tokens = _get_attr_or_key(chunk, "tokens")
-                    if tokens is not None:
-                        if isinstance(tokens, torch.Tensor):
-                            all_tokens.append(tokens.detach().cpu().long())
-                        else:
-                            all_tokens.append(torch.tensor(tokens, dtype=torch.long))
-                if all_tokens:
-                    return torch.cat(all_tokens)
-
-        tokens = _get_attr_or_key(model_input, "tokens")
-        if tokens is not None:
-            if isinstance(tokens, torch.Tensor):
-                return tokens.detach().cpu().long()
-            return torch.tensor(tokens, dtype=torch.long)
-
-        input_ids = _get_attr_or_key(model_input, "input_ids")
-        if input_ids is not None:
-            if isinstance(input_ids, torch.Tensor):
-                return input_ids.detach().cpu().long()
-            return torch.tensor(input_ids, dtype=torch.long)
-
-    # Fall back to flat format: datum.tokens or datum.input_ids
-    if isinstance(datum, dict):
-        tokens = datum.get("tokens", datum.get("input_ids", []))
-    else:
-        tokens = getattr(datum, "tokens", getattr(datum, "input_ids", []))
-
-    if isinstance(tokens, torch.Tensor):
-        return tokens.detach().cpu().long()
-    return torch.tensor(tokens, dtype=torch.long)
-
-
-def _expand_chunks_to_full_sequence(datum, image_token_id: int) -> torch.Tensor:
+def _expand_chunks_to_full_sequence(datum: Datum, image_token_id: int) -> torch.Tensor:
     """Expand model_input.chunks into a dense token sequence.
 
     Text chunks contribute their tokens directly. Image chunks contribute
@@ -481,105 +435,51 @@ def _expand_chunks_to_full_sequence(datum, image_token_id: int) -> torch.Tensor:
     for Qwen3-VL). The resulting sequence matches the full expanded sequence
     that the cookbook used to compute target_tokens and weights.
     """
-    model_input = _get_attr_or_key(datum, "model_input")
-    if model_input is None:
-        return torch.empty(0, dtype=torch.long)
-    chunks = _get_attr_or_key(model_input, "chunks") or []
     all_tokens: list = []
-    for chunk in chunks:
-        ctype = _get_attr_or_key(chunk, "type")
-        if ctype == "image":
-            n = _get_attr_or_key(chunk, "expected_tokens") or 0
-            all_tokens.extend([image_token_id] * int(n))
+    for chunk in datum.model_input.chunks or []:
+        if chunk.type == "image":
+            all_tokens.extend([image_token_id] * int(chunk.expected_tokens or 0))
         else:
-            tokens = _get_attr_or_key(chunk, "tokens") or []
-            if isinstance(tokens, torch.Tensor):
-                tokens = tokens.tolist()
-            all_tokens.extend(tokens)
+            all_tokens.extend(chunk.tokens or [])
     return torch.tensor(all_tokens, dtype=torch.long)
 
 
-def _extract_images(datum) -> list:
-    """Extract image bytes from datum's model_input chunks.
-
-    Returns list of decoded image bytes (one per ImageChunk).
-    Returns empty list if no images.
-    """
+def _extract_images(datum: Datum) -> list:
+    """Decoded image bytes, one per image chunk (empty when there are none)."""
     import base64
-
-    model_input = _get_attr_or_key(datum, "model_input")
-    if model_input is None:
-        return []
-
-    chunks = _get_attr_or_key(model_input, "chunks")
-    if not chunks:
-        return []
-
-    images = []
-    for chunk in chunks:
-        chunk_type = _get_attr_or_key(chunk, "type")
-        if chunk_type == "image":
-            data = _get_attr_or_key(chunk, "data")
-            if data is not None:
-                if isinstance(data, str):
-                    images.append(base64.b64decode(data))
-                elif isinstance(data, bytes):
-                    images.append(data)
-    return images
+    return [base64.b64decode(chunk.data)
+            for chunk in datum.model_input.chunks or []
+            if chunk.type == "image" and chunk.data is not None]
 
 
-def _extract_loss_masks(datum, seq_len: int) -> torch.Tensor:
-    """Extract loss masks from datum, padded to seq_len.
-
-    Tries loss_fn_inputs["mask"] first, then datum.loss_masks / datum.loss_mask.
-    Returns all-ones if no mask found (requires "mask" to flow through SDK).
-    """
-    masks = None
-
-    # Try loss_fn_inputs["mask"] (Dict[str, TensorData] format)
-    loss_fn_inputs = _get_attr_or_key(datum, "loss_fn_inputs")
-    if isinstance(loss_fn_inputs, dict):
-        mask_obj = loss_fn_inputs.get("mask")
-        if mask_obj is not None:
-            masks = mask_obj.data if hasattr(mask_obj, "data") else mask_obj
-
-    # Fall back to flat format: datum.loss_masks or datum.loss_mask
-    if masks is None:
-        if isinstance(datum, dict):
-            masks = datum.get("loss_masks", datum.get("loss_mask", None))
-        else:
-            masks = getattr(datum, "loss_masks", getattr(datum, "loss_mask", None))
-
-    if masks is None:
+def _extract_loss_masks(datum: Datum, seq_len: int) -> torch.Tensor:
+    """loss_fn_inputs["mask"] padded to seq_len; all-ones when the client sent
+    none (the cookbook's RL datums strip the mask and rely on zero advantages)."""
+    mask = datum.loss_fn_inputs.get("mask")
+    if mask is None:
         return torch.ones(seq_len, dtype=torch.float32)
-
-    if isinstance(masks, torch.Tensor):
-        masks = masks.detach().cpu().float()
-    else:
-        masks = torch.tensor(masks, dtype=torch.float32)
-
+    masks = torch.tensor(mask.data, dtype=torch.float32)
     # If masks are response-length, expand to full sequence length
     if len(masks) < seq_len:
         full = torch.zeros(seq_len, dtype=torch.float32)
         full[seq_len - len(masks):] = masks
         return full
-
     return masks[:seq_len]
 
 
 # Mapping from converter field names to SDK dict key names
 _FIELD_NAME_MAP = {
     "advantages": "advantages",
-    "log_probs": "logprobs",          # Tinker flat "log_probs" → SDK dict "logprobs"
-    "ref_log_probs": "ref_logprobs",  # Tinker flat "ref_log_probs" → SDK dict "ref_logprobs"
+    "log_probs": "logprobs",          # converter name -> SDK dict "logprobs"
+    "ref_log_probs": "ref_logprobs",  # converter name -> SDK dict "ref_logprobs"
     # "rollout_log_probs" has no SDK dict equivalent — generation logprobs are
     # computed by the sampling service, not passed in forward_backward requests.
 }
 
 
-def _full_sequence_tokens(datum) -> torch.Tensor:
+def _full_sequence_tokens(datum: Datum) -> torch.Tensor:
     """Full unshifted sequence: appends target_tokens[-1] when the datum is
-    pre-shifted (wire format); flat datums already carry the full sequence."""
+    pre-shifted (wire format)."""
     tokens = _extract_tokens(datum)
     target_tokens = _extract_target_tokens(datum)
     if target_tokens is not None and len(target_tokens) > 0:
@@ -595,100 +495,27 @@ def _place_right_aligned(row: torch.Tensor, values: torch.Tensor, seq_len: int) 
         row[seq_len - n:seq_len] = values[-n:]
 
 
-def _extract_field(datum, field_name: str):
-    """Extract a per-token tensor field from datum (unresized).
-
-    Handles both:
-      - Pydantic ForwardBackwardDatum: datum.loss_fn_inputs[sdk_key].data
-      - Flat dict: datum[field_name] (raw list or tensor)
-    """
-    value = None
-
-    # Try loss_fn_inputs dict (Dict[str, TensorData] format)
-    loss_fn_inputs = _get_attr_or_key(datum, "loss_fn_inputs")
-    if isinstance(loss_fn_inputs, dict):
-        sdk_key = _FIELD_NAME_MAP.get(field_name, field_name)
-        tensor_obj = loss_fn_inputs.get(sdk_key)
-        if tensor_obj is not None:
-            value = tensor_obj.data if hasattr(tensor_obj, "data") else tensor_obj
-
-    # Fall back to flat format: datum[field_name]
-    if value is None:
-        if isinstance(datum, dict):
-            value = datum.get(field_name, None)
-        else:
-            value = getattr(datum, field_name, None)
-
-    if value is None:
+def _extract_field(datum: Datum, field_name: str):
+    """A per-token float tensor from loss_fn_inputs (unresized), or None when
+    the client did not send that input."""
+    tensor = datum.loss_fn_inputs.get(_FIELD_NAME_MAP.get(field_name, field_name))
+    if tensor is None:
         return None
-
-    if isinstance(value, torch.Tensor):
-        return value.detach().cpu().float()
-    if isinstance(value, (list, tuple)):
-        return torch.tensor(value, dtype=torch.float32)
-    return None
+    return torch.tensor(tensor.data, dtype=torch.float32)
 
 
-def _extract_target_tokens(datum) -> torch.Tensor:
-    """Extract target_tokens from datum's loss_fn_inputs.
-
-    Wire-format datums (SFT and RL) store target_tokens = tokens[1:] in
-    loss_fn_inputs["target_tokens"].
-    Handles both Pydantic ForwardBackwardDatum and flat dict formats.
-
-    Returns:
-        torch.Tensor of token IDs (dtype=long), or None if not found.
-    """
-    loss_fn_inputs = _get_attr_or_key(datum, "loss_fn_inputs")
-    if isinstance(loss_fn_inputs, dict):
-        target_obj = loss_fn_inputs.get("target_tokens")
-        if target_obj is not None:
-            data = target_obj.data if hasattr(target_obj, "data") else target_obj
-            if isinstance(data, torch.Tensor):
-                return data.detach().cpu().long()
-            return torch.tensor(data, dtype=torch.long)
-
-    # Fall back to flat format
-    if isinstance(datum, dict):
-        value = datum.get("target_tokens")
-    else:
-        value = getattr(datum, "target_tokens", None)
-
-    if value is None:
+def _extract_target_tokens(datum: Datum) -> torch.Tensor:
+    """loss_fn_inputs["target_tokens"] as a long tensor, or None when absent."""
+    tensor = datum.loss_fn_inputs.get("target_tokens")
+    if tensor is None:
         return None
-    if isinstance(value, torch.Tensor):
-        return value.detach().cpu().long()
-    return torch.tensor(value, dtype=torch.long)
+    return torch.tensor(tensor.data, dtype=torch.long)
 
 
-def _extract_sft_weights(datum) -> torch.Tensor:
-    """Extract weights from SFT datum's loss_fn_inputs.
-
-    SFT datums store weights = weights[1:] in loss_fn_inputs["weights"].
-    Handles both Pydantic ForwardBackwardDatum and flat dict formats.
-
-    Returns:
-        torch.Tensor of float weights, or None if not found.
-    """
-    loss_fn_inputs = _get_attr_or_key(datum, "loss_fn_inputs")
-    if isinstance(loss_fn_inputs, dict):
-        weights_obj = loss_fn_inputs.get("weights")
-        if weights_obj is not None:
-            data = weights_obj.data if hasattr(weights_obj, "data") else weights_obj
-            if isinstance(data, torch.Tensor):
-                return data.detach().cpu().float()
-            return torch.tensor(data, dtype=torch.float32)
-
-    # Fall back to flat format
-    if isinstance(datum, dict):
-        value = datum.get("weights")
-    else:
-        value = getattr(datum, "weights", None)
-
-    if value is None:
+def _extract_sft_weights(datum: Datum) -> torch.Tensor:
+    """loss_fn_inputs["weights"] (= weights[1:] of the cookbook's SFT datum) as
+    a float tensor, or None when absent."""
+    tensor = datum.loss_fn_inputs.get("weights")
+    if tensor is None:
         return None
-    if isinstance(value, torch.Tensor):
-        return value.detach().cpu().float()
-    return torch.tensor(value, dtype=torch.float32)
-
-
+    return torch.tensor(tensor.data, dtype=torch.float32)
