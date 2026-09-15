@@ -5,8 +5,6 @@ Simple router for health checks and server capabilities.
 No service layer needed - just queries system state.
 """
 import logging
-import os
-import json
 import ray
 from datetime import datetime
 from fastapi import APIRouter, Depends, Request
@@ -94,42 +92,14 @@ async def get_server_capabilities(
     """Get server capabilities - refactored with config and typed response"""
     config = _get_config(request)
 
-    if config.supported_models:
-        supported_models = [
-            ModelInfo(
-                model_name=model.model_name,
-                max_context_length=model.max_context_length,
-                supports_lora=model.supports_lora
-            )
-            for model in config.supported_models
-        ]
-    else:
-        # Fallback to environment or defaults
-        default_models = [
-            {
-                "model_name": "/data/models/Qwen2.5-0.5B-Instruct_torch_dist",
-                "max_context_length": 512,
-                "supports_lora": True
-            }
-        ]
-        env_models = os.getenv("SUPPORTED_MODELS")
-        if env_models:
-            try:
-                models_config = json.loads(env_models)
-            except Exception as e:
-                logger.warning(f"Failed to parse SUPPORTED_MODELS env var: {e}")
-                models_config = default_models
-        else:
-            models_config = default_models
-
-        supported_models = [
-            ModelInfo(
-                model_name=model_config.get("model_name", "unknown"),
-                max_context_length=model_config.get("max_context_length", 512),
-                supports_lora=model_config.get("supports_lora", True),
-            )
-            for model_config in models_config
-        ]
+    supported_models = [
+        ModelInfo(
+            model_name=model.model_name,
+            max_context_length=model.max_context_length,
+            supports_lora=model.supports_lora
+        )
+        for model in config.supported_models
+    ]
 
     return ServerCapabilities(
         supported_models=supported_models,

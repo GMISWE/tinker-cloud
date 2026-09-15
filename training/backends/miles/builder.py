@@ -461,10 +461,10 @@ class MilesArgumentBuilder(ArgumentBuilder):
             args.megatron_to_hf_mode = "bridge"
 
         # Parallelism settings - use values from parallel_config (already auto-detected in build_args)
-        tp_size = parallel_config.get('tensor_parallel_size', 2)
-        pp_size = parallel_config.get('pipeline_parallel_size', 1)
-        cp_size = parallel_config.get('context_parallel_size', 1)
-        num_gpus = parallel_config.get('num_gpus', 4)
+        tp_size = parallel_config['tensor_parallel_size']
+        pp_size = parallel_config['pipeline_parallel_size']
+        cp_size = parallel_config['context_parallel_size']
+        num_gpus = parallel_config['num_gpus']
         dp_size = num_gpus // (tp_size * pp_size * cp_size)
 
         args.tensor_model_parallel_size = tp_size
