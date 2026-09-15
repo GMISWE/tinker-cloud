@@ -250,7 +250,8 @@ class MilesArgumentBuilder(ArgumentBuilder):
             # RL algorithm
             '--advantage-estimator', self.cfg.advantage_estimator,
             # Note: KL/TIS settings are added conditionally below based on RLVE mode
-            # PPO clipping - asymmetric clip for importance ratios (matches Miles native)
+            # IS ratio clamp, fixed at boot. Default cannot bind (Tinker importance_sampling);
+            # a ppo deployment sets SLIME_EPS_CLIP* (see backend._check_miles_clip_config).
             '--eps-clip', str(self.cfg.eps_clip),
             '--eps-clip-high', str(self.cfg.eps_clip_high),
             # Entropy coefficient (0 = no entropy bonus, matches Miles native)

@@ -5,6 +5,12 @@ from pydantic import Field
 
 from ..env_config import EnvConfig
 
+# Tinker's importance_sampling is unclipped. The IS ratio is >= 0, so a lower
+# bound of 0 (eps 1.0) and an upper bound of 1e6 cannot bind. A ppo deployment
+# overrides via SLIME_EPS_CLIP / SLIME_EPS_CLIP_HIGH (backend._check_miles_clip_config).
+NO_CLIP_EPS = 1.0
+NO_CLIP_EPS_HIGH = 1.0e6
+
 
 class MilesConfig(EnvConfig):
     # Multi-LoRA pool (explicit opt-in; needs a LoRA rank on the model)
@@ -22,8 +28,8 @@ class MilesConfig(EnvConfig):
     # Megatron / Slime CLI values
     data_pad_size_multiplier: int = Field(512, description="--data-pad-size-multiplier")
     advantage_estimator: str = Field("grpo", description="--advantage-estimator")
-    eps_clip: float = Field(0.2, description="--eps-clip")
-    eps_clip_high: float = Field(0.28, description="--eps-clip-high")
+    eps_clip: float = Field(NO_CLIP_EPS, description="--eps-clip; 1.0 = lower bound 0, cannot bind")
+    eps_clip_high: float = Field(NO_CLIP_EPS_HIGH, description="--eps-clip-high; 1e6 cannot bind")
     entropy_coef: float = Field(0.0, description="--entropy-coef")
     sglang_deterministic: bool = Field(False, description="Boot SGLang with deterministic inference (per-request seeds)")
     weight_decay: float = Field(0.0, description="--weight-decay")
