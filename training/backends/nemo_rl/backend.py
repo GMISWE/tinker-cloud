@@ -546,25 +546,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                     # train/sample mismatch; the ~0.003 ratio it masked was the
                     # BUG-012 alignment defect, fixed in the converter.
 
-                    if handle.loss_fn_name == "cross_entropy":
-                        # Pure-sum CE (Tinker contract), not NeMo RL's mean-normalized
-                        # NLLLoss — see BUG-015 and losses.TinkerSumCELoss. Ships to
-                        # Ray workers by reference (training is pip install -e'd, so
-                        # importable in the shared venv on server + workers).
-                        from .losses import TinkerSumCELoss
-                        active_loss_fn = TinkerSumCELoss()
-                    elif handle.loss_fn_name == "ppo" and step_loss_config:
-                        # Per-call clip range: rebuild the pure-sum PG loss from the
-                        # create-time config with the client's thresholds.
-                        from .losses import TinkerSumPGLoss
-                        low, high = clip_thresholds(step_loss_config)
-                        active_loss_fn = TinkerSumPGLoss({
-                            **handle.config["loss_fn"],
-                            "ratio_clip_min": 1.0 - low,
-                            "ratio_clip_max": high - 1.0,
-                        })
-                    else:
-                        active_loss_fn = handle.loss_fn  # TinkerSumPGLoss (importance_sampling)
+                    active_loss_fn = _step_loss_fn(handle, step_loss_config)
 
                     # Pass gbs=actual size so NeMo RL shards correctly instead of
                     # defaulting to config train_global_batch_size.
@@ -1000,6 +982,27 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                 backend="nemo_rl", operation="prepare_for_generation",
             )
         await _ensure_generation_ready(handle)
+
+
+def _step_loss_fn(h: NemoRLHandle, step_loss_config: Optional[Dict[str, float]]):
+    """The loss object for this optimizer step. ppo always rebuilds the pure-sum
+    PG loss with the call's clip range (contract defaults 0.8/1.2 when the call
+    sends none); h.loss_fn is the unclipped importance_sampling loss."""
+    if h.loss_fn_name == "cross_entropy":
+        # Pure-sum CE (Tinker contract), not NeMo RL's mean-normalized NLLLoss
+        # (BUG-015). Ships to Ray workers by reference (training is pip
+        # install -e'd, so importable in the shared venv on server + workers).
+        from .losses import TinkerSumCELoss
+        return TinkerSumCELoss()
+    if h.loss_fn_name == "ppo":
+        from .losses import TinkerSumPGLoss
+        low, high = clip_thresholds(step_loss_config)
+        return TinkerSumPGLoss({
+            **h.config["loss_fn"],
+            "ratio_clip_min": 1.0 - low,
+            "ratio_clip_max": high - 1.0,
+        })
+    return h.loss_fn  # TinkerSumPGLoss (importance_sampling, bounds that cannot bind)
 
 
 async def _ensure_generation_ready(handle: NemoRLHandle) -> None:
