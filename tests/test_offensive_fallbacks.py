@@ -36,11 +36,14 @@ def test_malformed_supported_models_is_a_startup_error(monkeypatch):
     assert TrainingConfig._get_default_models()[0].model_name == "m"
 
 
-def test_datum_without_model_input_is_malformed():
+def test_model_input_lens_reads_the_router_datum():
+    # The service hands backends the router's pydantic datums; the boundary
+    # validation guarantees model_input, so there is no malformed case here.
     from tinkercloud.training.backends.miles.backend import _model_input_lens
-    assert _model_input_lens([{"model_input": {"chunks": [{"tokens": [1, 2, 3]}]}}]) == [3]
-    with pytest.raises(KeyError):
-        _model_input_lens([{"loss_fn_inputs": {}}])
+    from tinkercloud.training.models.requests import ForwardBackwardDatum
+    d = ForwardBackwardDatum.model_validate(
+        {"model_input": {"chunks": [{"tokens": [1, 2, 3]}]}, "loss_fn_inputs": {}})
+    assert _model_input_lens([d]) == [3]
 
 
 def test_learning_rate_rpc_failure_is_a_backend_error():

@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 import ray
 
 from ..base import BackendError, BackendHandle, TrainingBackend, UnsupportedFeatureError
+from ...models.requests import Datum
 from .config import NO_CLIP_EPS_HIGH, MilesConfig
 from ...core.loss_registry import clip_thresholds
 from ...checkpoints.interchange import export_hf_adapter
@@ -87,13 +88,13 @@ def _publish_native_adapter(args, root: str) -> None:
     record_native_checkpoint(root, os.path.dirname(latest))
 
 
-def _model_input_lens(data: List[Any]) -> List[int]:
+def _model_input_lens(data: List[Datum]) -> List[int]:
     """Per-datum model_input token lengths (the observation-contract unit:
     fb logprobs are datum-aligned to these, NOT to rollout tokens which
     append the final target)."""
     from .rollout_data import TinkerDataConverter
 
-    return [len(TinkerDataConverter.extract_tokens_from_model_input(d["model_input"])) for d in data]
+    return [len(TinkerDataConverter.extract_tokens_from_model_input(d.model_input)) for d in data]
 
 
 def _engine_context_length(hf_path: str) -> Optional[int]:
