@@ -8,14 +8,22 @@ Endpoints:
 - POST /api/v1/weights_info - Get weights/checkpoint info from tinker path
 """
 import logging
-from typing import Dict, Any
+from typing import Dict
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 
 from ..services.checkpoint_service import CheckpointService
 from ..services.session_service import SessionService
 from ..core.task_manager import TaskManager
-from ..core.dependencies import verify_api_key_dep, get_checkpoint_store
+from ..core.dependencies import (
+    verify_api_key_dep, 
+    get_checkpoint_store,
+    get_checkpoint_service, 
+    get_metadata_storage, 
+    get_futures_storage, 
+    get_training_clients,
+    get_session_service,
+)
 from ..checkpoints import CheckpointKind, CheckpointRef, CheckpointStore
 from ..storage import MetadataStorage, FuturesStorage
 from ..models.requests import (
@@ -36,57 +44,11 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-def _get_runtime(request: Request):
-    runtime = getattr(request.app.state, "runtime", None)
-    if runtime is None:
-        raise RuntimeError("Training runtime state not initialized")
-    return runtime
-
-
-def get_checkpoint_service(request: Request) -> CheckpointService:
-    """Dependency injection for CheckpointService."""
-    service = getattr(request.app.state, "checkpoint_service", None)
-    if service is None:
-        raise RuntimeError("CheckpointService not initialized on app state")
-    return service
-
-
-def get_metadata_storage(request: Request) -> MetadataStorage:
-    """Dependency injection for MetadataStorage."""
-    storage = getattr(request.app.state, "metadata_storage", None)
-    if storage is None:
-        raise RuntimeError("MetadataStorage not initialized on app state")
-    return storage
-
-
-def get_futures_storage(request: Request) -> FuturesStorage:
-    """Dependency injection for FuturesStorage."""
-    storage = getattr(request.app.state, "futures_storage", None)
-    if storage is None:
-        raise RuntimeError("FuturesStorage not initialized on app state")
-    return storage
-
-
-def get_training_clients(request: Request) -> Dict[str, Dict[str, Any]]:
-    """Dependency injection for training_clients."""
-    runtime = _get_runtime(request)
-    return runtime.training_clients
-
-
 def get_task_manager(
     futures_storage: FuturesStorage = Depends(get_futures_storage)
 ) -> TaskManager:
     """Create TaskManager with FuturesStorage dependency."""
     return TaskManager(futures_storage)
-
-
-def get_session_service(request: Request) -> SessionService:
-    """Dependency injection for SessionService."""
-    service = getattr(request.app.state, "session_service", None)
-    if service is None:
-        raise RuntimeError("SessionService not initialized on app state")
-    return service
-
 
 # ============================================================================
 # Checkpoint Management Endpoints

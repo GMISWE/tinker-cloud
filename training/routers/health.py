@@ -10,9 +10,12 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, Request
 
 from ..models.responses import ClientConfigResponse, HealthResponse, ServerCapabilities, ModelInfo
-from ..core.dependencies import verify_api_key_dep
+from ..core.dependencies import (
+    verify_api_key_dep,
+    get_runtime, 
+    get_config,
+)
 from ..core.task_manager import TaskManager
-from ..config import TrainingConfig
 from ..proto.wire import zstd_available
 
 logger = logging.getLogger(__name__)
@@ -22,24 +25,11 @@ router = APIRouter(
     tags=["health"]
 )
 
-def _get_runtime(request: Request):
-    runtime = getattr(request.app.state, "runtime", None)
-    if runtime is None:
-        raise RuntimeError("Training runtime state not initialized")
-    return runtime
-
-
-def _get_config(request: Request) -> TrainingConfig:
-    config = getattr(request.app.state, "config", None)
-    if config is None:
-        raise RuntimeError("Training config not initialized")
-    return config
-
 
 @router.get("/health", response_model=HealthResponse)
 async def health_simple(request: Request):
     """Health check for k8s probes (backward compatibility)"""
-    runtime = _get_runtime(request)
+    runtime = get_runtime(request)
     training_clients = runtime.training_clients
 
     return HealthResponse(
@@ -56,7 +46,7 @@ async def health_simple(request: Request):
 @router.get("/api/v1/health", response_model=HealthResponse)
 async def health(request: Request):
     """Health check endpoint - refactored with typed response"""
-    runtime = _get_runtime(request)
+    runtime = get_runtime(request)
     training_clients = runtime.training_clients
 
     return HealthResponse(
@@ -90,7 +80,7 @@ async def get_server_capabilities(
     _: None = Depends(verify_api_key_dep)
 ):
     """Get server capabilities - refactored with config and typed response"""
-    config = _get_config(request)
+    config = get_config(request)
 
     supported_models = [
         ModelInfo(

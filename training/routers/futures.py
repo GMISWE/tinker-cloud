@@ -16,7 +16,11 @@ from typing import Dict, Any
 from ..models.requests import CleanupFuturesRequest, RetrieveFutureRequest
 from ..models.responses import CleanupResult
 from ..storage import FuturesStorage
-from ..core.dependencies import verify_api_key_dep
+from ..core.dependencies import (
+    verify_api_key_dep,
+    get_futures_storage, 
+    get_poll_tracking,
+)
 from ..core.task_manager import TaskManager
 from ..proto.wire import PROTO_CONTENT_TYPE, PROTO_RESULT_OPERATIONS, serialize_result
 
@@ -34,26 +38,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(
     tags=["futures"]
 )
-
-def _get_runtime(request: Request):
-    runtime = getattr(request.app.state, "runtime", None)
-    if runtime is None:
-        raise RuntimeError("Training runtime state not initialized")
-    return runtime
-
-
-def get_futures_storage(request: Request) -> FuturesStorage:
-    """Get the futures_storage instance"""
-    storage = getattr(request.app.state, "futures_storage", None)
-    if storage is None:
-        raise RuntimeError("Futures storage not initialized")
-    return storage
-
-
-def get_poll_tracking(request: Request) -> Dict[str, Dict[str, Any]]:
-    """Get the poll_tracking dict"""
-    runtime = _get_runtime(request)
-    return runtime.poll_tracking
 
 
 async def _completed_response(fut: Dict[str, Any], accept: str, futures_storage: FuturesStorage) -> Response:
