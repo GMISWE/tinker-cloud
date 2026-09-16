@@ -115,7 +115,6 @@ class SeedRepro:
         from gates.traces.common import synthetic_lm_datums
 
         ds = synthetic_lm_datums(self.n, self.seq)
-        delete = getattr(driver, "delete_model", None)
         rows = []
         for arm, seed in self.arms:
             t0 = time.time()
@@ -131,7 +130,7 @@ class SeedRepro:
                 tc.forward_backward(ds, "cross_entropy").result()
                 res = driver.optim_step(tc.model_id, lr=self.lr)
             finally:
-                if delete and delete(tc.model_id):
+                if driver.delete_model(tc.model_id):
                     self.created_models.remove(tc.model_id)
             gn = res.get("grad_norm")
             rows.append(

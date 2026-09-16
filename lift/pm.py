@@ -54,8 +54,8 @@ class Outcome:
     @staticmethod
     def refused(reason: str, witness: ir.Node) -> Outcome:
         prov = ""
-        loc = getattr(witness, "loc", None)
-        if isinstance(loc, ir.Loc) and (loc.src or loc.key):
+        loc = witness.loc
+        if loc.src or loc.key:
             prov = f"{loc.src}:{loc.key}"
         return Outcome("refused", refusal=Refusal(reason, witness.canon(), prov))
 
@@ -210,7 +210,7 @@ class PassManager:
         if isinstance(cur, ir.Node):
             rpt.leaks = tuple(sorted(self.am.get("leaks", cur)))  # type: ignore[arg-type]
             rpt.holes = tuple(h.canon() for h in self.am.get("holes", cur))  # type: ignore[union-attr]
-        rpt.final_hash = getattr(cur, "hash", "")
+        rpt.final_hash = cur.hash if isinstance(cur, ir.Node) else ""
         return cur, rpt
 
     def _run_one(
@@ -244,6 +244,8 @@ class PassManager:
 
         if out.status == "changed":
             nxt = out.term
+            if nxt is None:
+                raise ValueError(f"pass {name!r} reported changed without a term")
             rpt.guarantee = meet(rpt.guarantee, p.level)
             if isinstance(nxt, ir.Node):
                 # hole conservation: no pass may fabricate or drop obligations
@@ -263,7 +265,7 @@ class PassManager:
                         rec.errors = tuple(errs)  # type: ignore[arg-type]
                         rpt.records.append(rec)
                         return cur, True
-            rec.hash_after = getattr(nxt, "hash", "")
+            rec.hash_after = nxt.hash
             rpt.records.append(rec)
             return nxt, False
 

@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, List, Optional
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -35,13 +36,10 @@ def _serialize_result(result: Any) -> Optional[str]:
 
 
 def _as_plain(result: Any) -> Any:
-    """Pydantic model -> dict; anything else unchanged."""
-    if hasattr(result, "model_dump"):
+    """Pydantic model -> dict; a plain dict / list unchanged."""
+    if isinstance(result, BaseModel):
         return result.model_dump()
-    if hasattr(result, "dict"):
-        return result.dict()
     return result
-
 
 class DuplicateSeqId(ValueError):
     """A (model_id, seq_id) pair was reused with a different request."""

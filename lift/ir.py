@@ -29,6 +29,7 @@ NOLOC = Loc()
 
 class Node:
     """Mixin for IR nodes: canonical form, content hash, child traversal."""
+    loc: Loc  # every concrete node dataclass declares it (default NOLOC)
 
     def canon(self) -> dict:
         out: dict = {"_": type(self).__name__}
