@@ -167,27 +167,6 @@ def estimate_model_params(
         return 70.0
 
 
-def extract_model_name(args) -> str:
-    """
-    Extract HuggingFace model name from Slime args.
-
-    Args:
-        args: Slime argument Namespace
-
-    Returns:
-        HuggingFace model path/name
-    """
-    if hasattr(args, 'hf_checkpoint') and args.hf_checkpoint:
-        return args.hf_checkpoint
-
-    if hasattr(args, 'pretrained_checkpoint') and args.pretrained_checkpoint:
-        # Remove _torch_dist suffix if present
-        return args.pretrained_checkpoint.replace('_torch_dist', '')
-
-    logger.warning("Could not extract model name from args")
-    return "unknown"
-
-
 def detect_architecture(model_name: str) -> str:
     """
     Detect model architecture from model name.

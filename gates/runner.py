@@ -34,13 +34,12 @@ def _sha256(obj) -> str:
 def _release_models(trace, driver) -> None:
     """Delete every model the trace created. Best-effort and never raises —
     a failed cleanup must not turn a real verdict into an exception."""
-    models = getattr(trace, "created_models", None) or []
-    delete = getattr(driver, "delete_model", None)
-    if not models or delete is None:
+    models = trace.created_models
+    if not models:
         return
     for model_id in models:
         try:
-            delete(model_id)
+            driver.delete_model(model_id)
         except Exception as e:  # noqa: BLE001 - a leaked model must not eat a verdict
             print(f"WARNING: releasing {model_id} raised {e!r}", flush=True)
     models.clear()
@@ -99,7 +98,7 @@ def run(
         },
         "meta": {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "base_url": getattr(driver, "base_url", None),
+            "base_url": driver.base_url,
             "gates_version": GATES_VERSION,
         },
     }

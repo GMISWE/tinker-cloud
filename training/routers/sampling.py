@@ -13,11 +13,11 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from ..services.sampling_service import SamplingService
 from ..core.task_manager import TaskManager
-from ..core.dependencies import ( 
-    verify_api_key_dep, 
-    get_checkpoint_store,  
-    get_sampling_service, 
-    get_futures_storage, 
+from ..core.dependencies import (
+    verify_api_key_dep,
+    get_checkpoint_store,
+    get_sampling_service,
+    get_futures_storage,
     get_training_clients,
     get_session_service
 )
@@ -75,14 +75,14 @@ def resolve_target_model(
     behind it.
     """
     if sampling_session_id:
-        info = session_service.get_sampler(sampling_session_id) 
+        info = session_service.get_sampler(sampling_session_id)
         if info is None:
             raise HTTPException(status_code=404, detail=f"Unknown sampling_session_id: {sampling_session_id}")
         if not info.model_id:
             raise HTTPException(status_code=400, detail=BASE_MODEL_SAMPLING_UNSUPPORTED)
         if info.model_id not in training_clients:
             raise HTTPException(status_code=404, detail=f"Sampler {sampling_session_id}'s model {info.model_id} no longer exists")
-        return info.model_id, getattr(info, "pinned_version", None)
+        return info.model_id, info.pinned_version
     if model_path:
         # A checkpoint path names its model AND the weight version it was
         # saved at: the sampler is pinned there, not served the live weights.
