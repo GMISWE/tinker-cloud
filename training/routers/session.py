@@ -12,7 +12,7 @@ Endpoints:
 import logging
 import uuid
 from typing import Dict
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 
 from ..models.requests import (
     CreateSessionRequest,
@@ -27,29 +27,18 @@ from ..models.responses import (
     ListSessionsResponse,
     GetSamplerResponse,
 )
-from ..core.dependencies import verify_api_key_dep, get_checkpoint_store
+from ..core.dependencies import (
+    verify_api_key_dep, 
+    get_checkpoint_store,
+    get_training_clients, 
+    get_session_service,
+)
 from ..checkpoints import CheckpointStore
 from ..services.session_service import SessionService
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["session"])
-
-
-def get_training_clients(request: Request) -> Dict:
-    runtime = getattr(request.app.state, "runtime", None)
-    if runtime is None:
-        raise RuntimeError("Training runtime state not initialized")
-    return runtime.training_clients
-
-
-def get_session_service(request: Request) -> SessionService:
-    """Dependency injection for SessionService."""
-    service = getattr(request.app.state, "session_service", None)
-    if service is None:
-        raise RuntimeError("SessionService not initialized on app state")
-    return service
-
 
 @router.post("/api/v1/create_session", response_model=CreateSessionResponse)
 async def create_session(

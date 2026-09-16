@@ -20,7 +20,7 @@ from ..models.requests import ForwardRequest, ForwardBackwardRequest, OptimStepR
 from ..models.responses import AsyncOperationResponse
 from ..services.training_service import TrainingService
 from ..core.task_manager import TaskManager
-from ..core.dependencies import verify_api_key_dep
+from ..core.dependencies import verify_api_key_dep, get_training_clients, get_futures_storage, get_training_service
 from ..core import loss_registry
 from ..proto.wire import PROTO_CONTENT_TYPE, WireError, decompress_zstd, parse_forward_backward_request
 from ..storage import FuturesStorage
@@ -34,38 +34,9 @@ router = APIRouter(
 )
 
 
-def _get_runtime(request: Request):
-    runtime = getattr(request.app.state, "runtime", None)
-    if runtime is None:
-        raise RuntimeError("Training runtime state not initialized")
-    return runtime
-
-
-def get_training_clients(request: Request) -> Dict:
-    """Get training clients from runtime state."""
-    runtime = _get_runtime(request)
-    return runtime.training_clients
-
-
-def get_futures_storage(request: Request) -> FuturesStorage:
-    """Get futures storage instance from app state."""
-    storage = getattr(request.app.state, "futures_storage", None)
-    if storage is None:
-        raise RuntimeError("Futures storage not initialized")
-    return storage
-
-
 def generate_request_id() -> str:
     """Generate unique request ID"""
     return f"req_{uuid.uuid4().hex[:16]}"
-
-
-def get_training_service(request: Request) -> TrainingService:
-    """Dependency: Get training service from app state."""
-    service = getattr(request.app.state, "training_service", None)
-    if service is None:
-        raise RuntimeError("TrainingService not initialized on app state")
-    return service
 
 
 def get_task_manager(

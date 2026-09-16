@@ -9,8 +9,7 @@ import asyncio
 import logging
 import os
 import signal
-from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Set
+from typing import Optional
 
 # CRITICAL: Disable Ray auto-init BEFORE importing ray
 os.environ["RAY_DISABLE_AUTO_INIT"] = "1"
@@ -25,18 +24,9 @@ from .checkpoints import CheckpointError, CheckpointStore
 from .storage.futures import DuplicateSeqId
 from .config import get_config, TrainingConfig
 from .utils import APIKeyAuth
-
+from .core.runtime_state import TrainingRuntimeState
 # Configure logging
 logger = logging.getLogger(__name__)
-
-@dataclass
-class TrainingRuntimeState:
-    """Holds mutable runtime structures for the training API."""
-
-    training_clients: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    training_runs_metadata: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    poll_tracking: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    background_tasks: Set[asyncio.Task] = field(default_factory=set)
 
 def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
     """Application factory for the training API."""
@@ -199,7 +189,7 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
     @application.on_event("shutdown")
     async def shutdown_event():
         """Free every live model (actors, placement groups) before the process exits."""
-        reaper = getattr(application.state, "session_reaper", None)
+        reaper = application.state.session_reaper
         if reaper is not None:
             reaper.cancel()
         runtime: TrainingRuntimeState = application.state.runtime

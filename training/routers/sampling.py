@@ -7,13 +7,20 @@ Endpoints:
 - POST /api/v1/create_sampling_client - Create SGLang sampling client
 """
 import logging
-from typing import Dict, Optional, Any, List
+from typing import Dict, Optional, List
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 
 from ..services.sampling_service import SamplingService
 from ..core.task_manager import TaskManager
-from ..core.dependencies import verify_api_key_dep, get_checkpoint_store
+from ..core.dependencies import ( 
+    verify_api_key_dep, 
+    get_checkpoint_store,  
+    get_sampling_service, 
+    get_futures_storage, 
+    get_training_clients,
+    get_session_service
+)
 from ..checkpoints import CheckpointRef, CheckpointStore
 from ..storage import FuturesStorage
 from ..models.requests import (
@@ -33,35 +40,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-def _get_runtime(request: Request):
-    runtime = getattr(request.app.state, "runtime", None)
-    if runtime is None:
-        raise RuntimeError("Training runtime state not initialized")
-    return runtime
-
-
-def get_sampling_service(request: Request) -> SamplingService:
-    """Dependency injection for SamplingService."""
-    service = getattr(request.app.state, "sampling_service", None)
-    if service is None:
-        raise RuntimeError("SamplingService not initialized on app state")
-    return service
-
-
-def get_futures_storage(request: Request) -> FuturesStorage:
-    """Dependency injection for FuturesStorage."""
-    storage = getattr(request.app.state, "futures_storage", None)
-    if storage is None:
-        raise RuntimeError("FuturesStorage not initialized on app state")
-    return storage
-
-
-def get_training_clients(request: Request) -> Dict[str, Dict[str, Any]]:
-    """Dependency injection for training_clients."""
-    runtime = _get_runtime(request)
-    return runtime.training_clients
-
-
 def get_task_manager(
     futures_storage: FuturesStorage = Depends(get_futures_storage)
 ) -> TaskManager:
@@ -72,10 +50,6 @@ def get_task_manager(
 # ============================================================================
 # Sampling Endpoints
 # ============================================================================
-
-def get_session_service(request: Request):
-    """Session service from app state (None if unavailable)."""
-    return getattr(request.app.state, "session_service", None)
 
 
 BASE_MODEL_SAMPLING_UNSUPPORTED = (
@@ -101,7 +75,7 @@ def resolve_target_model(
     behind it.
     """
     if sampling_session_id:
-        info = session_service.get_sampler(sampling_session_id) if session_service is not None else None
+        info = session_service.get_sampler(sampling_session_id) 
         if info is None:
             raise HTTPException(status_code=404, detail=f"Unknown sampling_session_id: {sampling_session_id}")
         if not info.model_id:
