@@ -19,7 +19,9 @@ import ray
 from ..base import BackendError, BackendHandle, TrainingBackend, UnsupportedFeatureError
 from ...models.requests import Datum
 from .config import NO_CLIP_EPS_HIGH, MilesConfig
+from ...core import routing
 from ...core.loss_registry import clip_thresholds
+from ...utils import sglang_client
 from ...checkpoints.interchange import export_hf_adapter
 from .model_setup import record_native_checkpoint, resolve_native_checkpoint
 
@@ -28,6 +30,13 @@ logger = logging.getLogger(__name__)
 def _dp_size(args: Any) -> int:
     """Data-parallel width the actors will split a batch across."""
     return int(args.data_parallel_size)
+
+
+def _router_url(router_ip: Optional[str], router_port: Optional[int]) -> Optional[str]:
+    """SGLang router base URL, or None when the model booted without one (SFT)."""
+    if not router_ip or not router_port:
+        return None
+    return f"http://{router_ip}:{router_port}"
 
 
 def _adapter_save_dir(native_root: Optional[Path], adapter_name: str) -> Path:
@@ -414,6 +423,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
             placement_group=None,   # pool-owned; freed only at pool teardown
             args=pool.args,
             hf_path=pool.hf_path,
+            inference_endpoint=_router_url(pool.router_ip, pool.router_port),
             router_ip=pool.router_ip,
             router_port=pool.router_port,
             created_at=datetime.now().isoformat(),
@@ -603,6 +613,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
                 placement_group=pgs,
                 args=args,
                 hf_path=hf_path,
+                inference_endpoint=_router_url(router_ip, router_port),
                 router_ip=router_ip,
                 router_port=router_port,
                 rlve_config=rlve_config,
@@ -1440,14 +1451,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
         pool mode) are still served from the live engine — the BUG-015
         aliasing class; logged loudly rather than silently aliased.
         """
-        from ...utils.sglang_client import SGLangClient
-
-        if not handle.router_ip or not handle.router_port:
-            raise BackendError(
-                "SGLang router not available",
-                backend="miles", operation="sample",
-            )
-        client = SGLangClient(base_url=f"http://{handle.router_ip}:{handle.router_port}")
+        client = self._sglang_client(handle, "sample")
 
         # Pool mode: route to this model's adapter by engine-side slot name.
         lora_path = None
@@ -1508,9 +1512,17 @@ class MilesBackend(TrainingBackend[MilesHandle]):
         }
 
     async def prepare_for_generation(self, handle: MilesHandle) -> None:
-        """SGLang router is always live for Miles — just validate it exists."""
-        if not handle.router_ip or not handle.router_port:
+        """SGLang router is always live for Miles — just validate it is routable."""
+        self._sglang_client(handle, "prepare_for_generation")
+
+    @staticmethod
+    def _sglang_client(handle: MilesHandle, operation: str) -> sglang_client.SGLangClient:
+        """The pooled client for the endpoint currently published for this
+        model (core.routing), not the address the handle was booted with."""
+        try:
+            endpoint = routing.table.endpoint_for(handle.model_id)
+        except routing.RoutingError as e:
             raise BackendError(
-                "SGLang router not available",
-                backend="miles", operation="prepare_for_generation",
-            )
+                "SGLang router not available", backend="miles", operation=operation,
+            ) from e
+        return sglang_client.pool.for_endpoint(endpoint.base_url)
