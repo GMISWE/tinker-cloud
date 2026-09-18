@@ -32,6 +32,7 @@ class MilesConfig(EnvConfig):
     eps_clip_high: float = Field(NO_CLIP_EPS_HIGH, description="--eps-clip-high; 1e6 cannot bind")
     entropy_coef: float = Field(0.0, description="--entropy-coef")
     sglang_deterministic: bool = Field(False, description="Boot SGLang with deterministic inference (per-request seeds)")
+    sglang_max_connections: Optional[int] = Field(None, description="Concurrent connections per SGLang router; None = unbounded (router/engine queue)")
     weight_decay: float = Field(0.0, description="--weight-decay")
     no_offload: bool = Field(False, description="Drop --colocate/--offload (attribution arm)")
     use_kl_loss: bool = Field(False, description="--use-kl-loss (needs a real reference model)")
@@ -58,6 +59,7 @@ class MilesConfig(EnvConfig):
         "eps_clip_high": "SLIME_EPS_CLIP_HIGH",
         "entropy_coef": "SLIME_ENTROPY_COEF",
         "sglang_deterministic": "SLIME_SGLANG_DETERMINISTIC",
+        "sglang_max_connections": "TINKERCLOUD_SGLANG_MAX_CONNECTIONS",
         "weight_decay": "SLIME_WEIGHT_DECAY",
         "no_offload": "SLIME_NO_OFFLOAD",
         "use_kl_loss": "SLIME_USE_KL_LOSS",

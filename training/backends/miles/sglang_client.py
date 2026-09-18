@@ -1,9 +1,9 @@
 """
-SGLang Inference Client
+SGLang Inference Client (Miles' rollout engine)
 
 Async HTTP client for an SGLang router. One client per endpoint holds one
-persistent connection pool (keep-alive across sample requests); the process
-obtains clients through `pool` and never constructs them per request.
+persistent connection pool (keep-alive across sample requests); MilesBackend
+owns one SGLangClientPool and never constructs clients per request.
 """
 import logging
 from typing import Any, Dict, List, Optional
@@ -178,47 +178,20 @@ class SGLangClient:
         """
         normalized: List[Optional[float]] = []
         for entry in entries or []:
-            if entry is None:
+            raw: Any = entry[0] if isinstance(entry, (list, tuple)) and entry else entry
+            if raw is None or isinstance(raw, (list, tuple)):
                 normalized.append(None)
-            elif isinstance(entry, (list, tuple)) and entry:
-                try:
-                    normalized.append(float(entry[0]))
-                except (TypeError, ValueError):
-                    normalized.append(None)
-            else:
-                try:
-                    normalized.append(float(entry))
-                except (TypeError, ValueError):
-                    normalized.append(None)
+                continue
+            try:
+                normalized.append(float(raw))
+            except (TypeError, ValueError):
+                normalized.append(None)
         return normalized
-
-    async def batch_generate(
-        self,
-        input_ids_list: List[List[int]],
-        sampling_params: Optional[Dict[str, Any]] = None,
-        prompt_logprobs: bool = False
-    ) -> List[Dict[str, Any]]:
-        """
-        Generate multiple completions (one per input).
-
-        Args:
-            input_ids_list: List of input token ID lists
-            sampling_params: Sampling parameters
-            prompt_logprobs: Whether to return prompt logprobs
-
-        Returns:
-            List of generation results (one per input)
-        """
-        results = []
-        for input_ids in input_ids_list:
-            result = await self.generate(input_ids, sampling_params, prompt_logprobs)
-            results.append(result)
-        return results
 
 
 class SGLangClientPool:
     """One SGLangClient (one connection pool) per endpoint URL, created on
-    first use and closed at process shutdown."""
+    first use and closed by the owning backend's close()."""
 
     def __init__(self, **client_kwargs: Any):
         self._client_kwargs = client_kwargs
@@ -238,7 +211,3 @@ class SGLangClientPool:
         clients, self._clients = list(self._clients.values()), {}
         for c in clients:
             await c.aclose()
-
-
-# Process-wide pool; api.py closes it at shutdown.
-pool = SGLangClientPool()

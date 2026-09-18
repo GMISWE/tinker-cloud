@@ -1,9 +1,9 @@
-"""utils.sglang_client: one persistent connection pool per endpoint, reused across requests."""
+"""backends.miles.sglang_client: one persistent connection pool per endpoint, reused across requests."""
 import asyncio
 
 import httpx
 
-from tinkercloud.training.utils.sglang_client import SGLangClient, SGLangClientPool
+from tinkercloud.training.backends.miles.sglang_client import SGLangClient, SGLangClientPool
 
 
 def _sglang_transport(hits):

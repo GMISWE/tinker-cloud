@@ -21,9 +21,9 @@ from ...models.requests import Datum
 from .config import NO_CLIP_EPS_HIGH, MilesConfig
 from ...core import routing
 from ...core.loss_registry import clip_thresholds
-from ...utils import sglang_client
 from ...checkpoints.interchange import export_hf_adapter
 from .model_setup import record_native_checkpoint, resolve_native_checkpoint
+from .sglang_client import SGLangClient, SGLangClientPool
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +246,8 @@ class MilesBackend(TrainingBackend[MilesHandle]):
     def __init__(self, overrides: Optional[Dict[str, Any]] = None):
         self.overrides = overrides or {}
         self.config = MilesConfig.from_env(self.overrides)
+        # One persistent connection pool per SGLang router this process samples from.
+        self._sglang_pool = SGLangClientPool(max_connections=self.config.sglang_max_connections)
         # Lazy-import converter to avoid import errors when Miles is not installed
         self._converter = None
         self._builder = None
@@ -1515,8 +1517,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
         """SGLang router is always live for Miles — just validate it is routable."""
         self._sglang_client(handle, "prepare_for_generation")
 
-    @staticmethod
-    def _sglang_client(handle: MilesHandle, operation: str) -> sglang_client.SGLangClient:
+    def _sglang_client(self, handle: MilesHandle, operation: str) -> SGLangClient:
         """The pooled client for the endpoint currently published for this
         model (core.routing), not the address the handle was booted with."""
         try:
@@ -1525,4 +1526,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
             raise BackendError(
                 "SGLang router not available", backend="miles", operation=operation,
             ) from e
-        return sglang_client.pool.for_endpoint(endpoint.base_url)
+        return self._sglang_pool.for_endpoint(endpoint.base_url)
+
+    async def close(self) -> None:
+        await self._sglang_pool.aclose()

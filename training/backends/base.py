@@ -318,6 +318,12 @@ class TrainingBackend(ABC, Generic[H]):
         """
         ...
 
+    async def close(self) -> None:
+        """Release process-level resources the backend holds (HTTP connection
+        pools, clients to its engines). Called once at server shutdown, after
+        every model has been deleted. Default: nothing to release."""
+        return None
+
     @abstractmethod
     async def delete_model(
         self,
