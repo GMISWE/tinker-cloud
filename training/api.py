@@ -23,7 +23,7 @@ from .storage import FuturesStorage, MetadataStorage, SessionStorage
 from .checkpoints import CheckpointError, CheckpointStore
 from .storage.futures import DuplicateSeqId
 from .config import get_config, TrainingConfig
-from .utils import APIKeyAuth
+from .utils import APIKeyAuth, sglang_client
 from .core.runtime_state import TrainingRuntimeState
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -197,6 +197,7 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
             await _free_model(application, model_id, reason="shutdown")
         if ray.is_initialized():
             ray.shutdown()
+        await sglang_client.pool.aclose()
         application.state.futures_storage.close()
 
     @application.exception_handler(DuplicateSeqId)

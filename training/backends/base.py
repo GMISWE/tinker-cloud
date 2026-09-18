@@ -49,6 +49,10 @@ class BackendHandle:
     # HF model directory the engine loaded (tokenizer source for get_tokenizer_info);
     # empty for backends that resolve no HF checkpoint.
     hf_path: str = ""
+    # Base URL of the HTTP inference engine this model is served from, as
+    # booted; None for in-process engines. The model service publishes it to
+    # core.routing at create_model; sample paths read the table, not this.
+    inference_endpoint: Optional[str] = None
 
 
 # Each backend's handle subclass: a backend only ever receives the handles its

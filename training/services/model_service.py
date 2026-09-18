@@ -14,6 +14,7 @@ from typing import Dict, Any, Optional
 
 from ..backends.base import TrainingBackend
 from ..checkpoints import CheckpointStore
+from ..core import routing
 from ..storage import MetadataStorage
 from ..utils.model_config import detect_architecture, detect_num_gpus
 
@@ -127,6 +128,8 @@ class ModelService:
             "created_at": datetime.now().isoformat(),
         }
         training_clients[model_id] = client_info
+        if handle.inference_endpoint is not None:
+            routing.table.publish(model_id, routing.InferenceEndpoint(handle.inference_endpoint))
 
         logger.info("[%s] Model %s created successfully", request_id, model_id)
         return {
@@ -149,7 +152,11 @@ class ModelService:
         client_info = training_clients[model_id]
         await self.backend.delete_model(client_info["backend_handle"])
 
+        # Registry first, route second: a sample resolves handle and route in
+        # one synchronous stretch, so it sees "model gone", never a bare
+        # "router not available"; a failed delete above leaves both intact.
         del training_clients[model_id]
+        routing.table.withdraw(model_id)
         # ephemeral sampler records die with the model; persistent checkpoints
         # and the native area stay for a later resume
         self.store.release_model(model_id)

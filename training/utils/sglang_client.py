@@ -1,8 +1,9 @@
 """
 SGLang Inference Client
 
-Async HTTP client for SGLang inference server.
-Handles generation with defensive prompt logprobs extraction.
+Async HTTP client for an SGLang router. One client per endpoint holds one
+persistent connection pool (keep-alive across sample requests); the process
+obtains clients through `pool` and never constructs them per request.
 """
 import logging
 from typing import Any, Dict, List, Optional
@@ -14,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 class SGLangClient:
     """
-    Async HTTP client for SGLang inference server.
+    Async HTTP client for one SGLang router endpoint.
 
     Handles text generation with support for:
     - Input token IDs
@@ -22,17 +23,36 @@ class SGLangClient:
     - Prompt logprobs extraction with defensive None handling
     """
 
-    def __init__(self, base_url: str, timeout: float = 60.0):
+    def __init__(
+        self,
+        base_url: str,
+        timeout: float = 60.0,
+        max_connections: Optional[int] = None,
+        max_keepalive_connections: int = 64,
+        transport: Optional[httpx.AsyncBaseTransport] = None,
+    ):
         """
-        Initialize SGLang client.
-
         Args:
-            base_url: SGLang server URL (e.g., "http://router:8000")
-            timeout: HTTP request timeout in seconds
+            base_url: SGLang router URL (e.g., "http://router:8000")
+            timeout: per-request read timeout in seconds
+            max_connections: cap on concurrent connections; None = unbounded
+                (back-pressure then comes from the router / engine max_num_seqs)
+            max_keepalive_connections: idle connections kept open
+            transport: test seam (httpx.MockTransport); None = real network
         """
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.generate_url = f"{self.base_url}/generate"
+        self._http = httpx.AsyncClient(
+            limits=httpx.Limits(
+                max_connections=max_connections,
+                max_keepalive_connections=max_keepalive_connections,
+            ),
+            transport=transport,
+        )
+
+    async def aclose(self) -> None:
+        await self._http.aclose()
 
     async def generate(
         self,
@@ -94,26 +114,16 @@ class SGLangClient:
             payload["logprob_start_len"] = 0
             logger.debug("Requesting prompt logprobs from SGLang")
 
-        # Make async HTTP request
-        async with httpx.AsyncClient() as client:
-            try:
-                response = await client.post(
-                    self.generate_url,
-                    json=payload,
-                    timeout=self.timeout
-                )
-                response.raise_for_status()
-                sglang_output = response.json()
-
-            except httpx.HTTPStatusError as e:
-                logger.error(f"SGLang HTTP error {e.response.status_code}: {e.response.text}")
-                raise
-            except httpx.RequestError as e:
-                logger.error(f"SGLang request error: {e}")
-                raise
-            except Exception as e:
-                logger.error(f"SGLang unexpected error: {e}")
-                raise
+        try:
+            response = await self._http.post(self.generate_url, json=payload, timeout=self.timeout)
+            response.raise_for_status()
+            sglang_output = response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"SGLang HTTP error {e.response.status_code}: {e.response.text}")
+            raise
+        except httpx.RequestError as e:
+            logger.error(f"SGLang request error: {e}")
+            raise
 
         # Extract tokens and logprobs from response
         try:
@@ -204,3 +214,31 @@ class SGLangClient:
             result = await self.generate(input_ids, sampling_params, prompt_logprobs)
             results.append(result)
         return results
+
+
+class SGLangClientPool:
+    """One SGLangClient (one connection pool) per endpoint URL, created on
+    first use and closed at process shutdown."""
+
+    def __init__(self, **client_kwargs: Any):
+        self._client_kwargs = client_kwargs
+        self._clients: Dict[str, SGLangClient] = {}
+
+    def for_endpoint(self, base_url: str) -> SGLangClient:
+        key = base_url.rstrip("/")
+        client = self._clients.get(key)
+        if client is None:
+            client = self._clients[key] = SGLangClient(key, **self._client_kwargs)
+        return client
+
+    def __len__(self) -> int:
+        return len(self._clients)
+
+    async def aclose(self) -> None:
+        clients, self._clients = list(self._clients.values()), {}
+        for c in clients:
+            await c.aclose()
+
+
+# Process-wide pool; api.py closes it at shutdown.
+pool = SGLangClientPool()
