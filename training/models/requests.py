@@ -4,7 +4,7 @@ Request models for the training API.
 This module defines Pydantic models for all API request payloads,
 providing validation and documentation.
 """
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, validator, model_validator
 
@@ -212,6 +212,22 @@ class GetInfoRequest(BaseModel):
 
     model_id: str = Field(..., description="Model ID")
 
+class SamplingSessionFuturesTarget(BaseModel):
+    """Poll target of /retrieve_futures: one (possibly cloned) sampling session.
+    `cloned_sampler_id` is seq_id // 1_000_000_000 (0 for the original client). """
+    type: Literal["sampling_session"] = "sampling_session"
+    sampling_session_id: str = Field(..., description="Sampling session the samples were submitted under")
+    cloned_sampler_id: int = Field(default=0, ge=0, description="seq_id block of the (cloned) SamplingClient")
+
+class SessionFuturesPollRequest(BaseModel):
+    """Per session completion poll (SDK type FuturesRetrieveRequest). """
+    target: SamplingSessionFuturesTarget
+    prev_cursor: int = Field(default=0, ge=0, description="Cursor from the preious response; entries below it are acknowledged")
+    timeout: Optional[float] = Field(default=None, ge=0, description="Requested hold in seconds; the server caps it")
+
+class CancelFutureRequest(BaseModel):
+    """Cancel an in-flight sample the SDK has abandaned."""
+    request_id: str = Field(..., description="Sample request to cancel")
 
 class CleanupFuturesRequest(BaseModel):
     """Request to cleanup old futures."""

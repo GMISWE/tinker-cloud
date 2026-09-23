@@ -68,8 +68,30 @@ class ClientConfigResponse(BaseModel):
     pjwt_auth_enabled: bool = Field(default=False, description="False: API keys only, no JWT exchange")
     proto_compress_fwdbwd: bool = Field(default=False, description="True only when the server can zstd-decompress bodies")
     create_model_via_load_weights: bool = Field(default=False, description="False: create_model then load_weights")
-    sample_use_retrieve_futures: bool = Field(default=False, description="False: no /retrieve_futures poller")
+    sample_use_retrieve_futures: bool = Field(default=True, description="True: sample completions are delivered by per-session /retrieve_futures poller")
     use_pyqwest_transport: bool = Field(default=False, description="False: the SDK uses its httpx default transport")
+
+class ClientDynamicConfigResponse(BaseModel):
+    """Flags the SDK refetches while running (`POST /api/v1/client/dynamic_config`)"""
+
+    refresh_interval_sec: int = Field(default=300, description="SDK refetch cadence")
+    sample_cancel_enabled: bool = Field(default=True, description="True: an abandoned sample future sends cancel_future")
+    sample_cancel_max_batch_size: int = Field(default=64, description="Cancels the SDK dispatches in parallel per dtrain")
+
+class SessionFutureCompletion(BaseModel):
+    """One entry of the /retrieve_futures response (SDK FutureFinished | FutureFailed)."""
+
+    state: Literal["finished", "failed"]
+    request_id: str
+    response_payload_uncompressed_size: Optional[int] = Field(
+        default=None, description="Proto payload bytes of a finished sample; absent on failed"
+    )
+
+class SessionFuturesPollResponse(BaseModel):
+    """Per session completion poll result( SDK type FuturesRetrieveResponse)."""
+    
+    completions: List[SessionFutureCompletion]
+    cursor: int=Field(..., description="Pass back as prev_cursor on the next poll")
 
 
 class TensorData(BaseModel):

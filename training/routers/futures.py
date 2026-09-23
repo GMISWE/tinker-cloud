@@ -13,13 +13,22 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from typing import Dict, Any
 
-from ..models.requests import CleanupFuturesRequest, RetrieveFutureRequest
-from ..models.responses import CleanupResult
-from ..storage import FuturesStorage
+from ..models.requests import (
+    CancelFutureRequest,
+    CleanupFuturesRequest,
+    SessionFuturesPollRequest,
+    RetrieveFutureRequest,
+
+)
+from ..models.responses import CleanupResult, SessionFutureCompletion, SessionFuturesPollResponse
+from ..storage import FuturesStorage, SampleFutureStore
+from ..storage.sample_futures import SampleFuture
 from ..core.dependencies import (
     verify_api_key_dep,
     get_futures_storage, 
     get_poll_tracking,
+    get_sample_futures,
+    get_session_service,
 )
 from ..core.task_manager import TaskManager
 from ..proto.wire import PROTO_CONTENT_TYPE, PROTO_RESULT_OPERATIONS, serialize_result
@@ -31,6 +40,11 @@ from ..proto.wire import PROTO_CONTENT_TYPE, PROTO_RESULT_OPERATIONS, serialize_
 # for retrieve is 300 s, so a held response is transparent to it, and 408
 # after the hold window keeps the protocol unchanged.
 LONG_POLL_HOLD_S = 30.0
+
+# /retrieve_furtures hold: below the SDK poller's 45 s HTTP timeout, so a held
+# reqponse is alwarys delivered rather than timed out and reissued.
+RETRIEVE_FUTURES_HOLD_S = 30.0
+RETRIEVE_FUTURES_MAX_HOLD_S = 40.0
 
 logger = logging.getLogger(__name__)
 
@@ -57,13 +71,23 @@ async def _completed_response(fut: Dict[str, Any], accept: str, futures_storage:
     return JSONResponse(content=fut.get("result", {}))
 
 
+async def _sample_response(fut: SampleFuture, accept: str, sample_futures: SampleFutureStore) -> Response:
+    """Terminal in-memory sample future -> 200 (proto when accepted) or 400 """
+    if fut.status == "failed":
+        raise HTTPException(status_code=400, detail=fut.error or "Operation failed")
+    sample_futures.mark_retrieved(fut.request_id)
+    if PROTO_CONTENT_TYPE in accept.lower() and fut.result_proto is not None:
+        return Response(content = fut.result_proto, media_type = PROTO_CONTENT_TYPE)
+    return JSONResponse(content = fut.result)
+
 @router.post("/api/v1/retrieve_future/{request_id}")
 async def retrieve_future(
     request_id: str,
     http_request: Request,
     _: None = Depends(verify_api_key_dep),
     futures_storage: FuturesStorage = Depends(get_futures_storage),
-    poll_tracking: Dict[str, Dict[str, Any]] = Depends(get_poll_tracking)
+    poll_tracking: Dict[str, Dict[str, Any]] = Depends(get_poll_tracking),
+    sample_futures: SampleFutureStore = Depends(get_sample_futures),
 ):
     """
     Retrieve async operation result.
@@ -92,13 +116,26 @@ async def retrieve_future(
     else:
         logger.debug(f"[retrieve_future] Poll #{poll_count} for {request_id}")
 
+    accept = http_request.headers.get("accept", "")
+
+    # Sample futures live in memory (storage.sample_futures); 
+    # a pending one is held on its completion event, never on the task,
+    # so a cancelled task cannot surface here as CancelledError.
+    sf = sample_futures.get(request_id)
+    if sf is not None:
+        if sf.status == "pending":
+            try:
+                await asyncio.wait_for(sf.done.wait(), timeout=LONG_POLL_HOLD_S)
+            except asyncio.TimeoutError:
+                raise HTTPException(status_code=408, detail="Operation still in progress")
+        poll_tracking.pop(request_id, None)
+        return await _sample_response(sf, accept, sample_futures)
+
     # Get future from storage
     future = futures_storage.get_future(request_id)
 
     if not future:
         raise HTTPException(status_code=404, detail=f"Future {request_id} not found")
-
-    accept = http_request.headers.get("accept", "")
 
     async def _respond(fut: Dict[str, Any]):
         """Terminal-status dispatch (completed -> 200, failed -> 400)."""
@@ -158,7 +195,8 @@ async def retrieve_future_body(
     http_request: Request,
     _: None = Depends(verify_api_key_dep),
     futures_storage: FuturesStorage = Depends(get_futures_storage),
-    poll_tracking: Dict[str, Dict[str, Any]] = Depends(get_poll_tracking)
+    poll_tracking: Dict[str, Dict[str, Any]] = Depends(get_poll_tracking),
+    sample_futures: SampleFutureStore = Depends(get_sample_futures),
 ):
     """Retrieve future by request body (the form the SDK uses); same contract as the path form."""
     return await retrieve_future(
@@ -166,8 +204,56 @@ async def retrieve_future_body(
         http_request,
         _,
         futures_storage,
-        poll_tracking
+        poll_tracking,
+        sample_futures,
     )
+
+@router.post("/api/v1/retrieve_futures", response_model=SessionFuturesPollResponse, response_model_exclude_none=True)
+async def retrieve_futures(
+    request: SessionFuturesPollRequest,
+    _: None = Depends(verify_api_key_dep),
+    sample_futures: SampleFutureStore = Depends(get_sample_futures),
+    session_service = Depends(get_session_service),
+):
+    """Per session completion poll (SDK >= 0.25 with sample_use_retrieve_futures).
+    
+    Returns every sample of the (sampling session, cloned sampler) that finished
+    or failed at or after `prev_cursor`, holding until the first one arrives or the
+    hold expires. Entries below `prev_cursor` are treated as acked and dropped. 
+    The result payload is fetched seperately with retrieve_future.
+    """
+    target = request.target 
+    if session_service.get_sampler(target.sampling_session_id) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown sampling_session_id: {target.sampling_session_id}")
+    hold = RETRIEVE_FUTURES_HOLD_S if request.timeout is None else request.timeout
+    entries, cursor = await sample_futures.poll(
+        (target.sampling_session_id, target.cloned_sampler_id),
+        request.prev_cursor,
+        min(hold, RETRIEVE_FUTURES_MAX_HOLD_S),
+    )
+    return SessionFuturesPollResponse(
+        completions=[
+            SessionFutureCompletion(state=state, request_id=rid, response_payload_uncompressed_size=size)
+            for rid, state, size in entries
+        ],
+        cursor=cursor,
+    )
+    
+@router.post("/api/v1/cancel_future", status_code=204)
+async def cancel_future(
+    request: CancelFutureRequest,
+    _: None = Depends(verify_api_key_dep),
+    sample_futures: SampleFutureStore = Depends(get_sample_futures),
+):
+    """ Cancel an in-flight sample the SDK has abandoned. Only sample futures
+    are cancellable; an already-terminal one is a no op, an unknown id 404. """
+    try:
+        cancelled = sample_futures.cancel(request.request_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Sample future {request.request_id} is not found") from None
+    logger.info("[%s] cancel_future: %s", request.request_id, "cancelled" if cancelled else "already terminal")
+    return Response(status_code=204)
+
 
 
 @router.post("/api/v1/cleanup_futures", response_model=CleanupResult)
