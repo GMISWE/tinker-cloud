@@ -17,6 +17,7 @@ from ..services.sampling_service import SamplingService
 from ..services.session_service import SessionService
 from ..services.training_service import TrainingService
 from ..storage.futures import FuturesStorage
+from ..storage.sample_futures import SampleFutureStore
 from ..storage.metadata import MetadataStorage
 from ..utils.auth import APIKeyAuth
 
@@ -52,6 +53,8 @@ def get_checkpoint_store(request: Request) -> CheckpointStore:
 def get_futures_storage(request: Request) -> FuturesStorage:
     return request.app.state.futures_storage
 
+def get_sample_futures(request: Request) -> SampleFutureStore:
+    return request.app.state.sample_futures
 
 def get_metadata_storage(request: Request) -> MetadataStorage:
     return request.app.state.metadata_storage

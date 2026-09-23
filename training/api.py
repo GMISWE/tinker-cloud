@@ -19,7 +19,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 # Import modules
-from .storage import FuturesStorage, MetadataStorage, SessionStorage
+from .storage import FuturesStorage, MetadataStorage, SampleFutureStore, SessionStorage
 from .checkpoints import CheckpointError, CheckpointStore
 from .storage.futures import DuplicateSeqId
 from .config import get_config, TrainingConfig
@@ -104,6 +104,12 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
         removed_count = futures_storage.cleanup_old_futures(max_age_hours=0)
         logger.info("Cleaned up %s stale futures from previous runs", removed_count)
 
+        # Sample futures are in memory only (storage.sample_futures): rollout
+        # results are not read back across a restart, which frees every model.
+        sample_futures = SampleFutureStore()
+        application.state.sample_futures = sample_futures
+        application.state.sample_futures_sweeper = asyncio.create_task(sample_futures.sweep_forever())
+
         # Clean up stale sessions BEFORE loading into SessionService
         removed_sessions, removed_session_ids = session_storage.cleanup_stale_sessions(max_age_hours=24)
         if removed_sessions > 0:
@@ -147,7 +153,10 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
         from .services.sampling_service import SamplingService
         from .services.session_service import SessionService
 
-        application.state.model_service = ModelService(backend=backend, store=checkpoint_store)
+        application.state.model_service = ModelService(
+            backend=backend, store=checkpoint_store, sample_futures=sample_futures,
+        )
+
         application.state.training_service = TrainingService(backend=backend)
         application.state.checkpoint_service = CheckpointService(backend=backend, store=checkpoint_store)
         application.state.sampling_service = SamplingService(backend=backend)
@@ -192,6 +201,7 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
         reaper = application.state.session_reaper
         if reaper is not None:
             reaper.cancel()
+        application.state.sample_futures_sweeper.cancel()
         runtime: TrainingRuntimeState = application.state.runtime
         for model_id in list(runtime.training_clients):
             await _free_model(application, model_id, reason="shutdown")

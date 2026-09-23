@@ -5,6 +5,7 @@ This module provides storage abstractions for futures, metadata, and session man
 """
 from .futures import FuturesStorage
 from .metadata import MetadataStorage
+from .sample_futures import SampleFutureStore
 from .session_storage import SessionStorage
 
-__all__ = ["FuturesStorage", "MetadataStorage", "SessionStorage"]
+__all__ = ["FuturesStorage", "MetadataStorage", "SampleFutureStore", "SessionStorage"]

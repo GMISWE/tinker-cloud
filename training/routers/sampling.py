@@ -2,27 +2,30 @@
 Sampling Router - HTTP Layer for Model Sampling
 
 Endpoints:
-- POST /api/v1/asample - Async sampling via SGLang
-- POST /api/v1/sample - Sync sampling via SGLang
-- POST /api/v1/create_sampling_client - Create SGLang sampling client
+- POST /api/v1/asample - Async sampling
+- POST /api/v1/sample - Sync sampling
+- POST /api/v1/create_sampling_client - Create sampling client
 """
+
 import logging
 from typing import Dict, Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..services.sampling_service import SamplingService
+from ..core.sample_tasks import start_sample_task
 from ..core.task_manager import TaskManager
 from ..core.dependencies import (
     verify_api_key_dep,
     get_checkpoint_store,
     get_sampling_service,
     get_futures_storage,
+    get_sample_futures,
     get_training_clients,
-    get_session_service
+    get_session_service,
 )
 from ..checkpoints import CheckpointRef, CheckpointStore
-from ..storage import FuturesStorage
+from ..storage import FuturesStorage, SampleFutureStore
 from ..models.requests import (
     ASampleRequest,
     SampleRequest,
@@ -40,8 +43,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+
 def get_task_manager(
-    futures_storage: FuturesStorage = Depends(get_futures_storage)
+    futures_storage: FuturesStorage = Depends(get_futures_storage),
 ) -> TaskManager:
     """Create TaskManager with FuturesStorage dependency."""
     return TaskManager(futures_storage)
@@ -77,26 +81,39 @@ def resolve_target_model(
     if sampling_session_id:
         info = session_service.get_sampler(sampling_session_id)
         if info is None:
-            raise HTTPException(status_code=404, detail=f"Unknown sampling_session_id: {sampling_session_id}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Unknown sampling_session_id: {sampling_session_id}",
+            )
         if not info.model_id:
             raise HTTPException(status_code=400, detail=BASE_MODEL_SAMPLING_UNSUPPORTED)
         if info.model_id not in training_clients:
-            raise HTTPException(status_code=404, detail=f"Sampler {sampling_session_id}'s model {info.model_id} no longer exists")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Sampler {sampling_session_id}'s model {info.model_id} no longer exists",
+            )
         return info.model_id, info.pinned_version
     if model_path:
         # A checkpoint path names its model AND the weight version it was
         # saved at: the sampler is pinned there, not served the live weights.
         ref = CheckpointRef.parse(model_path)
         if store is None:
-            raise RuntimeError("resolve_target_model needs the checkpoint store to resolve a model_path")
+            raise RuntimeError(
+                "resolve_target_model needs the checkpoint store to resolve a model_path"
+            )
         store.require(ref)
         if ref.model_id not in training_clients:
-            raise HTTPException(status_code=404, detail=f"Model {ref.model_id!r} from model_path {model_path!r} not found")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Model {ref.model_id!r} from model_path {model_path!r} not found",
+            )
         rec = store.get(ref) or {}
         return ref.model_id, rec.get("weight_version")
     if base_model:
         raise HTTPException(status_code=400, detail=BASE_MODEL_SAMPLING_UNSUPPORTED)
-    raise HTTPException(status_code=400, detail="Provide sampling_session_id or a tinker:// model_path")
+    raise HTTPException(
+        status_code=400, detail="Provide sampling_session_id or a tinker:// model_path"
+    )
 
 
 def _sequence_ids(request_id: str, n: int) -> List[str]:
@@ -110,13 +127,13 @@ async def asample(
     request: ASampleRequest,
     _: None = Depends(verify_api_key_dep),
     service: SamplingService = Depends(get_sampling_service),
-    task_manager: TaskManager = Depends(get_task_manager),
+    sample_futures: SampleFutureStore = Depends(get_sample_futures),
     training_clients: Dict = Depends(get_training_clients),
     session_service=Depends(get_session_service),
     store: CheckpointStore = Depends(get_checkpoint_store),
 ):
     """
-    Async sampling via SGLang.
+    Async sampling.
     This operation is asynchronous - use retrieve_future to check status.
     """
     request_id = generate_request_id()
@@ -130,25 +147,41 @@ async def asample(
     # model — required routing under a multi-tenant pool, where find-first
     # would serve a co-tenant's adapter.
     model_id, pinned_version = resolve_target_model(
-        training_clients, session_service,
+        training_clients,
+        session_service,
         sampling_session_id=request.sampling_session_id,
-        model_path=request.model_path, base_model=request.base_model, store=store,
+        model_path=request.model_path,
+        base_model=request.base_model,
+        store=store,
     )
-    target_model_id = model_id
+
+    owner = sample_futures.register(
+        request_id,
+        "asample",
+        model_id,
+        request.sampling_session_id,
+        request.seq_id,
+    )
+    if owner != request_id:  # SDK retry of a seq_id it already submitted
+        return AsyncOperationResponse(
+            request_id=owner,
+            model_id=model_id,
+            sample_sequence_ids=_sequence_ids(owner, request.num_samples),
+        )
 
     async def execute():
         result_dict = await service.async_sample(
             request_id=request_id,
             prompt_tokens=prompt_tokens,
             num_samples=request.num_samples,
-            sampling_params=request.sampling_params.dict() if request.sampling_params else None,
+            sampling_params=request.sampling_params.dict()
+            if request.sampling_params
+            else None,
             prompt_logprobs=request.prompt_logprobs,
             training_clients=training_clients,
             pinned_version=pinned_version,
-            model_id=target_model_id,
+            model_id=model_id,
         )
-
-        # Convert to response model
         sequences = [SamplingSequence(**seq) for seq in result_dict["sequences"]]
         return SampleResult(
             sequences=sequences,
@@ -157,15 +190,7 @@ async def asample(
             latest_weight_version=result_dict.get("latest_weight_version"),
         )
 
-    # Create async task
-    task_manager.create_task(
-        request_id=request_id,
-        operation="asample",
-        model_id=model_id,
-        payload=request.dict(),
-        task_func=execute
-    )
-
+    start_sample_task(sample_futures, request_id, "asample", execute)
     return AsyncOperationResponse(
         request_id=request_id,
         model_id=model_id,
@@ -178,50 +203,61 @@ async def sample(
     request: SampleRequest,
     _: None = Depends(verify_api_key_dep),
     service: SamplingService = Depends(get_sampling_service),
-    task_manager: TaskManager = Depends(get_task_manager),
+    sample_futures: SampleFutureStore = Depends(get_sample_futures),
     training_clients: Dict = Depends(get_training_clients),
     session_service=Depends(get_session_service),
     store: CheckpointStore = Depends(get_checkpoint_store),
 ):
     """
-    Synchronous sampling via SGLang.
-    This operation is asynchronous - use retrieve_future to check status.
+    Synchronous sampling.
+    Sampling multiple prompts, in memory future store
     """
     request_id = generate_request_id()
 
     model_id, _ = resolve_target_model(
-        training_clients, session_service,
+        training_clients,
+        session_service,
         sampling_session_id=request.sampling_session_id,
-        model_path=request.model_path, base_model=request.base_model, store=store,
+        model_path=request.model_path,
+        base_model=request.base_model,
+        store=store,
     )
+    n_seq = len(request.prompts) * request.num_samples
+
+    owner = sample_futures.register(
+        request_id,
+        "sample",
+        model_id,
+        request.sampling_session_id,
+        request.seq_id,
+    )
+    if owner != request_id:
+        return AsyncOperationResponse(
+            request_id=owner,
+            model_id=model_id,
+            sample_sequence_ids=_sequence_ids(owner, n_seq),
+        )
 
     async def execute():
         result_dict = await service.sync_sample(
             request_id=request_id,
             prompts=request.prompts,
             num_samples=request.num_samples,
-            sampling_params=request.sampling_params.dict() if request.sampling_params else None,
+            sampling_params=request.sampling_params.dict()
+            if request.sampling_params
+            else None,
             training_clients=training_clients,
             model_id=model_id,
         )
 
-        # Convert to response model
         sequences = [SamplingSequence(**seq) for seq in result_dict["sequences"]]
         return SampleResult(sequences=sequences)
 
-    # Create async task
-    task_manager.create_task(
-        request_id=request_id,
-        operation="sample",
-        model_id=model_id,
-        payload=request.dict(),
-        task_func=execute
-    )
-
+    start_sample_task(sample_futures, request_id, "sample", execute)
     return AsyncOperationResponse(
         request_id=request_id,
         model_id=model_id,
-        sample_sequence_ids=_sequence_ids(request_id, len(request.prompts) * request.num_samples),
+        sample_sequence_ids=_sequence_ids(request_id, n_seq),
     )
 
 
@@ -242,8 +278,11 @@ async def create_sampling_client(
     request_id = generate_request_id()
 
     model_id, _ = resolve_target_model(
-        training_clients, session_service,
-        model_path=request.model_path, base_model=request.base_model, store=store,
+        training_clients,
+        session_service,
+        model_path=request.model_path,
+        base_model=request.base_model,
+        store=store,
     )
 
     async def execute():
@@ -261,10 +300,7 @@ async def create_sampling_client(
         operation="create_sampling_client",
         model_id=model_id,
         payload=request.dict(),
-        task_func=execute
+        task_func=execute,
     )
 
-    return AsyncOperationResponse(
-        request_id=request_id,
-        model_id=model_id
-    )
+    return AsyncOperationResponse(request_id=request_id, model_id=model_id)

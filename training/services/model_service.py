@@ -16,6 +16,7 @@ from ..backends.base import TrainingBackend
 from ..checkpoints import CheckpointStore
 from ..core import routing
 from ..storage import MetadataStorage
+from ..storage.sample_futures import SampleFutureStore
 from ..utils.model_config import detect_architecture, detect_num_gpus
 
 logger = logging.getLogger(__name__)
@@ -24,9 +25,10 @@ logger = logging.getLogger(__name__)
 class ModelService:
     """Service for managing ML model lifecycle and resources."""
 
-    def __init__(self, backend: TrainingBackend, store: CheckpointStore):
+    def __init__(self, backend: TrainingBackend, store: CheckpointStore, sample_futures: SampleFutureStore):
         self.backend = backend
         self.store = store
+        self.sample_futures = sample_futures
 
     async def create_model(
         self,
@@ -157,6 +159,9 @@ class ModelService:
         # "router not available"; a failed delete above leaves both intact.
         del training_clients[model_id]
         routing.table.withdraw(model_id)
+        n = self.sample_futures.cancel_model(model_id)   # whatever was still in flight fails as "model deleted"
+        if n:
+            logger.info("Cancelled %d in-flight sample(s) of %s", n, model_id)
         # ephemeral sampler records die with the model; persistent checkpoints
         # and the native area stay for a later resume
         self.store.release_model(model_id)

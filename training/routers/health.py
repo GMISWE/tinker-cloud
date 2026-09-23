@@ -9,7 +9,14 @@ import ray
 from datetime import datetime
 from fastapi import APIRouter, Depends, Request
 
-from ..models.responses import ClientConfigResponse, HealthResponse, ServerCapabilities, ModelInfo
+# from ..models.responses import ClientConfigResponse, HealthResponse, ServerCapabilities, ModelInfo
+from ..models.responses import (
+    ClientConfigResponse,
+    ClientDynamicConfigResponse,
+    HealthResponse,
+    ServerCapabilities,
+    ModelInfo,
+)
 from ..core.dependencies import (
     verify_api_key_dep,
     get_runtime, 
@@ -71,8 +78,14 @@ async def client_config(request: Request):
     """Feature flags for the connecting SDK (>= 0.25 fetches this once at
     construction and fails without it). The body carries the SDK version;
     every client gets the same flags."""
-    return ClientConfigResponse(proto_compress_fwdbwd=zstd_available())
-
+    return ClientConfigResponse(proto_compress_fwdbwd=zstd_available(), sample_use_retrieve_futures=True)
+    
+@router.post("/api/v1/client/dynamic_config", response_model=ClientDynamicConfigResponse)
+async def client_dynamic_config(request: Request):
+    """Flags a live SDK refetches every refresh_interval_sec, Without this
+    endpoint the SDK keeps its defaults, under which it never sends
+    cancel_future for an abandoned sample. """
+    return ClientDynamicConfigResponse()
 
 @router.get("/api/v1/get_server_capabilities", response_model=ServerCapabilities)
 async def get_server_capabilities(
