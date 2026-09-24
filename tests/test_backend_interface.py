@@ -257,14 +257,14 @@ class TestSamplingContract:
         h.loss_fn_name = "importance_sampling"
         assert _step_loss_fn(h, None) is h.loss_fn
 
-    def test_nemo_rl_delete_model_drops_accumulator(self):
+    def test_nemo_rl_delete_model_drops_submitter(self):
         from tinkercloud.training.backends.nemo_rl.backend import NemoRLBackend, NemoRLHandle
-        from tinkercloud.training.backends.nemo_rl.generation import NemoRLBatchAccumulator
+        from tinkercloud.training.backends.nemo_rl.generation import NemoRLRequestSubmitter
         backend = NemoRLBackend()
         handle = NemoRLHandle(model_id="test", backend_type="nemo_rl")
-        backend._batch_accumulators["test"] = NemoRLBatchAccumulator()
+        backend._submitters["test"] = NemoRLRequestSubmitter(max_in_flight=1)
         asyncio.run(backend.delete_model(handle))
-        assert "test" not in backend._batch_accumulators
+        assert "test" not in backend._submitters
 
 
 # ---------------------------------------------------------------------------
