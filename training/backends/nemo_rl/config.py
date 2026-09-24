@@ -22,6 +22,7 @@ class NemoRLConfig(EnvConfig):
     megatron_a_init: str = Field("xavier", description="Megatron LoRA A init method")
     megatron_precision_aware: bool = Field(True, description="use_precision_aware_optimizer")
     refit_buffer_memory_ratio: float = Field(0.3, description="Share of free GPU memory for the IPC refit buffer")
+    sample_max_in_flight_per_worker: int = Field(512, description="Sample calls in flight per vLLM worker; Ray queues async-actor tasks past ~1000")
 
     ENV = {
         "max_seq_len_cap": "TINKERCLOUD_MAX_SEQ_LEN_CAP",
@@ -35,6 +36,7 @@ class NemoRLConfig(EnvConfig):
         "megatron_a_init": "NEMORL_MEGATRON_A_INIT",
         "megatron_precision_aware": "NEMORL_MEGATRON_PRECISION_AWARE",
         "refit_buffer_memory_ratio": "NRL_REFIT_BUFFER_MEMORY_RATIO",
+        "sample_max_in_flight_per_worker": "NEMORL_SAMPLE_MAX_IN_FLIGHT_PER_WORKER",
     }
 
     @classmethod

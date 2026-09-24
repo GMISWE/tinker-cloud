@@ -247,7 +247,10 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
                 "stop_token_ids": None,
                 "stop_strings": None,
                 "vllm_cfg": {
-                    "async_engine": False,
+                    # Per-request generation (specs/019): generate_async on
+                    # AsyncLLM. Incompatible with vLLM-internal DP, which we
+                    # never enable (DP is across worker groups).
+                    "async_engine": True,
                     "precision": "bfloat16",
                     "kv_cache_dtype": "auto",
                     "tensor_parallel_size": tp_size,

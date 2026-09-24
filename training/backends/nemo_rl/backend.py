@@ -26,7 +26,7 @@ from ...core.loss_registry import clip_thresholds
 from ...checkpoints.interchange import export_hf_adapter, stage_hf_adapter
 
 if TYPE_CHECKING:
-    from .generation import NemoRLBatchAccumulator
+    from .generation import NemoRLRequestSubmitter
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +90,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         self._converter = None
         self._builder = None
         # PERF-002: per-model batch accumulators for sample()
-        self._batch_accumulators: Dict[str, "NemoRLBatchAccumulator"] = {}
+        self._submitters: Dict[str, "NemoRLRequestSubmitter"] = {}
 
     @property
     def converter(self):
@@ -816,7 +816,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                     # which was shut down just above; log rather than hide it.
                     logger.warning("delete_model: generation shutdown failed for %s", handle.model_id, exc_info=True)
 
-            self._batch_accumulators.pop(handle.model_id, None)
+            self._submitters.pop(handle.model_id, None)
 
             logger.info("NeMo RL model %s deleted", handle.model_id)
 
@@ -848,10 +848,11 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         prompt_logprobs: bool = False,
         pinned_version: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Sample via Policy.generate() on vLLM Ray workers.
+        """Sample via generate_async() on the async vLLM Ray workers.
 
-        PERF-002: requests are batch-accumulated per model and flushed as a
-        single generate() call (~20-30x speedup for RL rollouts).
+        specs/019: every row is its own engine request, so rows complete
+        independently, a cancelled sample aborts its request, and an engine
+        error fails only its own sample.
 
         BUG-015: `pinned_version` is the weight version a snapshot sampler was
         created at. The live vLLM engine is refit to the current policy every
@@ -859,8 +860,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         from it once versions diverge. v0-pinned samplers (DPO's frozen
         reference) are served from NeMo RL's built-in frozen reference model.
         """
-        from .generation import NemoRLBatchAccumulator
-
+        from .generation import NemoRLRequestSubmitter
 
         # BUG-015 routing: version-pinned logprob reads
         if prompt_logprobs and pinned_version is not None and pinned_version != handle.weight_version:
@@ -879,10 +879,11 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             )
         # Wake/refit an engine a forward-only pass left asleep (fast path: one lock).
         await _ensure_generation_ready(handle)
-        accumulator = self._batch_accumulators.setdefault(
-            handle.model_id, NemoRLBatchAccumulator()
-        )
-        result = await accumulator.submit(
+        if handle.model_id not in self._submitters:
+            self._submitters[handle.model_id] = NemoRLRequestSubmitter(
+                max_in_flight=self.config.sample_max_in_flight_per_worker * handle.config["dp_size"],
+            )
+        result = await self._submitters[handle.model_id].submit(
             handle=handle,
             request_id=request_id,
             prompt_tokens=prompt_tokens,
@@ -894,7 +895,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         # declared bound, and stamp it into the response. Versions are read
         # post-serve; sampling is not part of the model's ordered training
         # program (services.ordering), so a concurrent optim_step can bump
-        # weight_version between flush and here — the stamp is best-effort.
+        # weight_version between serve and here — the stamp is best-effort.
         served_v = handle.generation_synced_version
         latest_v = handle.weight_version
         if latest_v - served_v > handle.staleness_k:
@@ -1315,9 +1316,9 @@ def _set_learning_rate(policy, learning_rate: float):
 class _RefLogprobAccumulator:
     """Batch-accumulate frozen-reference logprob requests (BUG-015).
 
-    Same shape as NemoRLBatchAccumulator (PERF-002): concurrent
-    compute_logprobs calls within a flush window are served by ONE
-    get_reference_policy_logprobs pass. Single event loop => the
+    Flush-window batching (PERF-002): concurrent compute_logprobs calls
+    within a flush window are served by ONE get_reference_policy_logprobs
+    pass. Single event loop => the
     drain-then-exit check under the lock is race-free.
     """
 
