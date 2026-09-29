@@ -130,8 +130,8 @@ class ModelService:
             "created_at": datetime.now().isoformat(),
         }
         training_clients[model_id] = client_info
-        if handle.inference_endpoint is not None:
-            routing.table.publish(model_id, routing.InferenceEndpoint(handle.inference_endpoint))
+        if handle.inference_endpoints:
+            routing.table.publish(model_id, routing.InferenceEndpoint(handle.inference_endpoints))
 
         logger.info("[%s] Model %s created successfully", request_id, model_id)
         return {

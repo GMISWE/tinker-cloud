@@ -1,9 +1,12 @@
-"""backends.miles.sglang_client: one persistent connection pool per endpoint, reused across requests."""
+"""backends.http_pool: one persistent client per URL, reused across requests;
+backends.miles.sglang_client: the /generate codec on top of it."""
 import asyncio
+import json
 
 import httpx
 
-from tinkercloud.training.backends.miles.sglang_client import SGLangClient, SGLangClientPool
+from tinkercloud.training.backends.http_pool import HttpClientPool
+from tinkercloud.training.backends.miles.sglang_client import SGLangClient
 
 
 def _sglang_transport(hits):
@@ -20,21 +23,31 @@ def _sglang_transport(hits):
     return httpx.MockTransport(handler)
 
 
-def test_pool_returns_one_client_per_endpoint():
-    pool = SGLangClientPool(transport=httpx.MockTransport(lambda r: httpx.Response(500)))
-    a1 = pool.for_endpoint("http://a:1")
-    a2 = pool.for_endpoint("http://a:1/")
-    b = pool.for_endpoint("http://b:2")
+def test_pool_returns_one_client_per_url():
+    pool = HttpClientPool(transport=httpx.MockTransport(lambda r: httpx.Response(500)))
+    a1 = pool.for_url("http://a:1")
+    a2 = pool.for_url("http://a:1/")
+    b = pool.for_url("http://b:2")
     assert a1 is a2 and a1 is not b
     assert len(pool) == 2
     asyncio.run(pool.aclose())
-    assert len(pool) == 0
+    assert len(pool) == 0 and a1.is_closed and b.is_closed
 
 
-def test_generate_reuses_the_client_connection_pool():
+def test_pool_applies_limits_and_timeout_to_its_clients():
+    pool = HttpClientPool(max_connections=3, keepalive_expiry=2.0,
+                          timeout=httpx.Timeout(connect=5.0, read=None, write=None, pool=None),
+                          transport=httpx.MockTransport(lambda r: httpx.Response(500)))
+    c = pool.for_url("http://a:1")
+    assert pool._limits == httpx.Limits(max_connections=3, max_keepalive_connections=64, keepalive_expiry=2.0)
+    assert c.timeout.connect == 5.0 and c.timeout.read is None
+    asyncio.run(pool.aclose())
+
+
+def test_generate_reuses_the_pooled_connection():
     hits = []
-    pool = SGLangClientPool(transport=_sglang_transport(hits))
-    client = pool.for_endpoint("http://router:30000")
+    pool = HttpClientPool(transport=_sglang_transport(hits))
+    client = SGLangClient("http://router:30000", pool.for_url("http://router:30000"))
     params = {"temperature": 1.0, "top_p": 1.0, "max_tokens": 2}
 
     async def main():
@@ -55,11 +68,11 @@ def test_client_forwards_every_sampling_param():
     seen = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        import json
         seen.update(json.loads(request.read()))
         return httpx.Response(200, json={"meta_info": {"output_token_logprobs": [[-1.0, 3]], "finish_reason": {"type": "length"}}})
 
-    c = SGLangClient("http://r:1", transport=httpx.MockTransport(handler))
+    pool = HttpClientPool(transport=httpx.MockTransport(handler))
+    c = SGLangClient("http://r:1", pool.for_url("http://r:1"))
     params = {"temperature": 0.7, "top_p": 0.9, "max_tokens": 5, "top_k": 40,
               "stop": ["\n"], "stop_token_ids": [2], "seed": 11}
     out = asyncio.run(c.generate([5], params, lora_path="slot_3"))
@@ -67,4 +80,4 @@ def test_client_forwards_every_sampling_param():
                                        "top_k": 40, "stop": ["\n"], "stop_token_ids": [2], "sampling_seed": 11}
     assert seen["lora_path"] == "slot_3" and seen["return_logprob"] is True
     assert out["stop_reason"] == "length"
-    asyncio.run(c.aclose())
+    asyncio.run(pool.aclose())

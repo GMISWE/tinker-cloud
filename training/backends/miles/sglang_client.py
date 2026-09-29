@@ -1,9 +1,10 @@
 """
 SGLang Inference Client (Miles' rollout engine)
 
-Async HTTP client for an SGLang router. One client per endpoint holds one
-persistent connection pool (keep-alive across sample requests); MilesBackend
-owns one SGLangClientPool and never constructs clients per request.
+The SGLang /generate codec over a pooled httpx client (backends.http_pool):
+Tinker sampling parameters in, tokens / logprobs / stop_reason out.
+MilesBackend owns the pool and builds a codec per call on the client for the
+endpoint the routing table resolved.
 """
 import logging
 from typing import Any, Dict, List, Optional
@@ -15,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 class SGLangClient:
     """
-    Async HTTP client for one SGLang router endpoint.
+    The SGLang /generate codec for one router endpoint.
 
     Handles text generation with support for:
     - Input token IDs
@@ -23,36 +24,17 @@ class SGLangClient:
     - Prompt logprobs extraction with defensive None handling
     """
 
-    def __init__(
-        self,
-        base_url: str,
-        timeout: float = 60.0,
-        max_connections: Optional[int] = None,
-        max_keepalive_connections: int = 64,
-        transport: Optional[httpx.AsyncBaseTransport] = None,
-    ):
+    def __init__(self, base_url: str, http: httpx.AsyncClient, timeout: float = 60.0):
         """
         Args:
             base_url: SGLang router URL (e.g., "http://router:8000")
-            timeout: per-request read timeout in seconds
-            max_connections: cap on concurrent connections; None = unbounded
-                (back-pressure then comes from the router / engine max_num_seqs)
-            max_keepalive_connections: idle connections kept open
-            transport: test seam (httpx.MockTransport); None = real network
+            http: the pooled client for that URL (HttpClientPool.for_url)
+            timeout: per-request total timeout in seconds
         """
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.generate_url = f"{self.base_url}/generate"
-        self._http = httpx.AsyncClient(
-            limits=httpx.Limits(
-                max_connections=max_connections,
-                max_keepalive_connections=max_keepalive_connections,
-            ),
-            transport=transport,
-        )
-
-    async def aclose(self) -> None:
-        await self._http.aclose()
+        self._http = http
 
     async def generate(
         self,
@@ -187,27 +169,3 @@ class SGLangClient:
             except (TypeError, ValueError):
                 normalized.append(None)
         return normalized
-
-
-class SGLangClientPool:
-    """One SGLangClient (one connection pool) per endpoint URL, created on
-    first use and closed by the owning backend's close()."""
-
-    def __init__(self, **client_kwargs: Any):
-        self._client_kwargs = client_kwargs
-        self._clients: Dict[str, SGLangClient] = {}
-
-    def for_endpoint(self, base_url: str) -> SGLangClient:
-        key = base_url.rstrip("/")
-        client = self._clients.get(key)
-        if client is None:
-            client = self._clients[key] = SGLangClient(key, **self._client_kwargs)
-        return client
-
-    def __len__(self) -> int:
-        return len(self._clients)
-
-    async def aclose(self) -> None:
-        clients, self._clients = list(self._clients.values()), {}
-        for c in clients:
-            await c.aclose()
