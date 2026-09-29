@@ -13,6 +13,7 @@ forward + backward + optimizer.step() in a single call.
 """
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 import time
 from dataclasses import dataclass, field
@@ -34,6 +35,12 @@ logger = logging.getLogger(__name__)
 # Default maximum number of forward_backward() calls that can be buffered
 # before apply_optimizer_step() must be called. Prevents unbounded memory growth.
 DEFAULT_MAX_BUFFER_SIZE = 64
+
+
+def _set_event() -> asyncio.Event:
+    event = asyncio.Event()
+    event.set()
+    return event
 
 
 @dataclass
@@ -61,6 +68,8 @@ class NemoRLHandle(BackendHandle):
     loss_fn_config: Optional[Dict[str, float]] = None  # per-call hyperparameters of the buffered batch
     generation_state: str = "generation_ready"  # "generation_ready" | "training_ready"
     _generation_state_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    in_flight_samples: int = 0           # samples admitted to the engine and not yet returned
+    _samples_drained: asyncio.Event = field(default_factory=lambda: _set_event())  # set while in_flight_samples == 0
     _training_lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # Serialize optim_step GPU lifecycle
     ref_logprob_accumulator: Any = None  # Lazy _RefLogprobAccumulator (BUG-015)
     staleness_k: int = 0                 # Declared max sampler staleness (A4, specs/012)
@@ -243,23 +252,23 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                 _maybe_pad_batch, batched_data, dp_size, mbs, handle.image_preprocessor,
             )
 
-            # Sleep vLLM to free GPU memory for training workers. Recorded as
-            # training_ready so a later sample wakes the engine first (weights
-            # are still in sync, so that wake needs no refit).
-            if handle.policy_generation is not None and handle.colocated_inference:
-                async with handle._generation_state_lock:
-                    handle.generation_state = "training_ready"
-                await asyncio.to_thread(handle.policy_generation.finish_generation)
+            # Take the engine away from sampling (drain, then sleep the colocated
+            # vLLM to free GPU memory). Left training_ready so a later sample
+            # wakes the engine first (weights still in sync: that wake needs no
+            # refit). Under _training_lock: a concurrent optim_step or wake must
+            # not touch the same GPU workers mid-pass.
+            async with handle._training_lock:
+                await _quiesce_generation(handle)
 
-            # Use prepare_for_training(), not prepare_for_lp_inference(): the latter
-            # offloads the optimizer, deadlocking a concurrent apply_optimizer_step
-            # in pipelined SFT. train vs eval mode gives identical logprobs (no dropout).
-            if not handle.training_resident:
-                await asyncio.to_thread(handle.policy.prepare_for_training)
-                handle.training_resident = True
+                # Use prepare_for_training(), not prepare_for_lp_inference(): the latter
+                # offloads the optimizer, deadlocking a concurrent apply_optimizer_step
+                # in pipelined SFT. train vs eval mode gives identical logprobs (no dropout).
+                if not handle.training_resident:
+                    await asyncio.to_thread(handle.policy.prepare_for_training)
+                    handle.training_resident = True
 
-            _ensure_dyn_mb_budget(handle, batched_data)
-            result = await asyncio.to_thread(handle.policy.get_logprobs, batched_data)
+                _ensure_dyn_mb_budget(handle, batched_data)
+                result = await asyncio.to_thread(handle.policy.get_logprobs, batched_data)
 
             # No refit after forward(): read-only pass, inference weights already in
             # sync. Refitting here crashes (stale DTensor sharding after CPU→CUDA →
@@ -510,20 +519,11 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             # The lock only gates GPU work — buffer drain + padding above run freely.
             async with handle._training_lock:
                 # Transition to training state — generation requests after this
-                # point will hit the safety net path in _ensure_generation_ready().
-                async with handle._generation_state_lock:
-                    handle.generation_state = "training_ready"
+                # point wait on _training_lock in _ensure_generation_ready() —
+                # then drain the samples already admitted and sleep the engine.
+                await _quiesce_generation(handle)
 
                 try:
-                    # BUG-006 fix: In colocated mode, vLLM generation engine holds
-                    # model weights + KV cache on GPU after sampling. Must call
-                    # finish_generation() to sleep vLLM workers and free GPU memory
-                    # before loading the training model. Native NeMo RL does this
-                    # explicitly in grpo.py after generation completes (line 1352).
-                    if handle.policy_generation is not None and handle.colocated_inference:
-                        logger.info("Finishing generation (sleep vLLM to free GPU memory)")
-                        await asyncio.to_thread(handle.policy_generation.finish_generation)
-
                     # BUG-005 fix: NeMo RL requires prepare_for_training() before
                     # policy.train() to move model+optimizer from CPU→CUDA and set
                     # model.train(). Without this, the model stays on CPU after
@@ -678,16 +678,18 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         """Sync weights between training policy and inference engine."""
         try:
             if handle.policy_generation is not None:
-                await asyncio.to_thread(
-                    _refit_policy_generation,
-                    handle.policy,
-                    handle.policy_generation,
-                    handle.colocated_inference,
-                    handle.refit_memory_ratio,
-                )
-                handle.training_resident = False  # refit offloaded the policy
-                async with handle._generation_state_lock:
-                    handle.generation_state = "generation_ready"
+                async with handle._training_lock:
+                    await _quiesce_generation(handle)
+                    await asyncio.to_thread(
+                        _refit_policy_generation,
+                        handle.policy,
+                        handle.policy_generation,
+                        handle.colocated_inference,
+                        handle.refit_memory_ratio,
+                    )
+                    handle.training_resident = False  # refit offloaded the policy
+                    async with handle._generation_state_lock:
+                        handle.generation_state = "generation_ready"
         except Exception as e:
             raise BackendError(
                 str(e), backend="nemo_rl", operation="update_inference_weights",
@@ -762,19 +764,23 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                 # The policy was offloaded after the last refit, so the loaded
                 # parameters sit on CPU; the refit streams DTensors and needs
                 # them on GPU (all_gather has no CPU backend). Same sequence as
-                # after an optimizer step: prepare_for_training, refit, offload.
-                if not handle.training_resident:
-                    await asyncio.to_thread(handle.policy.prepare_for_training)
-                    handle.training_resident = True
-                logger.info("Refitting policy generation after checkpoint load for %s", handle.model_id)
-                await asyncio.to_thread(
-                    _refit_policy_generation,
-                    handle.policy,
-                    handle.policy_generation,
-                    handle.colocated_inference,
-                    handle.refit_memory_ratio,
-                )
-                handle.training_resident = False  # the refit offloaded the policy
+                # after an optimizer step: drain, prepare_for_training, refit.
+                async with handle._training_lock:
+                    await _quiesce_generation(handle)
+                    if not handle.training_resident:
+                        await asyncio.to_thread(handle.policy.prepare_for_training)
+                        handle.training_resident = True
+                    logger.info("Refitting policy generation after checkpoint load for %s", handle.model_id)
+                    await asyncio.to_thread(
+                        _refit_policy_generation,
+                        handle.policy,
+                        handle.policy_generation,
+                        handle.colocated_inference,
+                        handle.refit_memory_ratio,
+                    )
+                    handle.training_resident = False  # the refit offloaded the policy
+                    async with handle._generation_state_lock:
+                        handle.generation_state = "generation_ready"
             else:
                 handle.training_resident = False  # loaded state may not be GPU-resident
                 async with handle._generation_state_lock:
@@ -877,19 +883,20 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                 "generation engine not initialized (debug_train_only mode?)",
                 backend="nemo_rl", operation="sample",
             )
-        # Wake/refit an engine a forward-only pass left asleep (fast path: one lock).
-        await _ensure_generation_ready(handle)
         accumulator = self._batch_accumulators.setdefault(
             handle.model_id, NemoRLBatchAccumulator()
         )
-        result = await accumulator.submit(
-            handle=handle,
-            request_id=request_id,
-            prompt_tokens=prompt_tokens,
-            num_samples=num_samples,
-            sampling_params=sampling_params or {},
-            prompt_logprobs=prompt_logprobs,
-        )
+        # Admitted to a ready engine and counted while it runs; a training op
+        # waits for the count to drain before it takes the engine away.
+        async with _sampling_slot(handle):
+            result = await accumulator.submit(
+                handle=handle,
+                request_id=request_id,
+                prompt_tokens=prompt_tokens,
+                num_samples=num_samples,
+                sampling_params=sampling_params or {},
+                prompt_logprobs=prompt_logprobs,
+            )
         # ver(S) monitor (A4): certify the version actually served against the
         # declared bound, and stamp it into the response. Versions are read
         # post-serve; sampling is not part of the model's ordered training
@@ -957,10 +964,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         data = await asyncio.to_thread(_maybe_pad_batch, data, dp_size, mbs, None)
 
         async with h._training_lock:
-            async with h._generation_state_lock:
-                h.generation_state = "training_ready"
-            if h.policy_generation is not None and h.colocated_inference:
-                await asyncio.to_thread(h.policy_generation.finish_generation)
+            await _quiesce_generation(h)
             await asyncio.to_thread(h.policy.prepare_for_training)
             _ensure_dyn_mb_budget(h, data)
             out = await asyncio.to_thread(h.policy.get_reference_policy_logprobs, data)
@@ -1064,6 +1068,54 @@ async def _ensure_generation_ready(handle: NemoRLHandle) -> None:
 
         async with handle._generation_state_lock:
             handle.generation_state = "generation_ready"
+
+
+@asynccontextmanager
+async def _sampling_slot(handle: NemoRLHandle):
+    """Admit one sample to a ready engine and count it while it runs.
+
+    The readiness check and the increment happen under the same lock, so a
+    training op flipping the state (_quiesce_generation) either sees this
+    sample counted, and waits for it, or excludes it, and it waits on
+    _training_lock in _ensure_generation_ready. No sample reaches an engine
+    that is being put to sleep.
+    """
+    while True:
+        await _ensure_generation_ready(handle)
+        async with handle._generation_state_lock:
+            if handle.generation_state == "generation_ready":
+                handle.in_flight_samples += 1
+                handle._samples_drained.clear()
+                break
+    try:
+        yield
+    finally:
+        async with handle._generation_state_lock:
+            handle.in_flight_samples -= 1
+            if handle.in_flight_samples == 0:
+                handle._samples_drained.set()
+
+
+async def _quiesce_generation(handle: NemoRLHandle) -> None:
+    """Take the engine away from sampling. Callers hold _training_lock.
+
+    Flip to training_ready under the state lock (no further sample is
+    admitted), wait for every admitted sample to return, then sleep the
+    colocated engine. vLLM neither queues nor rejects a request that arrives
+    while it sleeps: it schedules it against offloaded weights. The wait is
+    bounded by the in-flight samples' own max_tokens, or by their cancel.
+    """
+    async with handle._generation_state_lock:
+        handle.generation_state = "training_ready"
+        in_flight = handle.in_flight_samples
+    if in_flight:
+        logger.info(
+            "Waiting for %d in-flight sample(s) of %s before taking the engine",
+            in_flight, handle.model_id,
+        )
+    await handle._samples_drained.wait()
+    if handle.policy_generation is not None and handle.colocated_inference:
+        await asyncio.to_thread(handle.policy_generation.finish_generation)
 
 
 # ---------------------------------------------------------------------------
@@ -1242,6 +1294,16 @@ def _refit_policy_generation(policy, policy_generation, colocated_inference: boo
     if colocated_inference:
         policy.offload_after_refit()
         policy_generation.prepare_for_generation(tags=["kv_cache"])
+
+    # The prefix cache holds blocks computed by the previous weights. A refit
+    # runs under the drain rule (no request in flight), so vLLM can drop
+    # them; it refuses while any block is referenced, which means a request
+    # slipped past the drain.
+    if not policy_generation.invalidate_kv_cache():
+        raise RuntimeError(
+            "vLLM refused to reset its prefix cache after the refit: "
+            "a request was still in flight (drain violated)"
+        )
 
 
 def _wake_generation_stale(policy, policy_generation, colocated_inference: bool):
