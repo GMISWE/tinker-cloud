@@ -247,7 +247,10 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
                 "stop_token_ids": None,
                 "stop_strings": None,
                 "vllm_cfg": {
-                    "async_engine": False,
+                    # Per-request HTTP sampling (specs/019, D15): the async
+                    # engine serves /inference/v1/generate from each DP leader.
+                    "async_engine": True,
+                    "expose_http_server": True,
                     "precision": "bfloat16",
                     "kv_cache_dtype": "auto",
                     "tensor_parallel_size": tp_size,
