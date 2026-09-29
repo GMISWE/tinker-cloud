@@ -2,28 +2,36 @@
 Routing table: model_id -> inference endpoint, the one place the address of
 a model's HTTP inference engine is kept.
 
-Backends record the endpoint they booted on the handle; the model service
-publishes it here at create_model and withdraws it at delete_model; the
-sample path looks the address up per request instead of reading it off the
-handle. A model served by an in-process engine (NeMo RL, veRL, fake) has no
-entry. Reads are lock-free: the table is an immutable mapping replaced whole
-on every write (writes happen once per model lifetime; reads once per sample).
+Backends record the endpoint(s) they booted on the handle; the model service
+publishes them here at create_model and withdraws them at delete_model; the
+sample path looks the addresses up per request instead of reading them off
+the handle. A model served by an in-process engine (veRL, fake) has no entry.
+Reads are lock-free: the table is an immutable mapping replaced whole on
+every write (writes happen once per model lifetime; reads once per sample).
 """
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Mapping, Optional
+from typing import Mapping, Optional, Tuple
 
 
 @dataclass(frozen=True)
 class InferenceEndpoint:
-    """Base URL of an HTTP inference engine, e.g. http://10.0.0.7:30000."""
+    """Base URLs of the HTTP servers a model is served from: one for an engine
+    behind a router (Miles), one per data-parallel leader for engines that
+    expose a server per worker (NeMo RL). The backend that samples chooses
+    among them; the table only stores them."""
 
-    base_url: str
+    base_urls: Tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if not self.base_url.startswith(("http://", "https://")):
-            raise ValueError(f"inference endpoint must be an http(s) URL, got {self.base_url!r}")
-        object.__setattr__(self, "base_url", self.base_url.rstrip("/"))
+        if not self.base_urls:
+            raise ValueError("inference endpoint needs at least one URL")
+        urls = []
+        for url in self.base_urls:
+            if not url.startswith(("http://", "https://")):
+                raise ValueError(f"inference endpoint must be an http(s) URL, got {url!r}")
+            urls.append(url.rstrip("/"))
+        object.__setattr__(self, "base_urls", tuple(urls))
 
 
 class RoutingError(LookupError):

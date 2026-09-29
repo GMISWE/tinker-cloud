@@ -8,7 +8,7 @@ must satisfy.
 from abc import ABC, abstractmethod
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, Dict, FrozenSet, Generic, List, Optional, TypeVar
+from typing import Any, Dict, FrozenSet, Generic, List, Optional, Tuple, TypeVar
 
 from ..models.requests import Datum
 from .env_config import EnvConfig
@@ -49,10 +49,11 @@ class BackendHandle:
     # HF model directory the engine loaded (tokenizer source for get_tokenizer_info);
     # empty for backends that resolve no HF checkpoint.
     hf_path: str = ""
-    # Base URL of the HTTP inference engine this model is served from, as
-    # booted; None for in-process engines. The model service publishes it to
-    # core.routing at create_model; sample paths read the table, not this.
-    inference_endpoint: Optional[str] = None
+    # Base URLs of the HTTP servers this model is served from, as booted (one
+    # behind a router, or one per data-parallel leader); empty for in-process
+    # engines. The model service publishes them to core.routing at
+    # create_model; sample paths read the table, not this.
+    inference_endpoints: Tuple[str, ...] = ()
 
 
 # Each backend's handle subclass: a backend only ever receives the handles its

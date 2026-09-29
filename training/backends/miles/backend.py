@@ -23,7 +23,8 @@ from ...core import routing
 from ...core.loss_registry import clip_thresholds
 from ...checkpoints.interchange import export_hf_adapter
 from .model_setup import record_native_checkpoint, resolve_native_checkpoint
-from .sglang_client import SGLangClient, SGLangClientPool
+from ..http_pool import HttpClientPool
+from .sglang_client import SGLangClient
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +33,12 @@ def _dp_size(args: Any) -> int:
     return int(args.data_parallel_size)
 
 
-def _router_url(router_ip: Optional[str], router_port: Optional[int]) -> Optional[str]:
-    """SGLang router base URL, or None when the model booted without one (SFT)."""
+def _router_urls(router_ip: Optional[str], router_port: Optional[int]) -> tuple:
+    """The SGLang router's base URL as a 1-tuple, or () when the model booted
+    without one (SFT): Miles serves every model through one router."""
     if not router_ip or not router_port:
-        return None
-    return f"http://{router_ip}:{router_port}"
+        return ()
+    return (f"http://{router_ip}:{router_port}",)
 
 
 def _adapter_save_dir(native_root: Optional[Path], adapter_name: str) -> Path:
@@ -247,7 +249,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
         self.overrides = overrides or {}
         self.config = MilesConfig.from_env(self.overrides)
         # One persistent connection pool per SGLang router this process samples from.
-        self._sglang_pool = SGLangClientPool(max_connections=self.config.sglang_max_connections)
+        self._http_pool = HttpClientPool(max_connections=self.config.sglang_max_connections)
         # Lazy-import converter to avoid import errors when Miles is not installed
         self._converter = None
         self._builder = None
@@ -425,7 +427,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
             placement_group=None,   # pool-owned; freed only at pool teardown
             args=pool.args,
             hf_path=pool.hf_path,
-            inference_endpoint=_router_url(pool.router_ip, pool.router_port),
+            inference_endpoints=_router_urls(pool.router_ip, pool.router_port),
             router_ip=pool.router_ip,
             router_port=pool.router_port,
             created_at=datetime.now().isoformat(),
@@ -615,7 +617,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
                 placement_group=pgs,
                 args=args,
                 hf_path=hf_path,
-                inference_endpoint=_router_url(router_ip, router_port),
+                inference_endpoints=_router_urls(router_ip, router_port),
                 router_ip=router_ip,
                 router_port=router_port,
                 rlve_config=rlve_config,
@@ -1526,7 +1528,8 @@ class MilesBackend(TrainingBackend[MilesHandle]):
             raise BackendError(
                 "SGLang router not available", backend="miles", operation=operation,
             ) from e
-        return self._sglang_pool.for_endpoint(endpoint.base_url)
+        url = endpoint.base_urls[0]   # Miles serves every model through its one router
+        return SGLangClient(url, self._http_pool.for_url(url))
 
     async def close(self) -> None:
-        await self._sglang_pool.aclose()
+        await self._http_pool.aclose()
