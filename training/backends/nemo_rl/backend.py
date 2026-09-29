@@ -18,16 +18,17 @@ from pathlib import Path
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional
+
+import httpx
 
 from ..base import BackendError, BackendHandle, TrainingBackend
+from ..http_pool import HttpClientPool
 from ...models.requests import Datum
 from .config import NemoRLConfig
 from ...core.loss_registry import clip_thresholds
 from ...checkpoints.interchange import export_hf_adapter, stage_hf_adapter
 
-if TYPE_CHECKING:
-    from .generation import NemoRLBatchAccumulator
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,7 @@ class NemoRLHandle(BackendHandle):
     generation_state: str = "generation_ready"  # "generation_ready" | "training_ready"
     _generation_state_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     in_flight_samples: int = 0           # samples admitted to the engine and not yet returned
+    next_leader: int = 0                 # round-robin cursor over the DP-leader HTTP servers
     _samples_drained: asyncio.Event = field(default_factory=lambda: _set_event())  # set while in_flight_samples == 0
     _training_lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # Serialize optim_step GPU lifecycle
     ref_logprob_accumulator: Any = None  # Lazy _RefLogprobAccumulator (BUG-015)
@@ -98,8 +100,15 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         self.config, self.overrides = NemoRLConfig.split_overrides(overrides)
         self._converter = None
         self._builder = None
-        # PERF-002: per-model batch accumulators for sample()
-        self._batch_accumulators: Dict[str, "NemoRLBatchAccumulator"] = {}
+        # One persistent connection pool per vLLM worker server this process
+        # samples from. Keep-alive expiry sits under uvicorn's 5 s so a reused
+        # connection is never one the worker already closed; no read timeout,
+        # a generation is bounded by its max_tokens on the engine side.
+        self._http_pool = HttpClientPool(
+            max_connections=self.config.vllm_max_connections,
+            keepalive_expiry=2.0,
+            timeout=httpx.Timeout(connect=5.0, read=None, write=None, pool=None),
+        )
 
     @property
     def converter(self):
@@ -195,6 +204,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                 training_run_id=model_id,
                 debug_train_only=debug_train_only,
                 staleness_k=staleness_k,
+                inference_endpoints=_worker_server_roots(policy_generation),
             )
             if staleness_k > 0:
                 logger.info(
@@ -822,7 +832,6 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                     # which was shut down just above; log rather than hide it.
                     logger.warning("delete_model: generation shutdown failed for %s", handle.model_id, exc_info=True)
 
-            self._batch_accumulators.pop(handle.model_id, None)
 
             logger.info("NeMo RL model %s deleted", handle.model_id)
 
@@ -854,10 +863,11 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         prompt_logprobs: bool = False,
         pinned_version: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Sample via Policy.generate() on vLLM Ray workers.
+        """Sample over the vLLM workers' HTTP servers, one request per call.
 
-        PERF-002: requests are batch-accumulated per model and flushed as a
-        single generate() call (~20-30x speedup for RL rollouts).
+        specs/019: rows complete independently of other samples, a cancelled
+        sample aborts its own generation, and an engine error fails only its
+        own sample.
 
         BUG-015: `pinned_version` is the weight version a snapshot sampler was
         created at. The live vLLM engine is refit to the current policy every
@@ -865,8 +875,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         from it once versions diverge. v0-pinned samplers (DPO's frozen
         reference) are served from NeMo RL's built-in frozen reference model.
         """
-        from .generation import NemoRLBatchAccumulator
-
+        from .generation import sample_over_http
 
         # BUG-015 routing: version-pinned logprob reads
         if prompt_logprobs and pinned_version is not None and pinned_version != handle.weight_version:
@@ -883,25 +892,18 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                 "generation engine not initialized (debug_train_only mode?)",
                 backend="nemo_rl", operation="sample",
             )
-        accumulator = self._batch_accumulators.setdefault(
-            handle.model_id, NemoRLBatchAccumulator()
-        )
         # Admitted to a ready engine and counted while it runs; a training op
         # waits for the count to drain before it takes the engine away.
         async with _sampling_slot(handle):
-            result = await accumulator.submit(
-                handle=handle,
-                request_id=request_id,
-                prompt_tokens=prompt_tokens,
-                num_samples=num_samples,
-                sampling_params=sampling_params or {},
-                prompt_logprobs=prompt_logprobs,
+            result = await sample_over_http(
+                handle, self._http_pool, request_id, prompt_tokens, num_samples,
+                sampling_params or {}, prompt_logprobs,
             )
         # ver(S) monitor (A4): certify the version actually served against the
         # declared bound, and stamp it into the response. Versions are read
         # post-serve; sampling is not part of the model's ordered training
         # program (services.ordering), so a concurrent optim_step can bump
-        # weight_version between flush and here — the stamp is best-effort.
+        # weight_version between serve and here — the stamp is best-effort.
         served_v = handle.generation_synced_version
         latest_v = handle.weight_version
         if latest_v - served_v > handle.staleness_k:
@@ -977,6 +979,9 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             # BUG-013 convention: position 0 has no logprob
             results.append([None] + [float(v) for v in vals])
         return results
+
+    async def close(self) -> None:
+        await self._http_pool.aclose()
 
     async def prepare_for_generation(self, handle: NemoRLHandle) -> None:
         """Safety-net refit + wake if the engine was left in training state."""
@@ -1068,6 +1073,22 @@ async def _ensure_generation_ready(handle: NemoRLHandle) -> None:
 
         async with handle._generation_state_lock:
             handle.generation_state = "generation_ready"
+
+
+def _worker_server_roots(policy_generation: Any) -> tuple:
+    """The HTTP server root of every DP leader, as the workers reported them
+    (NeMo RL reports `http://<ip>:<port>/v1`); () without a generation engine."""
+    if policy_generation is None:
+        return ()
+    roots = []
+    for url in policy_generation.dp_openai_server_base_urls:
+        if url is None:
+            raise BackendError(
+                "a vLLM worker reported no HTTP server (expose_http_server unset?)",
+                backend="nemo_rl", operation="create_model",
+            )
+        roots.append(url[:-len("/v1")] if url.endswith("/v1") else url)
+    return tuple(roots)
 
 
 @asynccontextmanager
@@ -1377,9 +1398,9 @@ def _set_learning_rate(policy, learning_rate: float):
 class _RefLogprobAccumulator:
     """Batch-accumulate frozen-reference logprob requests (BUG-015).
 
-    Same shape as NemoRLBatchAccumulator (PERF-002): concurrent
-    compute_logprobs calls within a flush window are served by ONE
-    get_reference_policy_logprobs pass. Single event loop => the
+    Flush-window batching (PERF-002): concurrent compute_logprobs calls
+    within a flush window are served by ONE get_reference_policy_logprobs
+    pass. Single event loop => the
     drain-then-exit check under the lock is race-free.
     """
 
