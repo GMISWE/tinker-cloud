@@ -9,12 +9,14 @@ seed + i) and a cache salt keyed on the weight version the engine holds, so
 a block computed by earlier weights is never reused. Cancelling the sample
 task closes the request; the worker aborts the generation.
 """
+import asyncio
 import logging
 from typing import Any, Dict, List
 
 from ...core import routing
 from ..base import BackendError
 from ..http_pool import HttpClientPool
+from .vllm_client import VllmControlClient
 from .vllm_client import VllmGenerateClient
 
 logger = logging.getLogger(__name__)
@@ -74,3 +76,20 @@ async def sample_over_http(
         sum(len(s["tokens"]) for s in sequences) / max(len(sequences), 1),
     )
     return {"sequences": sequences, "prompt_logprobs": out["prompt_logprobs"]}
+
+
+def _leader_urls(handle: Any) -> tuple:
+    endpoint = routing.table.endpoint_for(handle.model_id)
+    return tuple(endpoint.base_urls)
+
+
+async def update_weights_over_http(handle: Any, pool: HttpClientPool) -> list:
+    """Every leader receives the trainer's broadcast at once (one NCCL
+    collective); returns each leader's ok flag in leader order."""
+    clients = [VllmControlClient(u, pool.for_url(u)) for u in _leader_urls(handle)]
+    return list(await asyncio.gather(*(c.update_weights_from_collective() for c in clients)))
+
+
+async def reset_prefix_cache_over_http(handle: Any, pool: HttpClientPool) -> None:
+    clients = [VllmControlClient(u, pool.for_url(u)) for u in _leader_urls(handle)]
+    await asyncio.gather(*(c.reset_prefix_cache() for c in clients))

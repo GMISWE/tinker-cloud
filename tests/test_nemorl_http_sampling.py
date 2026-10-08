@@ -153,3 +153,68 @@ def test_worker_server_roots_strip_the_v1_suffix():
         dp_openai_server_base_urls = [None]
     with pytest.raises(BackendError, match="no HTTP server"):
         _worker_server_roots(NoServer())
+
+
+def test_stamp_is_the_submission_version_and_the_span_is_not_certified_on_the_split(monkeypatch):
+    """D16: a refit landing mid-sequence leaves weight_version = the version
+    at submission (a lower bound) and latest_weight_version = the version at
+    completion; colocated, the ver(S) certificate still raises on the gap."""
+    from tinkercloud.training.backends.nemo_rl import backend as nb, generation as gen
+
+    async def refit_mid_serve(h, pool, request_id, prompt_tokens, num_samples, sp, pl):
+        h.generation_synced_version = h.weight_version = h.weight_version + 1
+        return {"samples": []}
+
+    monkeypatch.setattr(gen, "sample_over_http", refit_mid_serve)
+    backend = nb.NemoRLBackend()
+    args = dict(request_id="r", prompt_tokens=[1], num_samples=1)
+
+    h = NemoRLHandle(model_id="m", backend_type="nemo_rl", policy_generation=object(),
+                     colocated_inference=False, weight_version=3, generation_synced_version=3)
+    res = asyncio.run(backend.sample(h, **args))
+    assert (res["weight_version"], res["latest_weight_version"]) == (3, 4)
+
+    h = NemoRLHandle(model_id="m", backend_type="nemo_rl", policy_generation=object(),
+                     colocated_inference=True, weight_version=3, generation_synced_version=3)
+    with pytest.raises(BackendError, match="certificate violation"):
+        asyncio.run(backend.sample(h, **args))
+
+
+def control_transport(seen, *, ok=True):
+    """A worker's refit routes: records (host, route), answers {"ok": ok}."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.host, request.url.path))
+        return httpx.Response(200, json={"ok": ok})
+    return httpx.MockTransport(handler)
+
+
+def test_split_refit_broadcasts_while_every_leader_receives_over_http(leaders, monkeypatch):
+    """D16: on the split the engine side of the NCCL refit is driven through the
+    workers' app, one POST per leader concurrent with the trainer's broadcast,
+    then a prefix-cache reset per leader; a leader that fails to load is an error."""
+    import ray
+    from tinkercloud.training.backends.nemo_rl import backend as nb
+
+    got = {}
+    monkeypatch.setattr(ray, "get", lambda refs: got.setdefault("waited", refs))
+
+    class Policy:
+        def broadcast_weights_for_collective(self):
+            return ["ref-0", "ref-1"]
+
+    seen = []
+    h = NemoRLHandle(model_id="m", backend_type="nemo_rl", policy=Policy(), policy_generation=object(),
+                     colocated_inference=False, http_pool=HttpClientPool(transport=control_transport(seen)))
+    asyncio.run(nb._refit(h))
+    assert got["waited"] == ["ref-0", "ref-1"]
+    assert sorted(seen) == [
+        ("n1", "/tinkercloud/v1/reset_prefix_cache"), ("n1", "/tinkercloud/v1/update_weights_from_collective"),
+        ("n2", "/tinkercloud/v1/reset_prefix_cache"), ("n2", "/tinkercloud/v1/update_weights_from_collective"),
+    ]
+    # update before reset on every leader
+    assert [r for _, r in seen if "update" in r] == ["/tinkercloud/v1/update_weights_from_collective"] * 2
+    assert seen.index(("n1", "/tinkercloud/v1/reset_prefix_cache")) > seen.index(("n1", "/tinkercloud/v1/update_weights_from_collective"))
+
+    h.http_pool = HttpClientPool(transport=control_transport([], ok=False))
+    with pytest.raises(RuntimeError, match="failed to load"):
+        asyncio.run(nb._refit(h))
