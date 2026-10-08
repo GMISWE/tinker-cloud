@@ -248,7 +248,7 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
                 "stop_strings": None,
                 "vllm_cfg": {
                     # Per-request HTTP sampling (specs/019, D15): the async
-                    # engine serves /inference/v1/generate from each DP leader.
+                    # engine serves /tinkercloud/v1/generate from each DP leader.
                     "async_engine": True,
                     "expose_http_server": True,
                     "precision": "bfloat16",

@@ -1,8 +1,8 @@
 """
 NeMo RL per-request sampling over the workers' HTTP servers (specs/019, D15).
 
-Every sample() is one /inference/v1/generate request to the next
-data-parallel leader of the model, taken from the routing table with a
+Every sample() is one /tinkercloud/v1/generate request (the fork's flat-logprob
+route beside vLLM's /inference/v1/generate) to the next data-parallel leader of the model, taken from the routing table with a
 pooled client, the same shape as Miles over its SGLang router. The request
 carries the full SamplingParams (n = num_samples, vLLM seeds child i with
 seed + i) and a cache salt keyed on the weight version the engine holds, so
