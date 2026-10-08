@@ -108,10 +108,12 @@ pip install -q distro pyqwest orjson 'zstandard>=0.24' 'protobuf>=4.21' click \
 
 # NeMo RL's non-colocated refit (NEMORL_COLOCATED=0) builds its NCCL group
 # through nccl4py inside the vLLM and policy worker venvs; the base image
-# predates that dependency (RL fork pyproject pins it).
+# predates that dependency (RL fork pyproject pins it). With TP > 1 vLLM's
+# Ray executor spawns the TP ranks from the sync worker's venv.
 if [ "$PROFILE" != miles ]; then
   UV=$(command -v uv || echo /root/.local/bin/uv)
   for w in nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker \
+           nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker \
            nemo_rl.models.policy.workers.dtensor_policy_worker_v2.DTensorPolicyWorkerV2; do
     V=/opt/ray_venvs/$w/bin/python
     [ -x "$V" ] && "$UV" pip install --python "$V" -q 'nccl4py==0.1.1'
