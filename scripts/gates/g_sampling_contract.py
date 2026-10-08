@@ -9,7 +9,8 @@ real backend with a real tokenizer, on a fresh model that is deleted at the end.
 Checks: token stop -> last token is the stop id; string stop -> string in decoded
 output; max_tokens 8192 accepted (the old 4096 cap is gone); missing max_tokens
 -> 422; prompt + max_tokens past the context -> 400 with the typed message;
-len(tokens) == len(logprobs) everywhere.
+len(tokens) == len(logprobs) everywhere; the stop string is completed by the last token
+(S4); compute_logprobs is complete, also for a prompt sharing a prefix with an earlier one (S9).
 """
 import argparse
 import json
@@ -83,8 +84,25 @@ def main():
             check("string stop: string present in decoded output", ss in dec, f"tail={dec[-60:]!r}")
             check("string stop: shorter or equal", len(sst.tokens) <= len(base.tokens), f"{len(sst.tokens)} <= {len(base.tokens)}")
             check("len(tokens)==len(logprobs) string-stopped", len(sst.tokens) == len(sst.logprobs))
+            # S4 token boundary: the stop string is completed by the last token, never earlier
+            before = tok.decode(sst.tokens[:-1])
+            check("string stop: completed by the last token", ss not in before and ss in dec,
+                  f"in decode(tokens[:-1])={ss in before} in decode(tokens)={ss in dec}")
         else:
             check("string stop", False, f"no usable substring in {text!r}")
+
+        # (ii-b) S9: compute_logprobs is complete for a prompt that shares its prefix with
+        # an earlier compute_logprobs (prefix cache must not swallow the scored positions)
+        lp1 = sc.compute_logprobs(types.ModelInput.from_ints(prompt_ids)).result()
+        ext_ids = prompt_ids + list(f.tokens[:8])
+        lp2 = sc.compute_logprobs(types.ModelInput.from_ints(ext_ids)).result()
+        complete = lambda lp, n: len(lp) == n and lp[0] is None and all(isinstance(x, float) for x in lp[1:])  # noqa: E731
+        check("compute_logprobs: N entries, first None, rest floats", complete(lp1, len(prompt_ids)),
+              f"len={len(lp1)} N={len(prompt_ids)} none_at={[i for i, x in enumerate(lp1) if x is None]}")
+        check("compute_logprobs shared prefix: second call complete", complete(lp2, len(ext_ids)),
+              f"len={len(lp2)} N={len(ext_ids)} none_at={[i for i, x in enumerate(lp2) if x is None]}")
+        if complete(lp1, len(prompt_ids)) and complete(lp2, len(ext_ids)):
+            OUT["shared_prefix_max_abs_diff"] = max(abs(x - y) for x, y in zip(lp1[1:], lp2[1:len(lp1)]))
 
         # (iii) max_tokens above the old cap is accepted
         try:
