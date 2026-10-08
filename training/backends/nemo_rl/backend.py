@@ -1248,12 +1248,7 @@ def _init_nemo_rl_components(
     """
     import ray
     from nemo_rl.distributed.virtual_cluster import RayVirtualCluster
-    from nemo_rl.models.policy.lm_policy import Policy
-    from nemo_rl.algorithms.utils import get_tokenizer
-    from .losses import TinkerSumPGLoss
 
-    policy_config = config_dict["policy"]
-    loss_fn_config = config_dict["loss_fn"]
     cluster_config = config_dict["cluster"]
 
     if not ray.is_initialized():
@@ -1284,6 +1279,36 @@ def _init_nemo_rl_components(
             max_colocated_worker_groups=1,
             name="tinker_infer",
         )
+
+    try:
+        return _build_components(
+            config_dict, checkpoint_path, debug_train_only, colocated_inference,
+            refit_memory_ratio, cluster, inference_cluster,
+        )
+    except BaseException:
+        # A half-built model must not keep its placement groups: the next
+        # create_model would see fewer free GPUs than the pod has.
+        for c in (inference_cluster, cluster):
+            c.shutdown() if c is not None else None
+        raise
+
+
+def _build_components(
+    config_dict: Dict[str, Any],
+    checkpoint_path: Optional[str],
+    debug_train_only: bool,
+    colocated_inference: bool,
+    refit_memory_ratio: float,
+    cluster: Any,
+    inference_cluster: Any,
+):
+    import ray
+    from nemo_rl.models.policy.lm_policy import Policy
+    from nemo_rl.algorithms.utils import get_tokenizer
+    from .losses import TinkerSumPGLoss
+
+    policy_config = config_dict["policy"]
+    loss_fn_config = config_dict["loss_fn"]
 
     # Load tokenizer (use NeMo RL's utility which sets pad_token_id if absent)
     model_name = policy_config["model_name"]
