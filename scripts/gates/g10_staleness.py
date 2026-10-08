@@ -80,10 +80,12 @@ def await_future(rid, timeout=900):
     sys.exit(2)
 
 
-def raw_sample(model_id):
-    """Greedy sample via raw HTTP so the ver(S) fields are readable."""
+def raw_sample(session_id):
+    """Greedy sample via raw HTTP so the ver(S) fields are readable. The
+    sampler session serves the live engine (its pin only routes
+    prompt-logprob reads, BUG-015)."""
     body = {
-        "model_path": f"tinker://{model_id}/weights/live",
+        "sampling_session_id": session_id,
         "prompt": {"tokens": PROMPT},
         "num_samples": 1,
         "sampling_params": {"temperature": 0.0, "max_tokens": 24, "top_p": 1.0},
@@ -112,10 +114,11 @@ def run_phase(sc, k, steps):
         base_model=BASE_MODEL, rank=RANK, staleness_k=k)
     model_id = tc.model_id
     print(f"model {model_id} staleness_k={k}")
-    samples = [raw_sample(model_id)]  # index = after step i
+    session_id = tc.save_weights_and_get_sampling_client()._sampling_session_id
+    samples = [raw_sample(session_id)]  # index = after step i
     for t in range(1, steps + 1):
         train_step(tc, salt=t)
-        samples.append(raw_sample(model_id))
+        samples.append(raw_sample(session_id))
     requests.post(f"{BASE}/api/v1/delete_model", headers=HDRS,
                   json={"model_id": model_id})
     return samples

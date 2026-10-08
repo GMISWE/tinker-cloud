@@ -53,6 +53,7 @@ class NemoRLHandle(BackendHandle):
     cluster: Any = None              # RayVirtualCluster the trainer runs on
     inference_cluster: Any = None    # RayVirtualCluster vLLM runs on when not colocated (specs/021)
     train_dp: int = 1                # trainer data-parallel size, read back from the Policy
+    http_pool: Any = None            # the backend's HttpClientPool (refit routes on the split, D16)
     config: Dict = field(default_factory=dict)   # Full config dict
     tokenizer: Any = None            # HuggingFace tokenizer
     loss_fn: Any = None              # TinkerSumPGLoss instance (RL)
@@ -211,6 +212,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                 cluster=cluster,
                 inference_cluster=inference_cluster,
                 train_dp=train_dp,
+                http_pool=self._http_pool,
                 config=config_dict,
                 tokenizer=tokenizer,
                 loss_fn=loss_fn,
@@ -287,7 +289,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             # refit). Under _training_lock: a concurrent optim_step or wake must
             # not touch the same GPU workers mid-pass.
             async with handle._training_lock:
-                await _quiesce_generation(handle)
+                await _take_engine_for_training(handle)
 
                 # Use prepare_for_training(), not prepare_for_lp_inference(): the latter
                 # offloads the optimizer, deadlocking a concurrent apply_optimizer_step
@@ -550,7 +552,9 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                 # Transition to training state — generation requests after this
                 # point wait on _training_lock in _ensure_generation_ready() —
                 # then drain the samples already admitted and sleep the engine.
-                await _quiesce_generation(handle)
+                # On the split layout nothing is taken: samples keep running
+                # across the step and the refit (D16).
+                await _take_engine_for_training(handle)
 
                 try:
                     # BUG-005 fix: NeMo RL requires prepare_for_training() before
@@ -597,43 +601,12 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                         {k: v for k, v in train_result.get("all_mb_metrics", {}).items()},
                     )
 
-                    # BUG-015: weights advanced — bump version so pinned samplers
-                    # (e.g. DPO's frozen reference) stop matching the live engine.
-                    handle.weight_version += 1
-
-                    if handle.policy_generation is not None and not handle.debug_train_only:
-                        # A4 staleness-k: refit only when the engine would exceed
-                        # the declared bound; otherwise wake it with the (stale)
-                        # weights its level-1 sleep backed up. k=0 == old behavior.
-                        staleness = handle.weight_version - handle.generation_synced_version
-                        if staleness > handle.staleness_k:
-                            logger.info(
-                                "Refitting policy generation for %s (engine v%d -> v%d)",
-                                handle.model_id, handle.generation_synced_version, handle.weight_version,
-                            )
-                            await asyncio.to_thread(
-                                _refit_policy_generation,
-                                handle.policy,
-                                handle.policy_generation,
-                                handle.colocated_inference,
-                                handle.refit_memory_ratio,
-                            )
-                            handle.generation_synced_version = handle.weight_version
-                            if handle.colocated_inference:
-                                handle.training_resident = False  # refit offloaded the policy
-                        else:
-                            logger.info(
-                                "ver(S): refit deferred for %s — engine stays at v%d, "
-                                "latest v%d (staleness %d <= k=%d)",
-                                handle.model_id, handle.generation_synced_version,
-                                handle.weight_version, staleness, handle.staleness_k,
-                            )
-                            await asyncio.to_thread(
-                                _wake_generation_stale,
-                                handle.policy,
-                                handle.policy_generation,
-                                handle.colocated_inference,
-                            )
+                    # BUG-015: weights advanced — the version bumps so pinned
+                    # samplers (e.g. DPO's frozen reference) stop matching the
+                    # live engine; it bumps AFTER the swap (D16).
+                    _t = time.time()
+                    await _advance_weights(handle)
+                    phases["refit"] = time.time() - _t
 
                     # Transition back to generation_ready — sampling can now
                     # call generate() directly without offload/refit overhead.
@@ -709,14 +682,8 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         try:
             if handle.policy_generation is not None:
                 async with handle._training_lock:
-                    await _quiesce_generation(handle)
-                    await asyncio.to_thread(
-                        _refit_policy_generation,
-                        handle.policy,
-                        handle.policy_generation,
-                        handle.colocated_inference,
-                        handle.refit_memory_ratio,
-                    )
+                    await _take_engine_for_training(handle)
+                    await _refit(handle)
                     if handle.colocated_inference:
                         handle.training_resident = False  # refit offloaded the policy
                     async with handle._generation_state_lock:
@@ -802,13 +769,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                         await asyncio.to_thread(handle.policy.prepare_for_training)
                         handle.training_resident = True
                     logger.info("Refitting policy generation after checkpoint load for %s", handle.model_id)
-                    await asyncio.to_thread(
-                        _refit_policy_generation,
-                        handle.policy,
-                        handle.policy_generation,
-                        handle.colocated_inference,
-                        handle.refit_memory_ratio,
-                    )
+                    await _refit(handle)
                     if handle.colocated_inference:
                         handle.training_resident = False  # the refit offloaded the policy
                     async with handle._generation_state_lock:
@@ -840,6 +801,10 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                         handle.model_id, len(handle.data_buffer),
                     )
                     handle.data_buffer.clear()
+
+            # No sample may be mid-flight on an engine being torn down.
+            async with handle._training_lock:
+                await _drain_samples(handle)
 
             if handle.policy is not None:
                 await asyncio.to_thread(handle.policy.shutdown)
@@ -919,21 +884,23 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                 "generation engine not initialized (debug_train_only mode?)",
                 backend="nemo_rl", operation="sample",
             )
-        # Admitted to a ready engine and counted while it runs; a training op
-        # waits for the count to drain before it takes the engine away.
+        # Admitted to a ready engine and counted while it runs; a colocated
+        # training op waits for the count to drain before it takes the engine.
         async with _sampling_slot(handle):
+            # D16: the stamp is the engine version at submission. Colocated,
+            # the engine cannot change while this sample is admitted, so it is
+            # exact; on the split layout a refit may land mid-sequence, so it
+            # is a lower bound (tokens come from this version or newer).
+            served_v = handle.generation_synced_version
             result = await sample_over_http(
                 handle, self._http_pool, request_id, prompt_tokens, num_samples,
                 sampling_params or {}, prompt_logprobs,
             )
-        # ver(S) monitor (A4): certify the version actually served against the
-        # declared bound, and stamp it into the response. Versions are read
-        # post-serve; sampling is not part of the model's ordered training
-        # program (services.ordering), so a concurrent optim_step can bump
-        # weight_version between serve and here — the stamp is best-effort.
-        served_v = handle.generation_synced_version
         latest_v = handle.weight_version
-        if latest_v - served_v > handle.staleness_k:
+        # ver(S) monitor (A4): colocated, certify the served version against
+        # the declared bound. On the split layout the span is the client's to
+        # bound (max_steps_off_policy); the two stamps report it.
+        if handle.colocated_inference and latest_v - served_v > handle.staleness_k:
             raise BackendError(
                 f"ver(S) certificate violation: served v{served_v}, latest "
                 f"v{latest_v}, staleness {latest_v - served_v} > declared "
@@ -993,7 +960,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         data = await asyncio.to_thread(_maybe_pad_batch, data, dp_size, mbs, None)
 
         async with h._training_lock:
-            await _quiesce_generation(h)
+            await _take_engine_for_training(h)
             await asyncio.to_thread(h.policy.prepare_for_training)
             _ensure_dyn_mb_budget(h, data)
             out = await asyncio.to_thread(h.policy.get_reference_policy_logprobs, data)
@@ -1088,13 +1055,7 @@ async def _ensure_generation_ready(handle: NemoRLHandle) -> None:
                 handle.colocated_inference,
             )
         else:
-            await asyncio.to_thread(
-                _refit_policy_generation,
-                handle.policy,
-                handle.policy_generation,
-                handle.colocated_inference,
-                handle.refit_memory_ratio,
-            )
+            await _refit(handle)
             handle.generation_synced_version = handle.weight_version
         if handle.colocated_inference:
             handle.training_resident = False  # the policy was offloaded either way
@@ -1145,15 +1106,10 @@ async def _sampling_slot(handle: NemoRLHandle):
                 handle._samples_drained.set()
 
 
-async def _quiesce_generation(handle: NemoRLHandle) -> None:
-    """Take the engine away from sampling. Callers hold _training_lock.
-
-    Flip to training_ready under the state lock (no further sample is
-    admitted), wait for every admitted sample to return, then sleep the
-    colocated engine. vLLM neither queues nor rejects a request that arrives
-    while it sleeps: it schedules it against offloaded weights. The wait is
-    bounded by the in-flight samples' own max_tokens, or by their cancel.
-    """
+async def _drain_samples(handle: NemoRLHandle) -> None:
+    """Stop admitting samples and wait for the admitted ones to return.
+    Callers hold _training_lock. The wait is bounded by the in-flight
+    samples' own max_tokens, or by their cancel."""
     async with handle._generation_state_lock:
         handle.generation_state = "training_ready"
         in_flight = handle.in_flight_samples
@@ -1163,8 +1119,93 @@ async def _quiesce_generation(handle: NemoRLHandle) -> None:
             in_flight, handle.model_id,
         )
     await handle._samples_drained.wait()
+
+
+async def _quiesce_generation(handle: NemoRLHandle) -> None:
+    """Take the engine away from sampling: drain, then sleep the colocated
+    engine. vLLM neither queues nor rejects a request that arrives while it
+    sleeps: it schedules it against offloaded weights. Callers hold
+    _training_lock."""
+    await _drain_samples(handle)
     if handle.policy_generation is not None and handle.colocated_inference:
         await asyncio.to_thread(handle.policy_generation.finish_generation)
+
+
+async def _take_engine_for_training(handle: NemoRLHandle) -> None:
+    """Colocated: the trainer needs the engine's GPUs, so quiesce. Split
+    layout (D16): the engine keeps serving through the step and the refit;
+    only load_checkpoint and delete_model drain."""
+    if handle.colocated_inference:
+        await _quiesce_generation(handle)
+
+
+async def _refit(handle: NemoRLHandle) -> None:
+    """Sync the engine to the trainer's weights. Colocated: the IPC path on
+    the drained, sleeping engine. Split: the NCCL path, with the engine side
+    driven over the workers' HTTP app so it shares one event loop with the
+    generate route; the worker's Ray method for it runs on another thread,
+    and the two racing on the engine core's ZMQ socket corrupted a frame and
+    killed the core's input reader (D16)."""
+    if handle.colocated_inference:
+        await asyncio.to_thread(
+            _refit_policy_generation,
+            handle.policy,
+            handle.policy_generation,
+            True,
+            handle.refit_memory_ratio,
+        )
+        return
+    import ray
+    from .generation import reset_prefix_cache_over_http, update_weights_over_http
+
+    # One collective: the trainer broadcasts while every leader receives.
+    futures_train = handle.policy.broadcast_weights_for_collective()
+    ok = await update_weights_over_http(handle, handle.http_pool)
+    await asyncio.to_thread(ray.get, futures_train)
+    if not all(ok):
+        raise RuntimeError(f"vLLM leader(s) failed to load the broadcast weights: ok={ok}")
+    # Unreferenced prefix blocks go now; blocks in use stay and the
+    # per-version cache salt keeps new requests off them (019 Q17b).
+    await reset_prefix_cache_over_http(handle, handle.http_pool)
+
+
+async def _advance_weights(handle: NemoRLHandle) -> None:
+    """After an optimizer step: refit the engine or defer under staleness_k,
+    then bump weight_version. The bump comes AFTER the swap so a sample
+    stamped during the swap claims the older version (a lower bound), never
+    weights its prefill did not see (D16). The bump happens even if the
+    swap fails: the trainer's weights did move."""
+    new_version = handle.weight_version + 1
+    try:
+        if handle.policy_generation is not None and not handle.debug_train_only:
+            # A4 staleness-k: refit only when the engine would exceed the
+            # declared bound; otherwise (colocated) wake it with the stale
+            # weights its level-1 sleep backed up. k=0 == refit every step.
+            staleness = new_version - handle.generation_synced_version
+            if staleness > handle.staleness_k:
+                logger.info(
+                    "Refitting policy generation for %s (engine v%d -> v%d)",
+                    handle.model_id, handle.generation_synced_version, new_version,
+                )
+                await _refit(handle)
+                handle.generation_synced_version = new_version
+                if handle.colocated_inference:
+                    handle.training_resident = False  # refit offloaded the policy
+            else:
+                logger.info(
+                    "ver(S): refit deferred for %s — engine stays at v%d, "
+                    "latest v%d (staleness %d <= k=%d)",
+                    handle.model_id, handle.generation_synced_version,
+                    new_version, staleness, handle.staleness_k,
+                )
+                await asyncio.to_thread(
+                    _wake_generation_stale,
+                    handle.policy,
+                    handle.policy_generation,
+                    handle.colocated_inference,
+                )
+    finally:
+        handle.weight_version = new_version
 
 
 # ---------------------------------------------------------------------------
@@ -1388,15 +1429,19 @@ def _refit_policy_generation(policy, policy_generation, colocated_inference: boo
         policy.offload_after_refit()
         policy_generation.prepare_for_generation(tags=["kv_cache"])
 
-    # The prefix cache holds blocks computed by the previous weights. A refit
-    # runs under the drain rule (no request in flight), so vLLM can drop
-    # them; it refuses while any block is referenced, which means a request
-    # slipped past the drain.
+    # The prefix cache holds blocks computed by the previous weights. vLLM
+    # drops the unreferenced ones and refuses while any block is in use.
+    # Colocated, a refit runs under the drain rule, so a refusal means a
+    # request slipped past the drain. On the split layout requests are in
+    # flight by design and the per-version cache salt keeps a new request
+    # off the old blocks (D15 / D16); the refusal is expected under load.
     if not policy_generation.invalidate_kv_cache():
-        raise RuntimeError(
-            "vLLM refused to reset its prefix cache after the refit: "
-            "a request was still in flight (drain violated)"
-        )
+        if colocated_inference:
+            raise RuntimeError(
+                "vLLM refused to reset its prefix cache after the refit: "
+                "a request was still in flight (drain violated)"
+            )
+        logger.info("prefix cache reset deferred: requests in flight; the version salt covers them")
 
 
 def _wake_generation_stale(policy, policy_generation, colocated_inference: bool):

@@ -140,3 +140,35 @@ class VllmGenerateClient:
         # orjson: the body is ~160 bytes per sampled token (vLLM's per-token logprob
         # objects); stdlib json cost 0.8 s per 2048x256-token step on the event loop.
         return self.parse_response(orjson.loads(response.content), token_ids, num_samples, prompt_logprobs)
+
+
+class VllmControlClient:
+    """The refit routes of one worker URL (specs/021, D16): the worker serves
+    them on the same loop as generate, so the engine core sees one sender."""
+
+    def __init__(self, base_url: str, http: httpx.AsyncClient):
+        self.base_url = base_url.rstrip("/")
+        self._http = http
+
+    async def _post(self, route: str) -> bool:
+        url = f"{self.base_url}/tinkercloud/v1/{route}"
+        try:
+            response = await self._http.post(url)
+        except httpx.TransportError as e:
+            raise BackendError(
+                f"vLLM worker {self.base_url} unreachable during {route}: {e}",
+                backend="nemo_rl", operation="refit", original_error=e,
+            ) from e
+        if response.status_code != 200:
+            raise BackendError(
+                f"vLLM worker {self.base_url} returned {response.status_code} on {route}: {response.text[:300]}",
+                backend="nemo_rl", operation="refit",
+            )
+        return bool(orjson.loads(response.content)["ok"])
+
+    async def update_weights_from_collective(self) -> bool:
+        """True when the engine loaded the broadcast weights."""
+        return await self._post("update_weights_from_collective")
+
+    async def reset_prefix_cache(self) -> None:
+        await self._post("reset_prefix_cache")

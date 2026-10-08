@@ -23,6 +23,10 @@ class FakeGeneration:
     def update_weights_via_ipc_zmq(self):
         return []
 
+    def update_weights_from_collective(self):
+        self.log.append("nccl-recv")
+        return []
+
     def invalidate_kv_cache(self):
         self.log.append("invalidate")
         return self.invalidate_ok
@@ -44,10 +48,14 @@ class FakePolicy:
     def stream_weights_via_ipc_zmq(self, buffer_size_bytes):
         return []
 
+    def broadcast_weights_for_collective(self):
+        self.log.append("nccl-send")
+        return []
 
-def make_handle(log):
+
+def make_handle(log, **kw):
     return NemoRLHandle(model_id="m", backend_type="nemo_rl",
-                        policy=FakePolicy(log), policy_generation=FakeGeneration(log))
+                        policy=FakePolicy(log), policy_generation=FakeGeneration(log), **kw)
 
 
 def test_slot_counts_while_the_sample_runs():
@@ -150,5 +158,81 @@ def test_refit_resets_the_prefix_cache_or_fails(monkeypatch):
     nb._refit_policy_generation(policy, gen, colocated_inference=True)
     assert log[-1] == "invalidate" and log.count("invalidate") == 1
     gen.invalidate_ok = False
+    with pytest.raises(RuntimeError, match="drain violated"):
+        nb._refit_policy_generation(policy, gen, colocated_inference=True)
+
+
+# --- specs/021 (D16): the split layout keeps the engine serving through a step
+
+
+def test_split_training_leaves_the_engine_with_its_samples():
+    async def run():
+        log = []
+        h = make_handle(log, colocated_inference=False)
+        release = asyncio.Event()
+
+        async def sample():
+            async with nb._sampling_slot(h):
+                log.append("sample-in")
+                await release.wait()
+                log.append("sample-out")
+
+        s = asyncio.create_task(sample())
+        await asyncio.sleep(0.01)
+        async with h._training_lock:
+            await nb._take_engine_for_training(h)      # returns at once
+            log.append("train")
+        assert h.generation_state == "generation_ready" and h.in_flight_samples == 1
+        release.set()
+        await s
+        assert log == ["sample-in", "train", "sample-out"]
+        # delete still drains (no sample may be mid-flight on a torn-down engine)
+        async with h._training_lock:
+            await nb._drain_samples(h)
+        assert h.generation_state == "training_ready" and "sleep" not in log
+    asyncio.run(run())
+
+
+def test_version_bumps_after_the_swap_even_when_the_swap_fails(monkeypatch):
+    seen = []
+
+    async def fake_refit(handle):
+        seen.append(("refit", h.weight_version, h.generation_synced_version))
+        if fail:
+            raise RuntimeError("nccl down")
+
+    monkeypatch.setattr(nb, "_refit", fake_refit)
+    h = make_handle([], colocated_inference=False, weight_version=3, generation_synced_version=3)
+    fail = False
+    asyncio.run(nb._advance_weights(h))
+    assert seen == [("refit", 3, 3)]                   # swap runs before the bump
+    assert (h.weight_version, h.generation_synced_version) == (4, 4)
+    fail = True
+    with pytest.raises(RuntimeError, match="nccl down"):
+        asyncio.run(nb._advance_weights(h))
+    assert (h.weight_version, h.generation_synced_version) == (5, 4)   # trainer moved, engine did not
+
+
+def test_deferred_refit_under_staleness_k_bumps_only_the_trainer(monkeypatch):
+    async def no_refit(handle):
+        pytest.fail("refit must be deferred")
+
+    monkeypatch.setattr(nb, "_refit", no_refit)
+    log = []
+    h = make_handle(log, colocated_inference=False, staleness_k=1, weight_version=2, generation_synced_version=2)
+    asyncio.run(nb._advance_weights(h))
+    assert (h.weight_version, h.generation_synced_version) == (3, 2) and "wake" not in log
+
+
+def test_create_time_split_sync_tolerates_a_busy_prefix_cache(monkeypatch):
+    """The Ray-driven NCCL sync is used once, at create_model, before any HTTP
+    traffic exists; later refits go over the workers' app (test_nemorl_http_sampling)."""
+    import ray
+    monkeypatch.setattr(ray, "get", lambda refs: refs)
+    log = []
+    policy, gen = FakePolicy(log), FakeGeneration(log)
+    gen.invalidate_ok = False
+    nb._refit_policy_generation(policy, gen, colocated_inference=False)   # no raise: the salt covers it
+    assert log == ["nccl-send", "nccl-recv", "invalidate"]
     with pytest.raises(RuntimeError, match="drain violated"):
         nb._refit_policy_generation(policy, gen, colocated_inference=True)
