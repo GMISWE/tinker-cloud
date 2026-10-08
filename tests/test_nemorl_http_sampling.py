@@ -22,7 +22,7 @@ class FakeTokenizer:
 
 
 def vllm_transport(seen, *, finish="length", choices=None, prompt_logprobs=None, status=200):
-    """A vLLM worker: records each request; answers n choices in reverse index order."""
+    """A worker's /tinkercloud/v1/generate: records each request; answers n choices in reverse index order."""
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.read())
         seen.append((request.url.host, request.url.path, body))
@@ -31,14 +31,12 @@ def vllm_transport(seen, *, finish="length", choices=None, prompt_logprobs=None,
         sp = body["sampling_params"]
         out = choices if choices is not None else [
             {"index": i, "finish_reason": finish, "token_ids": [10 + i, 11],
-             "logprobs": {"content": [{"token": "token_id:10", "logprob": -0.5 - i},
-                                      {"token": "token_id:11", "logprob": -9999.0}]}}
+             "logprobs": {"content": [{"logprob": -0.5 - i}, {"logprob": -9999.0}]}}   # -9999 = floored -inf
             for i in reversed(range(sp["n"]))
         ]
         pl = prompt_logprobs
         if pl is None and sp.get("prompt_logprobs"):
-            pl = [None] + [{str(t): {"logprob": -1.0 - i, "rank": 1, "decoded_token": "x"}}
-                           for i, t in enumerate(body["token_ids"][1:])]
+            pl = [None] + [-1.0 - i for i in range(len(body["token_ids"]) - 1)]
         return httpx.Response(200, json={"request_id": "r", "choices": out, "prompt_logprobs": pl})
     return httpx.MockTransport(handler)
 
@@ -68,12 +66,12 @@ def test_one_request_per_sample_with_every_parameter_and_the_version_salt(leader
               sampling_params={"temperature": 0.7, "top_p": 0.9, "max_tokens": 8, "top_k": 40,
                                "seed": 11, "stop": ["\n"], "stop_token_ids": [2]})
     (host, path, body), = seen
-    assert path == "/inference/v1/generate" and body["token_ids"] == [5, 6, 7]
+    assert path == "/tinkercloud/v1/generate" and body["token_ids"] == [5, 6, 7]
     assert body["cache_salt"] == "m@3"
     assert body["sampling_params"] == {
         "n": 3, "max_tokens": 8, "temperature": 0.7, "top_p": 0.9, "top_k": 40, "seed": 11,
-        "stop": ["\n"], "stop_token_ids": [2], "logprobs": 1,
-        "include_stop_str_in_output": True, "detokenize": True, "output_kind": 2,
+        "stop": ["\n"], "stop_token_ids": [2], "logprobs": 0,
+        "include_stop_str_in_output": True, "detokenize": True,
     }
     assert [s["tokens"] for s in res["sequences"]] == [[10, 11], [11, 11], [12, 11]]   # choice order restored
     assert res["sequences"][1]["logprobs"] == [-1.5, -math.inf]                         # -9999 -> -inf
@@ -131,14 +129,13 @@ def test_abort_and_http_errors_name_the_worker(leaders):
 
 def test_token_logprob_mismatch_and_missing_prompt_logprob_fail(leaders):
     short = [{"index": 0, "finish_reason": "length", "token_ids": [1, 2],
-              "logprobs": {"content": [{"token": "t", "logprob": -0.1}]}}]
+              "logprobs": {"content": [{"logprob": -0.1}]}}]
     with pytest.raises(BackendError, match="2 tokens but 1 logprobs"):
         run(HttpClientPool(transport=vllm_transport([], choices=short)), handle())
     with pytest.raises(BackendError, match="returned 1 of 2 sequences"):
         run(HttpClientPool(transport=vllm_transport([], choices=short)), handle(), num_samples=2)
-    with pytest.raises(BackendError, match="no logprob for prompt position 1"):
-        run(HttpClientPool(transport=vllm_transport([], prompt_logprobs=[None, {"999": {"logprob": -1}}, {"7": {"logprob": -1}}])),
-            handle(), prompt_logprobs=True)
+    with pytest.raises(BackendError, match="prompt logprobs for 2 of 3 prompt tokens"):
+        run(HttpClientPool(transport=vllm_transport([], prompt_logprobs=[None, -1.0])), handle(), prompt_logprobs=True)
 
 
 def test_unpublished_model_is_a_backend_error():

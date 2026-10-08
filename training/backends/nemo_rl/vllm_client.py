@@ -1,5 +1,5 @@
 """
-vLLM /inference/v1/generate codec over a pooled httpx client (specs/019, D15).
+vLLM worker /tinkercloud/v1/generate codec over a pooled httpx client (specs/019, D15).
 
 One request per sample(): the token-id prompt plus the full SamplingParams
 (n = num_samples, per-request seed, stop ids and strings, logprobs, prompt
@@ -15,25 +15,20 @@ import orjson
 
 from ..base import BackendError
 
-# vLLM's HTTP layer writes -inf as this (JSON has no infinity); a value at or
-# below it is a genuine "zero probability" and goes back to -inf on our wire.
-NEG_INF_CLAMP = -9999.0
-# vllm.sampling_params.RequestOutputKind.FINAL_ONLY: the route answers from the
-# last RequestOutput, and with n > 1 only this kind carries every child in it
-# (a child that finished on an earlier step is otherwise left out).
-OUTPUT_KIND_FINAL_ONLY = 2
+# The worker floors a non-finite logprob to this (JSON has no infinity, SkyRL's
+# convention); at or below it the value goes back to -inf on our wire.
+CLAMPED_LOGPROB = -9999.0
 
 
 def _unclamp(value: float) -> float:
-    return -math.inf if value <= NEG_INF_CLAMP else float(value)
-
+    return -math.inf if value <= CLAMPED_LOGPROB else float(value)
 
 class VllmGenerateClient:
     """The generate codec for one worker URL."""
 
     def __init__(self, base_url: str, http: httpx.AsyncClient):
         self.base_url = base_url.rstrip("/")
-        self.generate_url = f"{self.base_url}/inference/v1/generate"
+        self.generate_url = f"{self.base_url}/tinkercloud/v1/generate"
         self._http = http
 
     @staticmethod
@@ -58,8 +53,7 @@ class VllmGenerateClient:
             "max_tokens": int(sampling_params["max_tokens"]),
             "temperature": 0.0 if temperature <= 0.01 else temperature,
             "top_p": float(sampling_params["top_p"]),
-            "logprobs": 1,   # 0 means off on this route; each entry carries the sampled token
-            "output_kind": OUTPUT_KIND_FINAL_ONLY,
+            "logprobs": 0,   # the sampled token's logprob only; the flat route emits it as {"content": [{"logprob": x}]}
         }
         stop = sampling_params.get("stop")
         stop_strings: List[str] = []
@@ -83,24 +77,24 @@ class VllmGenerateClient:
         self, body: Dict[str, Any], token_ids: List[int], num_samples: int, prompt_logprobs: bool,
     ) -> Dict[str, Any]:
         """Rows in choice order: tokens, sampled logprobs, finish_reason; plus the
-        prompt logprobs (position 0 None, BUG-013 convention) when requested."""
-        if len(body["choices"]) != num_samples:
+        prompt logprobs (position 0 None, BUG-013 convention) when requested.
+        The route floors a non-finite logprob to -9999; that is -inf here."""
+        choices = body["choices"]
+        if len(choices) != num_samples:
             raise BackendError(
-                f"vLLM worker {self.base_url} returned {len(body['choices'])} of "
-                f"{num_samples} sequences",
+                f"vLLM worker {self.base_url} returned {len(choices)} of {num_samples} sequences",
                 backend="nemo_rl", operation="sample",
             )
         rows = []
-        for choice in sorted(body["choices"], key=lambda c: c["index"]):
+        for choice in sorted(choices, key=lambda c: c["index"]):
+            tokens = [int(t) for t in choice["token_ids"]]
             finish = choice["finish_reason"]
             if finish == "abort":
                 raise BackendError(
-                    f"vLLM worker {self.base_url} aborted the generation",
+                    f"vLLM worker {self.base_url} aborted the request (engine pause or shutdown)",
                     backend="nemo_rl", operation="sample",
                 )
-            tokens = list(choice["token_ids"])
-            content = (choice["logprobs"] or {}).get("content") or []
-            logprobs = [_unclamp(entry["logprob"]) for entry in content]
+            logprobs = [_unclamp(e["logprob"]) for e in choice["logprobs"]["content"]]
             if len(logprobs) != len(tokens):
                 raise BackendError(
                     f"vLLM worker {self.base_url} returned {len(tokens)} tokens but "
@@ -108,27 +102,16 @@ class VllmGenerateClient:
                     backend="nemo_rl", operation="sample",
                 )
             rows.append({"tokens": tokens, "logprobs": logprobs, "finish_reason": finish})
-
         prompt_lp: Optional[List[Optional[float]]] = None
         if prompt_logprobs:
             entries = body["prompt_logprobs"]
             if entries is None or len(entries) != len(token_ids):
                 raise BackendError(
                     f"vLLM worker {self.base_url} returned prompt logprobs for "
-                    f"{0 if entries is None else len(entries)} of {len(token_ids)} prompt tokens",
-                    backend="nemo_rl", operation="sample",
+                    f"{None if entries is None else len(entries)} of {len(token_ids)} prompt tokens",
+                    backend="nemo_rl", operation="compute_logprobs",
                 )
-            prompt_lp = [None]
-            for pos in range(1, len(token_ids)):
-                # JSON keys are strings; vLLM always includes the prompt token itself
-                entry = (entries[pos] or {}).get(str(token_ids[pos]))
-                if entry is None:
-                    raise BackendError(
-                        f"vLLM worker {self.base_url} returned no logprob for prompt "
-                        f"position {pos}",
-                        backend="nemo_rl", operation="sample",
-                    )
-                prompt_lp.append(_unclamp(entry["logprob"]))
+            prompt_lp = [None] + [_unclamp(v) for v in entries[1:]]
         return {"rows": rows, "prompt_logprobs": prompt_lp}
 
     async def generate(
