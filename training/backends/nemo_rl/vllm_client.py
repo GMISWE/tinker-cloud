@@ -11,6 +11,7 @@ import math
 from typing import Any, Dict, List, Optional
 
 import httpx
+import orjson
 
 from ..base import BackendError
 
@@ -44,8 +45,12 @@ class VllmGenerateClient:
         cache_salt: str,
     ) -> Dict[str, Any]:
         """The validated API SamplingParams (temperature / top_p / max_tokens
-        always present) as one vLLM SamplingParams. Logprob-only requests skip
-        detokenization (vLLM decodes the -1 sentinel in prompt-logprob tensors,
+        always present) as one vLLM SamplingParams. vLLM detokenizes only when
+        stop STRINGS must be matched: TinkerCloud decodes text from the tokens
+        itself, and a tokenizer on the request makes vLLM's front end decode a
+        string per logprob entry per step that the route then discards
+        (specs/019, 1.6 s per 2048x256 tokens). Logprob-only requests never
+        detokenize (vLLM decodes the -1 sentinel in prompt-logprob tensors,
         BUG-013) and so carry no stop strings; nothing of theirs is generated."""
         temperature = float(sampling_params["temperature"])
         sp: Dict[str, Any] = {
@@ -54,19 +59,22 @@ class VllmGenerateClient:
             "temperature": 0.0 if temperature <= 0.01 else temperature,
             "top_p": float(sampling_params["top_p"]),
             "logprobs": 1,   # 0 means off on this route; each entry carries the sampled token
-            "include_stop_str_in_output": True,
-            "detokenize": not prompt_logprobs,
             "output_kind": OUTPUT_KIND_FINAL_ONLY,
         }
+        stop = sampling_params.get("stop")
+        stop_strings: List[str] = []
+        if stop and not prompt_logprobs:
+            stop_strings = [stop] if isinstance(stop, str) else [s for s in stop if isinstance(s, str)]
+        sp["detokenize"] = bool(stop_strings)
+        if stop_strings:
+            sp["stop"] = stop_strings
+            sp["include_stop_str_in_output"] = True
         if sampling_params.get("top_k") is not None and int(sampling_params["top_k"]) > 0:
             sp["top_k"] = int(sampling_params["top_k"])
         if sampling_params.get("seed") is not None:
             sp["seed"] = int(sampling_params["seed"])   # child i is seeded seed + i by vLLM
         if sampling_params.get("stop_token_ids"):
             sp["stop_token_ids"] = [int(t) for t in sampling_params["stop_token_ids"]]
-        stop = sampling_params.get("stop")
-        if stop and not prompt_logprobs:
-            sp["stop"] = [stop] if isinstance(stop, str) else [s for s in stop if isinstance(s, str)]
         if prompt_logprobs:
             sp["prompt_logprobs"] = 1
         return {"token_ids": list(token_ids), "sampling_params": sp, "cache_salt": cache_salt}
@@ -146,4 +154,6 @@ class VllmGenerateClient:
                 f"vLLM worker {self.base_url} returned {response.status_code}: {response.text[:300]}",
                 backend="nemo_rl", operation="sample",
             )
-        return self.parse_response(response.json(), token_ids, num_samples, prompt_logprobs)
+        # orjson: the body is ~160 bytes per sampled token (vLLM's per-token logprob
+        # objects); stdlib json cost 0.8 s per 2048x256-token step on the event loop.
+        return self.parse_response(orjson.loads(response.content), token_ids, num_samples, prompt_logprobs)

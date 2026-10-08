@@ -81,6 +81,19 @@ def test_one_request_per_sample_with_every_parameter_and_the_version_salt(leader
     assert res["prompt_logprobs"] is None
 
 
+def test_sampling_without_stop_strings_does_not_detokenize(leaders):
+    """vLLM only needs text to match stop strings; TinkerCloud decodes text itself, and a
+    tokenizer on the request makes vLLM decode a string per logprob entry per step."""
+    seen = []
+    res = run(HttpClientPool(transport=vllm_transport(seen)), handle(),
+              sampling_params={"temperature": 1.0, "top_p": 0.9, "max_tokens": 8, "stop": [2, 3],
+                               "stop_token_ids": [2, 3]})
+    sp = seen[0][2]["sampling_params"]
+    assert sp["detokenize"] is False and "stop" not in sp and "include_stop_str_in_output" not in sp
+    assert sp["stop_token_ids"] == [2, 3]
+    assert res["sequences"][0]["text"] == "kl"          # text still decoded, by TinkerCloud
+
+
 def test_stop_reason_follows_finish_reason(leaders):
     res = run(HttpClientPool(transport=vllm_transport([], finish="stop")), handle())
     assert res["sequences"][0]["stop_reason"] == "stop"
