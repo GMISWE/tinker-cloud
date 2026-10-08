@@ -18,6 +18,7 @@ python-multipart
 openai
 tiktoken
 pydantic>=2.0.0
+orjson
 
 # Tinker proto wire format (SDK >= 0.25): protobuf for the schema, zstandard
 # for compressed forward_backward bodies (optional: without it the server
