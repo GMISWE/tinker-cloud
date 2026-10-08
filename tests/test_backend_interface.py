@@ -295,7 +295,53 @@ class TestNemoRLArgumentBuilder:
             parallelism={"tensor_parallel": 2, "pipeline_parallel": 1},
         )
         assert config_dict["policy"]["dtensor_cfg"]["tensor_parallel_size"] == 2
-        assert config_dict["dp_size"] == 4  # 8 / (2 * 1)
+        # The train DP is NeMo RL's to derive (handle.train_dp); the builder
+        # only guarantees the split divides.
+        assert "dp_size" not in config_dict
+        assert config_dict["cluster"]["bundle_ct_per_node_list"] == [8]
+
+    def test_model_parallel_must_divide_train_gpus(self, builder):
+        with pytest.raises(ValueError, match="not divisible"):
+            builder.build_args(
+                base_model="meta-llama/Llama-3.1-8B",
+                num_gpus=4,
+                parallelism={"tensor_parallel": 3},
+            )
+
+    def test_colocated_layout_is_one_cluster(self, builder):
+        config_dict, _ = builder.build_args(base_model="meta-llama/Llama-3.1-8B", num_gpus=4)
+        cluster = config_dict["cluster"]
+        assert cluster["bundle_ct_per_node_list"] == [4]
+        assert cluster["max_colocated_worker_groups"] == 2
+        assert cluster["inference"] is None
+        gen = config_dict["policy"]["generation"]
+        assert gen["colocated"]["enabled"] is True
+        assert gen["colocated"]["resources"] == {"gpus_per_node": None, "num_nodes": None}
+        assert config_dict["num_gpus"] == 4
+
+    def test_split_layout_gives_vllm_its_own_cluster(self):
+        from tinkercloud.training.backends.nemo_rl.builder import NemoRLArgumentBuilder
+        from tinkercloud.training.backends.nemo_rl.config import NemoRLConfig
+        cfg = NemoRLConfig.from_env({"colocated": False, "inference_gpus": 2, "inference_tp": 2}, environ={})
+        config_dict, _ = NemoRLArgumentBuilder(config=cfg).build_args(
+            base_model="meta-llama/Llama-3.1-8B", num_gpus=6, parallelism={"tensor_parallel": 2},
+        )
+        cluster = config_dict["cluster"]
+        assert cluster["bundle_ct_per_node_list"] == [4]            # 6 - 2
+        assert cluster["max_colocated_worker_groups"] == 1
+        assert cluster["inference"] == {"bundle_ct_per_node_list": [2], "num_gpus_per_node": 2}
+        gen = config_dict["policy"]["generation"]
+        assert gen["colocated"] == {"enabled": False, "resources": {"gpus_per_node": 2, "num_nodes": 1}}
+        assert gen["vllm_cfg"]["tensor_parallel_size"] == 2        # inference_tp, not the trainer's
+        assert gen["vllm_cfg"]["pipeline_parallel_size"] == 1
+        assert config_dict["policy"]["dtensor_cfg"]["tensor_parallel_size"] == 2
+
+    def test_split_layout_refuses_when_no_training_gpu_remains(self):
+        from tinkercloud.training.backends.nemo_rl.builder import NemoRLArgumentBuilder
+        from tinkercloud.training.backends.nemo_rl.config import NemoRLConfig
+        cfg = NemoRLConfig.from_env({"colocated": False, "inference_gpus": 2}, environ={})
+        with pytest.raises(ValueError, match="leaves 0 training GPU"):
+            NemoRLArgumentBuilder(config=cfg).build_args(base_model="meta-llama/Llama-3.1-8B", num_gpus=2)
 
     def test_lora_config_mapping(self, builder):
         config_dict, _ = builder.build_args(

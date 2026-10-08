@@ -106,6 +106,18 @@ pip install -q distro pyqwest orjson 'zstandard>=0.24' 'protobuf>=4.21' click \
   chz termcolor blobfile tiktoken cloudpickle rich anyio \
   'httpx[http2]' sympy pylatexenc math-verify
 
+# NeMo RL's non-colocated refit (NEMORL_COLOCATED=0) builds its NCCL group
+# through nccl4py inside the vLLM and policy worker venvs; the base image
+# predates that dependency (RL fork pyproject pins it).
+if [ "$PROFILE" != miles ]; then
+  UV=$(command -v uv || echo /root/.local/bin/uv)
+  for w in nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker \
+           nemo_rl.models.policy.workers.dtensor_policy_worker_v2.DTensorPolicyWorkerV2; do
+    V=/opt/ray_venvs/$w/bin/python
+    [ -x "$V" ] && "$UV" pip install --python "$V" -q 'nccl4py==0.1.1'
+  done
+fi
+
 RUNTIME=$([ "$PROFILE" = miles ] && echo miles || echo nemo_rl)
 python3 -c "import tinker, tinker_cookbook, $RUNTIME; print('imports OK')"
 PYTHONPATH=/app python3 -c 'import training; print("training OK")'

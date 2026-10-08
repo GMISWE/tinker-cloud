@@ -133,10 +133,21 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
                     unsupported,
                 )
 
+        # specs/021: with colocated=False vLLM owns `inference_gpus` of the
+        # client's num_gpus and the trainer gets the rest; the train DP is
+        # NeMo RL's to compute from the train cluster (handle.train_dp), not
+        # this builder's, so one number governs sharding and padding.
+        inference_gpus = self.cfg.inference_gpu_count
+        train_gpus = num_gpus - inference_gpus
+        if train_gpus <= 0:
+            raise ValueError(
+                f"num_gpus={num_gpus} leaves {train_gpus} training GPU(s) after "
+                f"inference_gpus={inference_gpus} (NEMORL_INFERENCE_GPUS)"
+            )
+
         tp_size = 1
         pp_size = 1
         cp_size = 1
-        dp_size = num_gpus  # default: all GPUs for data parallelism
         if parallelism:
             # ParallelismConfig (models/requests.py) sends *_size keys; the
             # bare spellings are kept for backward compat. Reading only the
@@ -163,8 +174,12 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
                     cp_size,
                 )
                 cp_size = 1
-            model_parallel = tp_size * pp_size * cp_size
-            dp_size = max(1, num_gpus // model_parallel)
+        model_parallel = tp_size * pp_size * cp_size
+        if train_gpus % model_parallel != 0:
+            raise ValueError(
+                f"{train_gpus} training GPU(s) not divisible by "
+                f"TP*PP*CP={model_parallel} (tp={tp_size}, pp={pp_size}, cp={cp_size})"
+            )
 
         # GBS = samples per train() call; grad-accum steps = GBS / (MBS * DP)
         # bridge the gap. MBS=1 (the old default) is a measured perf bug at
@@ -237,7 +252,7 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
             "sequence_packing": {
                 "enabled": False,
             },
-            # Generation config (colocated by default)
+            # Generation config (colocated by default; specs/021 split otherwise)
             "generation": {
                 "backend": "vllm",
                 "max_new_tokens": max_seq_len,
@@ -253,8 +268,8 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
                     "expose_http_server": True,
                     "precision": "bfloat16",
                     "kv_cache_dtype": "auto",
-                    "tensor_parallel_size": tp_size,
-                    "pipeline_parallel_size": pp_size,
+                    "tensor_parallel_size": tp_size if self.cfg.colocated else self.cfg.inference_tp,
+                    "pipeline_parallel_size": pp_size if self.cfg.colocated else 1,
                     "expert_parallel_size": 1,
                     "gpu_memory_utilization": 0.6,
                     "max_model_len": max_seq_len,
@@ -267,7 +282,11 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
                 },
                 "vllm_kwargs": {},
                 "colocated": {
-                    "enabled": True,
+                    "enabled": self.cfg.colocated,
+                    "resources": {
+                        "gpus_per_node": inference_gpus or None,
+                        "num_nodes": 1 if inference_gpus else None,
+                    },
                 },
             },
             # Optimizer. Betas/eps match the Tinker AdamParams contract defaults
@@ -441,10 +460,16 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
                 loss_fn_config["ratio_clip_min"] = rl_config["eps_clip"]
                 loss_fn_config["ratio_clip_max"] = rl_config["eps_clip"]
 
+        # One Ray virtual cluster for the trainer; a second for vLLM when the
+        # GPUs are split (NeMo RL's non-colocated layout, grpo.py setup).
         cluster_config = {
-            "bundle_ct_per_node_list": [num_gpus],
-            "num_gpus_per_node": num_gpus,
-            "max_colocated_worker_groups": 2,  # policy + generation
+            "bundle_ct_per_node_list": [train_gpus],
+            "num_gpus_per_node": train_gpus,
+            "max_colocated_worker_groups": 2 if self.cfg.colocated else 1,
+            "inference": (
+                {"bundle_ct_per_node_list": [inference_gpus], "num_gpus_per_node": inference_gpus}
+                if inference_gpus else None
+            ),
         }
 
         # Checkpointing config (passed to Policy.save_checkpoint)
@@ -460,7 +485,7 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
             "loss_fn": loss_fn_config,
             "cluster": cluster_config,
             "checkpointing": checkpointing_config,
-            "dp_size": dp_size,
+            "num_gpus": num_gpus,
             "debug_train_only": debug_train_only,
             "wandb_config": wandb_config,
             "rlve_config": rlve_config,
@@ -470,8 +495,9 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
             _deep_merge(config_dict, self.overrides)
 
         logger.info(
-            "NeMo RL config built: model=%s, num_gpus=%d, tp=%d, dp=%d, gbs=%d, mbs=%d",
-            base_model, num_gpus, tp_size, dp_size,
+            "NeMo RL config built: model=%s, num_gpus=%d (train %d, inference %d), "
+            "tp=%d, gbs=%d, mbs=%d",
+            base_model, num_gpus, train_gpus, inference_gpus, tp_size,
             train_global_batch_size, train_micro_batch_size,
         )
 
