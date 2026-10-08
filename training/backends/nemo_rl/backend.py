@@ -50,7 +50,9 @@ class NemoRLHandle(BackendHandle):
 
     policy: Any = None               # nemo_rl.models.policy.lm_policy.Policy
     policy_generation: Any = None    # SGLangGeneration or Policy (if colocated)
-    cluster: Any = None              # RayVirtualCluster
+    cluster: Any = None              # RayVirtualCluster the trainer runs on
+    inference_cluster: Any = None    # RayVirtualCluster vLLM runs on when not colocated (specs/021)
+    train_dp: int = 1                # trainer data-parallel size, read back from the Policy
     config: Dict = field(default_factory=dict)   # Full config dict
     tokenizer: Any = None            # HuggingFace tokenizer
     loss_fn: Any = None              # TinkerSumPGLoss instance (RL)
@@ -176,13 +178,28 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             # with a foreign adapter staged into the layout that loader sniffs.
             init_weights_path = _stage_foreign_adapter(str(resume_from)) if resume_from else None
 
-            policy, policy_generation, cluster, tokenizer, loss_fn = await asyncio.to_thread(
+            colocated_inference = self.config.colocated and not debug_train_only
+            components = await asyncio.to_thread(
                 _init_nemo_rl_components,
                 config_dict=config_dict,
                 checkpoint_path=init_weights_path,
                 debug_train_only=debug_train_only,
+                colocated_inference=colocated_inference,
                 refit_memory_ratio=self.config.refit_buffer_memory_ratio,
             )
+            policy, policy_generation, cluster, inference_cluster, tokenizer, loss_fn, train_dp = components
+            inference_endpoints = _worker_server_roots(policy_generation)
+            if not colocated_inference and policy_generation is not None:
+                # The leader count is the contract the sampler relies on (D13):
+                # one HTTP server per TP group of the inference GPUs.
+                expected = self.config.inference_gpu_count // self.config.inference_tp
+                if len(inference_endpoints) != expected:
+                    raise BackendError(
+                        f"{len(inference_endpoints)} vLLM leader(s) reported, expected "
+                        f"{expected} (inference_gpus={self.config.inference_gpus}, "
+                        f"inference_tp={self.config.inference_tp})",
+                        backend="nemo_rl", operation="create_model",
+                    )
 
             handle = NemoRLHandle(
                 model_id=model_id,
@@ -192,11 +209,13 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                 policy=policy,
                 policy_generation=policy_generation,
                 cluster=cluster,
+                inference_cluster=inference_cluster,
+                train_dp=train_dp,
                 config=config_dict,
                 tokenizer=tokenizer,
                 loss_fn=loss_fn,
                 hf_path=hf_path,
-                colocated_inference=not debug_train_only,
+                colocated_inference=colocated_inference,
                 refit_memory_ratio=self.config.refit_buffer_memory_ratio,
                 rlve_config=rlve_config,
                 wandb_config=wandb_config,
@@ -204,7 +223,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                 training_run_id=model_id,
                 debug_train_only=debug_train_only,
                 staleness_k=staleness_k,
-                inference_endpoints=_worker_server_roots(policy_generation),
+                inference_endpoints=inference_endpoints,
             )
             if staleness_k > 0:
                 logger.info(
@@ -256,7 +275,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             batched_data = self.converter.forward_to_backend(data, handle.config)
 
             # Pad for dp_size alignment (get_logprobs uses shard_by_batch_size)
-            dp_size = handle.config["dp_size"]
+            dp_size = handle.train_dp
             mbs = handle.config["policy"]["train_micro_batch_size"]
             batched_data = await asyncio.to_thread(
                 _maybe_pad_batch, batched_data, dp_size, mbs, handle.image_preprocessor,
@@ -496,7 +515,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             # Pad partial batch if needed — policy.train() → shard_by_batch_size()
             # asserts batch_size % dp_size == 0, so a partial batch will crash.
             # Use NeMo RL's maybe_pad_last_batch to pad with sample_mask=0.
-            dp_size = handle.config["dp_size"]
+            dp_size = handle.train_dp
             mbs = handle.config["policy"]["train_micro_batch_size"]
             all_data = await asyncio.to_thread(
                 _maybe_pad_batch, all_data, dp_size, mbs, handle.image_preprocessor,
@@ -600,7 +619,8 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                                 handle.refit_memory_ratio,
                             )
                             handle.generation_synced_version = handle.weight_version
-                            handle.training_resident = False  # refit offloaded the policy
+                            if handle.colocated_inference:
+                                handle.training_resident = False  # refit offloaded the policy
                         else:
                             logger.info(
                                 "ver(S): refit deferred for %s — engine stays at v%d, "
@@ -639,7 +659,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             _cp = (_policy["megatron_cfg"]["context_parallel_size"]
                    if _policy["megatron_cfg"]["enabled"]
                    else _policy["dtensor_cfg"]["context_parallel_size"])
-            _scale = handle.config["dp_size"] * _cp
+            _scale = handle.train_dp * _cp
             if isinstance(train_result, dict) and train_result.get("loss") is not None and _scale > 1:
                 train_result["loss"] = train_result["loss"] / _scale
             result = self.converter.backend_to_forward_backward_result(
@@ -697,7 +717,8 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                         handle.colocated_inference,
                         handle.refit_memory_ratio,
                     )
-                    handle.training_resident = False  # refit offloaded the policy
+                    if handle.colocated_inference:
+                        handle.training_resident = False  # refit offloaded the policy
                     async with handle._generation_state_lock:
                         handle.generation_state = "generation_ready"
         except Exception as e:
@@ -788,7 +809,8 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                         handle.colocated_inference,
                         handle.refit_memory_ratio,
                     )
-                    handle.training_resident = False  # the refit offloaded the policy
+                    if handle.colocated_inference:
+                        handle.training_resident = False  # the refit offloaded the policy
                     async with handle._generation_state_lock:
                         handle.generation_state = "generation_ready"
             else:
@@ -832,6 +854,11 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                     # which was shut down just above; log rather than hide it.
                     logger.warning("delete_model: generation shutdown failed for %s", handle.model_id, exc_info=True)
 
+            # Release the placement groups now; a named group left to the
+            # garbage collector blocks the next create_model (BUG-014).
+            for cluster in (handle.inference_cluster, handle.cluster):
+                if cluster is not None:
+                    await asyncio.to_thread(cluster.shutdown)
 
             logger.info("NeMo RL model %s deleted", handle.model_id)
 
@@ -961,7 +988,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             "token_mask": token_mask,
             "sample_mask": torch.ones(batch_size, dtype=torch.float32),
         })
-        dp_size = h.config["dp_size"]
+        dp_size = h.train_dp
         mbs = h.config["policy"]["train_micro_batch_size"]
         data = await asyncio.to_thread(_maybe_pad_batch, data, dp_size, mbs, None)
 
@@ -1069,7 +1096,8 @@ async def _ensure_generation_ready(handle: NemoRLHandle) -> None:
                 handle.refit_memory_ratio,
             )
             handle.generation_synced_version = handle.weight_version
-        handle.training_resident = False  # the policy was offloaded either way
+        if handle.colocated_inference:
+            handle.training_resident = False  # the policy was offloaded either way
 
         async with handle._generation_state_lock:
             handle.generation_state = "generation_ready"
@@ -1164,15 +1192,18 @@ def _init_nemo_rl_components(
     config_dict: Dict[str, Any],
     checkpoint_path: Optional[str],
     debug_train_only: bool,
+    colocated_inference: bool,
     refit_memory_ratio: float = 0.3,
 ):
     """
-    Initialize NeMo RL Policy, VllmGeneration, cluster, tokenizer, and loss fn.
+    Initialize NeMo RL Policy, VllmGeneration, clusters, tokenizer, and loss fn.
 
-    In colocated mode (default), VllmGeneration must initialize FIRST to allocate
-    GPU memory for the vLLM engine, then Policy uses the remaining memory.
+    Colocated: one cluster, VllmGeneration first (it claims GPU memory, then
+    sleeps) and Policy on what is left. Split (specs/021): a train cluster
+    and an inference cluster joined by one NCCL group for the refit.
 
-    This is a blocking function — must be called via asyncio.to_thread().
+    Returns (policy, policy_generation, train_cluster, inference_cluster,
+    tokenizer, loss_fn, train_dp). Blocking — call via asyncio.to_thread().
     """
     import ray
     from nemo_rl.distributed.virtual_cluster import RayVirtualCluster
@@ -1187,11 +1218,31 @@ def _init_nemo_rl_components(
     if not ray.is_initialized():
         ray.init(ignore_reinit_error=True)
 
+    # Fail here with both numbers rather than at a placement-group timeout.
+    # Ray's resource dict omits "GPU" on a GPU-less cluster, a real state.
+    num_gpus = config_dict["num_gpus"]
+    free_gpus = ray.available_resources().get("GPU", 0.0)
+    if free_gpus < num_gpus:
+        raise RuntimeError(
+            f"create_model needs {num_gpus} GPU(s) but Ray has {free_gpus:g} free "
+            f"of {ray.cluster_resources().get('GPU', 0.0):g}"
+        )
+
     cluster = RayVirtualCluster(
         bundle_ct_per_node_list=cluster_config["bundle_ct_per_node_list"],
-        num_gpus_per_node=cluster_config.get("num_gpus_per_node", 8),
-        max_colocated_worker_groups=cluster_config.get("max_colocated_worker_groups", 2),
+        num_gpus_per_node=cluster_config["num_gpus_per_node"],
+        max_colocated_worker_groups=cluster_config["max_colocated_worker_groups"],
+        name="tinker_train",
     )
+    inference_cluster = None
+    inference_cfg = cluster_config["inference"]
+    if inference_cfg is not None and not debug_train_only:
+        inference_cluster = RayVirtualCluster(
+            bundle_ct_per_node_list=inference_cfg["bundle_ct_per_node_list"],
+            num_gpus_per_node=inference_cfg["num_gpus_per_node"],
+            max_colocated_worker_groups=1,
+            name="tinker_infer",
+        )
 
     # Load tokenizer (use NeMo RL's utility which sets pad_token_id if absent)
     model_name = policy_config["model_name"]
@@ -1225,13 +1276,17 @@ def _init_nemo_rl_components(
             # stop_strings — do NOT override it manually.
             generation_config = configure_generation_config(generation_config, tokenizer)
 
-            logger.info("Initializing VllmGeneration (colocated mode)...")
+            logger.info(
+                "Initializing VllmGeneration (%s)...",
+                "colocated" if colocated_inference else "own GPUs",
+            )
             policy_generation = VllmGeneration(
-                cluster=cluster,
+                cluster=cluster if colocated_inference else inference_cluster,
                 config=generation_config,
                 name_prefix="tinker_vllm",
             )
-            policy_generation.finish_generation()
+            if colocated_inference:
+                policy_generation.finish_generation()
             logger.info("VllmGeneration initialized successfully")
 
     # Create Policy (after vLLM in colocated mode — uses remaining GPU memory)
@@ -1246,26 +1301,43 @@ def _init_nemo_rl_components(
         init_reference_model=not debug_train_only,
     )
 
+    # The one number sharding and padding agree on (specs/021).
+    train_dp = policy.sharding_annotations.get_axis_size("data_parallel")
+
     # Prepare refit info — needed for weight sync between policy and generation
     if policy_generation is not None:
+        if not colocated_inference:
+            if inference_cluster is None:
+                raise RuntimeError("split layout requested but the config carries no inference cluster")
+            # One NCCL group over train ranks then inference ranks; both sides
+            # join together (grpo.py setup order).
+            ip, port = cluster.get_master_address_and_port()
+            train_ws = cluster.world_size()
+            world = train_ws + inference_cluster.world_size()
+            logger.info("Initializing refit collective at %s:%d (world %d, train %d)", ip, port, world, train_ws)
+            ray.get(
+                policy.init_collective(ip, port, world, train_world_size=train_ws)
+                + policy_generation.init_collective(ip, port, world, train_world_size=train_ws)
+            )
         state_dict_info = policy.prepare_refit_info()
         policy_generation.prepare_refit_info(state_dict_info)
         logger.info("Refit info prepared for weight sync")
 
         # Do initial weight sync so generation has the correct weights
         logger.info("Performing initial weight sync (refit)...")
-        _refit_policy_generation(policy, policy_generation, colocated_inference=True,
+        _refit_policy_generation(policy, policy_generation, colocated_inference=colocated_inference,
                                  memory_ratio=refit_memory_ratio)
         logger.info("Initial weight sync complete")
 
     logger.info(
         "NeMo RL components initialized: model=%s, debug_train_only=%s, "
-        "generation=%s",
+        "generation=%s, train_dp=%d",
         model_name, debug_train_only,
         type(policy_generation).__name__ if policy_generation else "None",
+        train_dp,
     )
 
-    return policy, policy_generation, cluster, tokenizer, loss_fn
+    return policy, policy_generation, cluster, inference_cluster, tokenizer, loss_fn, train_dp
 
 
 def _concatenate_batches(data_buffer: List) -> Any:
