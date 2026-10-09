@@ -1,7 +1,10 @@
 """NeMo RL sampling over the workers' HTTP servers (specs/019): one
 /inference/v1/generate request per sample, rows in choice order, the cache
 salt keyed on the served weight version, round-robin over DP leaders, and
-engine faults surfacing as BackendError naming the worker."""
+engine faults surfacing as BackendError naming the worker. Top-k: the request
+carries topk_sample_logprobs / topk_prompt_logprobs beside vLLM's logprob
+budget, and the route's top_logprobs / prompt_top_logprobs come back as
+(token_id, logprob) rows best first."""
 import asyncio
 import json
 import math
@@ -13,6 +16,7 @@ from tinkercloud.training.backends.base import BackendError
 from tinkercloud.training.backends.http_pool import HttpClientPool
 from tinkercloud.training.backends.nemo_rl.backend import NemoRLHandle, _worker_server_roots
 from tinkercloud.training.backends.nemo_rl.generation import sample_over_http
+from tinkercloud.training.backends.nemo_rl.vllm_client import VllmGenerateClient
 from tinkercloud.training.core import routing
 
 
@@ -218,3 +222,78 @@ def test_split_refit_broadcasts_while_every_leader_receives_over_http(leaders, m
     h.http_pool = HttpClientPool(transport=control_transport([], ok=False))
     with pytest.raises(RuntimeError, match="failed to load"):
         asyncio.run(nb._refit(h))
+
+
+# ---------------------------------------------------------------- top-k logprobs
+
+def _topk_body(k_sample, k_prompt, prompt_len, n=1):
+    """A /tinkercloud/v1/generate answer at top-k: top_logprobs per sampled entry
+    and prompt_top_logprobs per prompt position, best first."""
+    def top(k, base):
+        return [{"token": 100 + base + j, "logprob": -0.1 * (j + 1) - base} for j in range(k)]
+    choices = [{"index": i, "finish_reason": "length", "token_ids": [10 + i, 11],
+                "logprobs": {"content": [{"logprob": -0.5, "top_logprobs": top(k_sample, 0)},
+                                         {"logprob": -9999.0, "top_logprobs": top(k_sample, 1)}]}}
+               for i in range(n)]
+    return {"request_id": "r", "choices": choices,
+            "prompt_logprobs": [None] + [-1.0 - i for i in range(prompt_len - 1)],
+            "prompt_top_logprobs": [None] + [top(k_prompt, i + 1) for i in range(prompt_len - 1)]}
+
+
+def test_topk_request_carries_the_counts_and_the_vllm_logprob_budget():
+    client = VllmGenerateClient("http://n1:8001", None)
+    body = client.build_request([5, 6, 7], {"temperature": 1.0, "top_p": 1.0, "max_tokens": 2, "stop": ["x"]},
+                                2, False, "m@3", topk_sample_logprobs=2, topk_prompt_logprobs=3)
+    assert body["topk_sample_logprobs"] == 2 and body["topk_prompt_logprobs"] == 3
+    sp = body["sampling_params"]
+    assert sp["logprobs"] == 2 and sp["prompt_logprobs"] == 3
+    assert "stop" not in sp and sp["detokenize"] is False       # prompt scoring: no stop strings
+    flat = client.build_request([5, 6, 7], {"temperature": 1.0, "top_p": 1.0, "max_tokens": 2}, 1, True, "m@3")
+    assert flat["sampling_params"]["logprobs"] == 0 and flat["sampling_params"]["prompt_logprobs"] == 1
+    assert flat["topk_sample_logprobs"] == 0 and flat["topk_prompt_logprobs"] == 0
+
+
+def test_topk_response_parses_rows_best_first_with_the_floor_unclamped():
+    client = VllmGenerateClient("http://n1:8001", None)
+    body = _topk_body(2, 3, prompt_len=3)
+    body["choices"][0]["logprobs"]["content"][1]["top_logprobs"][1]["logprob"] = -9999.0
+    out = client.parse_response(body, [5, 6, 7], 1, True, topk_sample_logprobs=2, topk_prompt_logprobs=3)
+    row = out["rows"][0]
+    assert row["logprobs"] == [-0.5, -math.inf]
+    assert row["topk_logprobs"] == [[(100, -0.1), (101, -0.2)], [(101, -1.1), (102, -math.inf)]]
+    assert out["prompt_logprobs"] == [None, -1.0, -2.0]
+    assert out["topk_prompt_logprobs"] == [None, [(101, -1.1), (102, -1.2), (103, -1.3)],
+                                           [(102, -2.1), (103, -2.2), (104, -2.3)]]
+    plain = client.parse_response(_topk_body(0, 0, prompt_len=3), [5, 6, 7], 1, True)
+    assert "topk_logprobs" not in plain["rows"][0] and plain["topk_prompt_logprobs"] is None
+
+
+def test_topk_from_a_route_that_predates_it_names_the_worker():
+    client = VllmGenerateClient("http://n1:8001", None)
+    old = {"request_id": "r", "prompt_logprobs": [None, -1.0, -2.0],
+           "choices": [{"index": 0, "finish_reason": "length", "token_ids": [10, 11],
+                        "logprobs": {"content": [{"logprob": -0.5}, {"logprob": -0.6}]}}]}
+    with pytest.raises(BackendError, match="n1:8001 returned no top_logprobs for topk_sample_logprobs=2"):
+        client.parse_response(old, [5, 6, 7], 1, False, topk_sample_logprobs=2)
+    with pytest.raises(BackendError, match="n1:8001 returned prompt top-k for None of 3 prompt tokens"):
+        client.parse_response(old, [5, 6, 7], 1, True, topk_prompt_logprobs=2)
+    short = {**old, "prompt_top_logprobs": [None, [{"token": 1, "logprob": -1.0}]]}
+    with pytest.raises(BackendError, match="prompt top-k for 2 of 3 prompt tokens"):
+        client.parse_response(short, [5, 6, 7], 1, True, topk_prompt_logprobs=1)
+
+
+def test_topk_reaches_the_result_dict_over_http(leaders):
+    seen = []
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.read())
+        seen.append(body)
+        return httpx.Response(200, json=_topk_body(body["topk_sample_logprobs"], body["topk_prompt_logprobs"],
+                                                   len(body["token_ids"]), n=body["sampling_params"]["n"]))
+    res = run(HttpClientPool(transport=httpx.MockTransport(handler)), handle(), num_samples=2, prompt_logprobs=True,
+              topk_sample_logprobs=2, topk_prompt_logprobs=1)
+    assert seen[0]["sampling_params"]["logprobs"] == 2 and seen[0]["sampling_params"]["prompt_logprobs"] == 1
+    assert [s["topk_sample_logprobs"] for s in res["sequences"]] == [[[(100, -0.1), (101, -0.2)], [(101, -1.1), (102, -1.2)]]] * 2
+    assert res["topk_prompt_logprobs"] == [None, [(101, -1.1)], [(102, -2.1)]]
+    assert res["prompt_logprobs"] == [None, -1.0, -2.0]
+    plain = run(HttpClientPool(transport=httpx.MockTransport(handler)), handle())
+    assert "topk_sample_logprobs" not in plain["sequences"][0] and "topk_prompt_logprobs" not in plain

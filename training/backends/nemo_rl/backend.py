@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from ..base import BackendError, BackendHandle, TrainingBackend
+from ..base import BackendError, BackendHandle, SampleRequestError, TrainingBackend
 from ...utils.model_config import read_raw_hf_config
 from ..objectives import classification_spec
 from ..http_pool import HttpClientPool
@@ -191,6 +191,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                 backend_type="nemo_rl",
                 # vLLM max_model_len == policy max_total_sequence_length (GAP-003)
                 context_length=(config_dict.get("policy") or {}).get("max_total_sequence_length"),
+                max_topk_logprobs=self.config.vllm_max_logprobs,
                 policy=policy,
                 policy_generation=policy_generation,
                 cluster=cluster,
@@ -827,6 +828,8 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         sampling_params: Optional[Dict[str, Any]] = None,
         prompt_logprobs: bool = False,
         pinned_version: Optional[int] = None,
+        topk_sample_logprobs: int = 0,
+        topk_prompt_logprobs: int = 0,
     ) -> Dict[str, Any]:
         """Sample over the vLLM workers' HTTP servers, one request per call.
 
@@ -845,6 +848,11 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         # BUG-015 routing: version-pinned logprob reads
         if prompt_logprobs and pinned_version is not None and pinned_version != handle.weight_version:
             if pinned_version == 0:
+                if topk_prompt_logprobs or topk_sample_logprobs:
+                    raise SampleRequestError(
+                        "top-k logprobs are not served from the frozen reference model (v0 sampler)",
+                        backend="nemo_rl",
+                    )
                 return await self._reference_prompt_logprobs(handle, prompt_tokens)
             logger.warning(
                 "[%s] sampler pinned at v%s but live weights at v%s — serving from "
@@ -868,6 +876,8 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             result = await sample_over_http(
                 handle, self._http_pool, request_id, prompt_tokens, num_samples,
                 sampling_params or {}, prompt_logprobs,
+                topk_sample_logprobs=topk_sample_logprobs,
+                topk_prompt_logprobs=topk_prompt_logprobs,
             )
         latest_v = handle.weight_version
         # ver(S) monitor (A4): colocated, certify the served version against

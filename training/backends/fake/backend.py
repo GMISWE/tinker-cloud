@@ -6,6 +6,8 @@ can be exercised by the real `tinker` SDK in CI. Every observable is a pure
 function of the inputs:
 
 - logprobs[i] = -(token_i % 7) / 7, one per model_input token
+- top-k at a position with token t: rank 0 is t itself at its logprob, rank j
+  is token (t * 7 + j) % 1000 at logprob - j / 2 (see topk_for)
 - grad_norm   = number of optimizer steps taken on the model (1-based)
 - sample      = tokens derived from (prompt, seed, sample index); the same
                 seed always yields the same tokens
@@ -22,7 +24,7 @@ import os
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..base import BackendError, BackendHandle, TrainingBackend
 from ...checkpoints.interchange import ADAPTER_CONFIG_FILE, ADAPTER_WEIGHTS_FILE, hf_adapter_dir
@@ -71,6 +73,15 @@ def logprobs_for(tokens: List[int]) -> List[float]:
     return [-(t % 7) / 7.0 for t in tokens]
 
 
+FAKE_MAX_TOPK = 20   # the engine cap the service checks (handle.max_topk_logprobs)
+
+
+def topk_for(tokens: List[int], k: int) -> List[List[Tuple[int, float]]]:
+    """k (token_id, logprob) rows best first; the position's own token leads."""
+    return [[(t if j == 0 else (t * 7 + j) % 1000, lp - j / 2.0) for j in range(k)]
+            for t, lp in zip(tokens, logprobs_for(tokens))]
+
+
 class FakeBackend(TrainingBackend[FakeHandle]):
     needs_ray = False
     SUPPORTED_LOSS_FNS = frozenset(LOSS_FNS)
@@ -112,7 +123,8 @@ class FakeBackend(TrainingBackend[FakeHandle]):
                 backend="fake", operation="create_model",
             )
         h = FakeHandle(model_id=model_id, backend_type="fake", base_model=base_model,
-                       lora_config=lora_config, hf_path=base_model, context_length=context_length)
+                       lora_config=lora_config, hf_path=base_model, context_length=context_length,
+                       max_topk_logprobs=FAKE_MAX_TOPK)
         self._models[model_id] = h
         self._trace("create_model", model_id, base_model=base_model, lora_config=lora_config,
                     native_root=native_root)
@@ -190,7 +202,7 @@ class FakeBackend(TrainingBackend[FakeHandle]):
     async def sample(
         self, handle: FakeHandle, request_id: str, prompt_tokens: List[int], num_samples: int,
         sampling_params: Optional[Dict[str, Any]] = None, prompt_logprobs: bool = False,
-        pinned_version: Optional[int] = None,
+        pinned_version: Optional[int] = None, topk_sample_logprobs: int = 0, topk_prompt_logprobs: int = 0,
     ) -> Dict[str, Any]:
         h = self._handle(handle, "sample")
         params = dict(sampling_params or {})
@@ -199,7 +211,8 @@ class FakeBackend(TrainingBackend[FakeHandle]):
         stop_ids = set(params.get("stop_token_ids") or [])
         stop_strs = [str(x) for x in (params.get("stop") or [])]
         self._trace("sample", h.model_id, prompt_len=len(prompt_tokens), num_samples=num_samples,
-                    sampling_params=params, prompt_logprobs=prompt_logprobs, pinned_version=pinned_version)
+                    sampling_params=params, prompt_logprobs=prompt_logprobs, pinned_version=pinned_version,
+                    topk_sample_logprobs=topk_sample_logprobs, topk_prompt_logprobs=topk_prompt_logprobs)
         sequences = []
         for i in range(num_samples):
             rng = random.Random((seed if seed is not None else sum(prompt_tokens)) * 1000 + i)
@@ -212,14 +225,19 @@ class FakeBackend(TrainingBackend[FakeHandle]):
                 if t in stop_ids or (stop_strs and any(ss in decode(toks) for ss in stop_strs)):
                     stop_reason = "stop"
                     break
-            sequences.append({"tokens": toks, "logprobs": logprobs_for(toks),
-                              "text": decode(toks), "stop_reason": stop_reason})
+            seq: Dict[str, Any] = {"tokens": toks, "logprobs": logprobs_for(toks),
+                                   "text": decode(toks), "stop_reason": stop_reason}
+            if topk_sample_logprobs:
+                seq["topk_sample_logprobs"] = topk_for(toks, topk_sample_logprobs)
+            sequences.append(seq)
         out: Dict[str, Any] = {
             "sequences": sequences,
             "prompt_logprobs": ([None] + logprobs_for(prompt_tokens)[1:]) if prompt_logprobs else None,
             "weight_version": h.weight_version,
             "latest_weight_version": h.weight_version,
         }
+        if topk_prompt_logprobs:
+            out["topk_prompt_logprobs"] = [None] + topk_for(prompt_tokens, topk_prompt_logprobs)[1:]
         return out
 
     # --- checkpoints -----------------------------------------------------

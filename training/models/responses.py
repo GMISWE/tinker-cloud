@@ -4,7 +4,7 @@ Response models for the training API.
 This module defines Pydantic models for all API response payloads,
 providing structured responses and documentation.
 """
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -184,6 +184,10 @@ class SamplingSequence(_Result):
     tokens: List[int] = Field(..., description="Generated token IDs")
     logprobs: Optional[List[float]] = Field(default=None, description="Log probabilities")
     text: Optional[str] = Field(default=None, description="Decoded text")
+    # One row per sampled token: up to k (token_id, logprob) best first, or None.
+    topk_sample_logprobs: Optional[List[Optional[List[Tuple[int, float]]]]] = Field(
+        default=None, description="Top-k logprobs per sampled token"
+    )
 
 
 class SampleResult(_Result):
@@ -194,6 +198,11 @@ class SampleResult(_Result):
     prompt_logprobs: Optional[List[Optional[float]]] = Field(
         default=None,
         description="Prompt log probabilities (None for first token)"
+    )
+    # One row per prompt token: up to k (token_id, logprob) best first, or None
+    # (position 0, and positions before a prompt_logprobs_last_n suffix).
+    topk_prompt_logprobs: Optional[List[Optional[List[Tuple[int, float]]]]] = Field(
+        default=None, description="Top-k logprobs per prompt token"
     )
     # ver(S) certificate (A4, specs/012): version actually served vs latest.
     # None on backends that don't stamp versions.

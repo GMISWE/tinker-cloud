@@ -16,13 +16,17 @@ logger = logging.getLogger(__name__)
 
 
 
-def _check_sample_request(handle, prompt_tokens, sampling_params) -> None:
+def _check_sample_request(
+    handle, prompt_tokens, sampling_params, topk_sample_logprobs: int = 0, topk_prompt_logprobs: int = 0,
+) -> None:
     """Typed rejection before the engine sees the request.
 
     `max_tokens` must be stated (pydantic already requires it when
     sampling_params is present; this covers an absent sampling_params), and
     prompt + max_tokens must fit the engine context the backend recorded on
-    its handle at create_model. Unknown context (None) is not checked.
+    its handle at create_model. Unknown context (None) is not checked. A
+    top-k above the engine's per-position cap (handle.max_topk_logprobs) is
+    refused the same way; an unknown cap (None) is not checked.
     """
     from ..backends.base import SampleRequestError
 
@@ -37,6 +41,26 @@ def _check_sample_request(handle, prompt_tokens, sampling_params) -> None:
             f"{len(prompt_tokens) + int(max_tokens)} exceeds the model context {ctx}",
             backend=backend,
         )
+    cap = handle.max_topk_logprobs
+    if cap is not None:
+        for name, k in (("topk_sample_logprobs", topk_sample_logprobs),
+                        ("topk_prompt_logprobs", topk_prompt_logprobs)):
+            if k > cap:
+                raise SampleRequestError(f"{name} {k} exceeds the engine cap {cap}", backend=backend)
+
+
+def _mask_prompt_prefix(result: Dict[str, Any], prompt_len: int, last_n: Optional[int]) -> None:
+    """prompt_logprobs_last_n: only the last N prompt positions keep their
+    scores; every earlier entry of prompt_logprobs and topk_prompt_logprobs is
+    None (position 0 already is). Applied here so every backend honors it; the
+    router has checked 1 <= N <= prompt_len - 1."""
+    if last_n is None:
+        return
+    cut = prompt_len - last_n
+    for key in ("prompt_logprobs", "topk_prompt_logprobs"):
+        rows = result.get(key)
+        if rows is not None:
+            result[key] = [None] * cut + list(rows[cut:])
 
 class SamplingService:
     """Service for model sampling via the backend's inference engine."""
@@ -71,6 +95,9 @@ class SamplingService:
         training_clients: Dict[str, Dict[str, Any]],
         pinned_version: Optional[int] = None,
         model_id: Optional[str] = None,
+        topk_sample_logprobs: int = 0,
+        topk_prompt_logprobs: int = 0,
+        prompt_logprobs_last_n: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Async sampling for a single prompt.
@@ -78,18 +105,21 @@ class SamplingService:
         `pinned_version` (BUG-015): weight version the requesting sampler was
         created at; backends route pinned logprob reads off the live engine.
         `model_id`: the sampler's owning model (multi-tenant routing).
+        `topk_*` = k > 0 ask the backend for the k most likely tokens per
+        position; `prompt_logprobs_last_n` masks the prompt scores before the
+        last N positions to None (the router validated it).
 
         Returns:
-            Dict with sequences and optional prompt_logprobs
+            Dict with sequences and optional prompt_logprobs / topk_prompt_logprobs
 
         Raises:
             RuntimeError: If no model with RolloutManager found
             BackendError: If the inference engine is unavailable
         """
         handle = self._resolve_handle(training_clients, model_id)
-        _check_sample_request(handle, prompt_tokens, sampling_params)
+        _check_sample_request(handle, prompt_tokens, sampling_params, topk_sample_logprobs, topk_prompt_logprobs)
         logger.info(f"[{request_id}] Async sampling for {handle.model_id}")
-        return await self.backend.sample(
+        result = await self.backend.sample(
             handle=handle,
             request_id=request_id,
             prompt_tokens=prompt_tokens,
@@ -97,7 +127,11 @@ class SamplingService:
             sampling_params=sampling_params,
             prompt_logprobs=prompt_logprobs,
             pinned_version=pinned_version,
+            topk_sample_logprobs=topk_sample_logprobs,
+            topk_prompt_logprobs=topk_prompt_logprobs,
         )
+        _mask_prompt_prefix(result, len(prompt_tokens), prompt_logprobs_last_n)
+        return result
 
     async def sync_sample(
         self,

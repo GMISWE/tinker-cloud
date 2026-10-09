@@ -48,6 +48,8 @@ async def sample_over_http(
     num_samples: int,
     sampling_params: Dict[str, Any],
     prompt_logprobs: bool,
+    topk_sample_logprobs: int = 0,
+    topk_prompt_logprobs: int = 0,
 ) -> Dict[str, Any]:
     url = next_leader_url(handle)
     client = VllmGenerateClient(url, pool.for_url(url))
@@ -57,10 +59,13 @@ async def sample_over_http(
         num_samples=num_samples,
         prompt_logprobs=prompt_logprobs,
         cache_salt=cache_salt_for(handle),
+        topk_sample_logprobs=topk_sample_logprobs,
+        topk_prompt_logprobs=topk_prompt_logprobs,
     )
     tokenizer = handle.tokenizer
-    sequences = [
-        {
+    sequences = []
+    for row in out["rows"]:
+        seq = {
             "tokens": row["tokens"],
             "logprobs": row["logprobs"],
             "text": tokenizer.decode(row["tokens"]),
@@ -68,14 +73,18 @@ async def sample_over_http(
             # tokens are returned as generated (S4), text = decode(tokens).
             "stop_reason": "stop" if row["finish_reason"] == "stop" else "length",
         }
-        for row in out["rows"]
-    ]
+        if topk_sample_logprobs:
+            seq["topk_sample_logprobs"] = row["topk_logprobs"]
+        sequences.append(seq)
     logger.info(
         "[%s] vLLM generate on %s: %d rows, avg %.0f tokens/row",
         request_id, url, len(sequences),
         sum(len(s["tokens"]) for s in sequences) / max(len(sequences), 1),
     )
-    return {"sequences": sequences, "prompt_logprobs": out["prompt_logprobs"]}
+    result = {"sequences": sequences, "prompt_logprobs": out["prompt_logprobs"]}
+    if topk_prompt_logprobs:
+        result["topk_prompt_logprobs"] = out["topk_prompt_logprobs"]
+    return result
 
 
 def _leader_urls(handle: Any) -> tuple:

@@ -186,6 +186,24 @@ def test_sample_result_sequences_prompt_logprobs_and_topk():
     assert lps[0].tolist() == [-99999.0, -99999.0] and lps[2, 1] == -99999.0
 
 
+def test_sample_result_topk_sampled_logprobs_per_sequence():
+    result = {"sequences": [
+        {"stop_reason": "length", "tokens": [1, 2, 3], "logprobs": [-0.5, -1.0, -2.0],
+         "topk_sample_logprobs": [[(1, -0.5), (9, -0.7)], None, [(3, -2.0)]]},
+        {"stop_reason": "stop", "tokens": [4], "logprobs": [-0.1]}]}
+    out = pb.SampleResponse()
+    out.ParseFromString(serialize_result("asample", result))
+    s0, s1 = out.sequences
+    assert s0.HasField("topk_sampled_logprobs") and not s1.HasField("topk_sampled_logprobs")
+    topk = s0.topk_sampled_logprobs
+    assert (topk.length, topk.k) == (3, 2)
+    ids = np.frombuffer(topk.token_ids, dtype=np.int32).reshape(3, 2)
+    lps = np.frombuffer(topk.logprobs, dtype=np.float32).reshape(3, 2)
+    assert ids.tolist() == [[1, 9], [0, 0], [3, 0]]          # None row and short row sentinel-filled
+    assert lps[1].tolist() == [-99999.0, -99999.0] and lps[2].tolist() == [np.float32(-2.0), -99999.0]
+    assert not out.HasField("topk_prompt_logprobs")
+
+
 def test_sample_result_without_optional_fields():
     out = pb.SampleResponse()
     out.ParseFromString(serialize_result("sample", {"sequences": [{"stop_reason": "stop", "tokens": [], "logprobs": []}]}))

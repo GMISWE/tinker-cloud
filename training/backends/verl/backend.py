@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
-from ..base import BackendError, BackendHandle, TrainingBackend, UnsupportedFeatureError
+from ..base import BackendError, BackendHandle, SampleRequestError, TrainingBackend, UnsupportedFeatureError
 from ...utils.model_config import read_raw_hf_config
 from ..objectives import classification_spec
 from .config import VerlConfig
@@ -364,12 +364,18 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         sampling_params: Optional[Dict[str, Any]] = None,
         prompt_logprobs: bool = False,
         pinned_version: Optional[int] = None,
+        topk_sample_logprobs: int = 0,
+        topk_prompt_logprobs: int = 0,
     ) -> Dict[str, Any]:
         if not handle.has_rollout:
             raise UnsupportedFeatureError(
                 "sample", backend="verl",
                 suggestion="model was created debug_train_only; recreate with rollout enabled",
             )
+        for name, k in (("topk_sample_logprobs", topk_sample_logprobs),
+                        ("topk_prompt_logprobs", topk_prompt_logprobs)):
+            if k > 0:  # the verl sample path carries only the sampled token's logprob
+                raise SampleRequestError(f"{name} is not supported on the verl backend", backend="verl")
         # Hybrid timeshare: generation must not overlap training ops on the
         # same GPUs. Register as an active sampler under the FIFO lock (which
         # serializes the wake/weight-sync), then generate WITHOUT the lock so
