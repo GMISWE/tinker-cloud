@@ -253,7 +253,8 @@ class FakeBackend(TrainingBackend[FakeHandle]):
                 json.dump({"w": h.w, "weight_version": h.weight_version, "base_model": h.base_model,
                            "lora_config": h.lora_config, "step": step,
                            "optimizer": {"step_count": h.step_count}}, f)
-            rank = int(h.lora_config["rank"]) if h.lora_config else 0
+            lora_config = h.lora_config or {}
+            rank = int(lora_config.get("rank", 0))
             if rank > 0:
                 # The interchange adapter every backend publishes for a LoRA save
                 # (deterministic bytes: w and the version), so the base class's
@@ -261,7 +262,7 @@ class FakeBackend(TrainingBackend[FakeHandle]):
                 adapter = hf_adapter_dir(str(root))
                 os.makedirs(adapter)
                 with open(os.path.join(adapter, ADAPTER_CONFIG_FILE), "w") as f:
-                    json.dump({"peft_type": "LORA", "r": rank, "lora_alpha": h.lora_config.get("alpha") or rank,
+                    json.dump({"peft_type": "LORA", "r": rank, "lora_alpha": lora_config.get("alpha") or rank,
                                "target_modules": ["fake_proj"]}, f, sort_keys=True)
                 with open(os.path.join(adapter, ADAPTER_WEIGHTS_FILE), "wb") as f:
                     f.write(f"fake-adapter w={h.w} v={h.weight_version}\n".encode())
