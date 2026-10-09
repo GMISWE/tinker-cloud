@@ -5,7 +5,12 @@ Certifies the ver(S) contract through the public API on the nemo_rl backend,
 at both the label level (version fields in responses) and the value level
 (greedy logprobs bit-identical to the version the label claims).
 
-Phase A — tenant declares staleness_k=1:
+The bound is server configuration (NEMORL_STALENESS_K, specs/025 D17), so
+each phase runs against a server booted with that value:
+  NEMORL_STALENESS_K=1 server:  python g10_staleness.py A
+  NEMORL_STALENESS_K=0 server:  python g10_staleness.py B
+
+Phase A — server configured with staleness_k=1:
   A0: greedy sample S0 at v0 (pre-training).
   A1: fb+optim step 1 -> latest v1. Sample: served==0, latest==1 (deferred),
       and tokens+logprobs == S0 bit-identical (the engine really holds v0).
@@ -14,7 +19,7 @@ Phase A — tenant declares staleness_k=1:
       the A1 match was not vacuous).
   A3: step 3 -> deferred again. Sample: served==2, latest==3, and
       tokens+logprobs == S2 bit-identical.
-Phase B — fresh tenant, default staleness_k=0:
+Phase B — server configured with staleness_k=0 (default strict):
   B1: every post-step sample has served==latest (strict on-policy), and
       the post-step sample differs from the pre-step one.
 
@@ -110,10 +115,9 @@ def train_step(tc, salt):
 
 
 def run_phase(sc, k, steps):
-    tc = sc.create_lora_training_client(
-        base_model=BASE_MODEL, rank=RANK, staleness_k=k)
+    tc = sc.create_lora_training_client(base_model=BASE_MODEL, rank=RANK)
     model_id = tc.model_id
-    print(f"model {model_id} staleness_k={k}")
+    print(f"model {model_id} (server NEMORL_STALENESS_K expected {k})")
     session_id = tc.save_weights_and_get_sampling_client()._sampling_session_id
     samples = [raw_sample(session_id)]  # index = after step i
     for t in range(1, steps + 1):
@@ -129,9 +133,20 @@ def bit_eq(a, b):
 
 
 def main():
+    phase = sys.argv[1] if len(sys.argv) > 1 else "AB"
     sc = tinker.ServiceClient(base_url=BASE, api_key=KEY)
 
-    print("Phase A: staleness_k=1")
+    if "A" in phase:
+        run_phase_a(sc)
+    if "B" in phase:
+        run_phase_b(sc)
+
+    print("RESULT:", "PASS" if not FAILS else f"FAIL ({FAILS})")
+    sys.exit(0 if not FAILS else 1)
+
+
+def run_phase_a(sc):
+    print("Phase A: server NEMORL_STALENESS_K=1")
     s = run_phase(sc, k=1, steps=3)
     check("A0 pre-train versions", s[0]["served"] == 0 and s[0]["latest"] == 0,
           f"served={s[0]['served']} latest={s[0]['latest']}")
@@ -145,15 +160,14 @@ def main():
           f"served={s[3]['served']} latest={s[3]['latest']}")
     check("A3 value: sample == v2 bit-identical", bit_eq(s[3], s[2]))
 
-    print("Phase B: staleness_k=0 (default strict)")
+
+def run_phase_b(sc):
+    print("Phase B: server NEMORL_STALENESS_K=0 (default strict)")
     s = run_phase(sc, k=0, steps=2)
     ok = all(x["served"] == x["latest"] for x in s)
     check("B1 label: served == latest at every step", ok,
           " ".join(f"({x['served']},{x['latest']})" for x in s))
     check("B2 value: post-step sample != pre-step", not bit_eq(s[1], s[0]))
-
-    print("RESULT:", "PASS" if not FAILS else f"FAIL ({FAILS})")
-    sys.exit(0 if not FAILS else 1)
 
 
 if __name__ == "__main__":

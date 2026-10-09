@@ -62,7 +62,7 @@ def test_unsupported_or_invalid_fields_are_400_by_name(service_client, server, f
     path = _sampler_path(service_client, "t400")
     r = _asample(server, path, **fields)
     assert r.status_code == 400, r.text
-    assert named in r.json()["detail"]
+    assert named in r.json()["error"]  # the server reports HTTPException.detail as "error"
 
 
 def test_topk_above_the_engine_cap_fails_the_future_with_400(service_client, server):

@@ -109,8 +109,7 @@ class FakeDriver:
         self.live = set()
         self.grad_norms = {}
 
-    def create_training_client(self, base_model, rank, seed, max_seq_len,
-                               debug_train_only):
+    def create_training_client(self, base_model, rank, seed):
         mid = f"model_{len(self.grad_norms) + 1}"
         self.events.append(("create", mid, seed))
         self.live.add(mid)

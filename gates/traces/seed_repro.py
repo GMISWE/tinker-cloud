@@ -80,8 +80,6 @@ class SeedRepro:
     n: int = 8
     seed: int = DEFAULT_SEED
     contrast_seed: int = DEFAULT_CONTRAST_SEED
-    max_seq_len: int | None = None
-    debug_train_only: bool = False
     lr: float = 0.0
     arms: list[tuple[str, int]] | None = None
     name: str = "seed_repro"
@@ -100,8 +98,6 @@ class SeedRepro:
             "n_datums": self.n,
             "seed": self.seed,
             "contrast_seed": self.contrast_seed,
-            "max_seq_len": self.max_seq_len,
-            "debug_train_only": self.debug_train_only,
             "lr": self.lr,
             "arms": [{"arm": a, "seed": s} for a, s in self.arms],
         }
@@ -122,8 +118,6 @@ class SeedRepro:
                 base_model=self.model,
                 rank=self.rank,
                 seed=seed,
-                max_seq_len=self.max_seq_len,
-                debug_train_only=self.debug_train_only,
             )
             self.created_models.append(tc.model_id)
             try:

@@ -165,7 +165,7 @@ def test_stamp_is_the_submission_version_and_the_span_is_not_certified_on_the_sp
     completion; colocated, the ver(S) certificate still raises on the gap."""
     from tinkercloud.training.backends.nemo_rl import backend as nb, generation as gen
 
-    async def refit_mid_serve(h, pool, request_id, prompt_tokens, num_samples, sp, pl):
+    async def refit_mid_serve(h, pool, request_id, prompt_tokens, num_samples, sp, pl, **topk):
         h.generation_synced_version = h.weight_version = h.weight_version + 1
         return {"samples": []}
 

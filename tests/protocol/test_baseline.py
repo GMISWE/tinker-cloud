@@ -48,11 +48,10 @@ def test_load_from_state_round_trips_weights(service_client, server):
 
     tc2 = service_client.create_training_client_from_state(path)
     assert tc2.model_id != tc.model_id
-    # the fork SDK creates with checkpoint_path; upstream creates, then load_weights
+    # create, then load_weights: nothing loads at create (D9, specs/025)
     mine = [t for t in server.trace() if t["model_id"] == tc2.model_id]
-    created = [t for t in mine if t["op"] == "create_model"]
-    root = str(server.checkpoint_base / tc.model_id / "weights" / "rt")
-    assert created and (created[0]["resume_from"] == root or "load_checkpoint" in [t["op"] for t in mine])
+    ops = [t["op"] for t in mine]
+    assert "create_model" in ops and "load_checkpoint" in ops, ops
     # the loaded model continues from the saved weights: w = 0.25 * 1 pending microbatch
     op = tc2.optim_step(types.AdamParams(learning_rate=0.0)).result()
     assert op.metrics["fake_w"] == 0.25

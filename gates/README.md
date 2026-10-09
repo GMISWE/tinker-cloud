@@ -17,7 +17,7 @@ from gates.traces import SegSweep
 
 runner.run(
     invariants.get("SPLIT_INV"),
-    SegSweep(model="Qwen/Qwen3-8B-Base", max_seq_len=8192, debug_train_only=True),
+    SegSweep(model="Qwen/Qwen3-8B-Base"),
     tag="nemo_rl_tp2",
     out_dir="results",
 )
@@ -31,18 +31,18 @@ python -m gates.runner seg_sweep --tag nemo_rl --expect E0_ARBITRARY
 python -m gates.runner seg_sweep --tag miles --segmentations '8;4,4;2,6;6,2;2,6;8' \
     --expect E0_ALIGNED_ONLY   # miles deadlocks on rank-imbalanced splits at dp>1
 python -m gates.runner seg_sweep --tag nemo_rl_tp2 --model Qwen/Qwen3-8B-Base \
-    --max-seq-len 8192 --debug-train-only --expect E0_ARBITRARY
+    --expect E0_ARBITRARY
 
-# PARTITION_INV: one call, only the submission order changes (--debug-train-only
+# PARTITION_INV: one call, only the submission order changes (no inference engine: boot the server with NEMORL_DEBUG_TRAIN_ONLY=1
 # is required on miles below NUM_GPUS=4 -- start_engines dies on
 # reordered_gpu_ids[gpu_index] at NUM_GPUS=2)
-python -m gates.runner order_perm --tag miles_dp4 --seed 7 --debug-train-only \
+python -m gates.runner order_perm --tag miles_dp4 --seed 7 \
     --expect INVARIANT
-python -m gates.runner order_perm --tag nemo_rl_dp2 --seed 7 --debug-train-only \
+python -m gates.runner order_perm --tag nemo_rl_dp2 --seed 7 \
     --expect PARTITION_INVARIANT_ORDER_SENSITIVE   # dp=4 is INVARIANT
 
 # SEED_REPRO: does the backend read LoraConfig.seed at all
-python -m gates.runner seed_repro --tag nemo_rl_dp4 --debug-train-only \
+python -m gates.runner seed_repro --tag nemo_rl_dp4 \
     --expect SEED_HONORED
 ```
 

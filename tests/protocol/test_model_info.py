@@ -14,7 +14,8 @@ def test_get_info_and_weights_info_report_lora(service_client, server):
 
     path = tc.save_state("info").result().path
     wi = server.post("/api/v1/weights_info", {"tinker_path": path}).json()
-    assert wi == {"base_model": "fake/tiny", "is_lora": True, "lora_rank": 16}
+    assert wi == {"base_model": "fake/tiny", "is_lora": True, "lora_rank": 16,
+                  "optimizer_config": {"type": "adamw"}}
 
     spath = tc.save_weights_for_sampler("sinfo").result().path
     assert spath == f"tinker://{tc.model_id}/sampler_weights/sinfo"

@@ -37,7 +37,6 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base-model", required=True)
     ap.add_argument("--rank", type=int, default=32)
-    ap.add_argument("--max-seq-len", type=int, default=None)
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
@@ -48,7 +47,7 @@ def main():
     prompt = types.ModelInput.from_ints(prompt_ids)
 
     t0 = time.time()
-    tc = drv.create_training_client(a.base_model, rank=a.rank, max_seq_len=a.max_seq_len)
+    tc = drv.create_training_client(a.base_model, rank=a.rank)
     OUT["model_id"] = tc.model_id
     OUT["backend"] = requests.get(drv.base_url + "/health", timeout=10).json()
     print(f"model {tc.model_id} booted in {time.time() - t0:.0f}s", flush=True)
