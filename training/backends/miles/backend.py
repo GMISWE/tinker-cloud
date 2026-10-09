@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 import ray
 
-from ..base import BackendError, BackendHandle, TrainingBackend, UnsupportedFeatureError
+from ..base import BackendError, BackendHandle, SampleRequestError, TrainingBackend, UnsupportedFeatureError
 from ...utils.model_config import read_raw_hf_config
 from ..objectives import classification_spec
 from ...models.requests import Datum
@@ -239,6 +239,15 @@ def _check_miles_clip_config(h: "MilesHandle", loss_fn: str, loss_fn_config: Opt
             suggestion=f"this actor group was booted with ({boot_low:g}, {boot_high:g}); "
                        f"set SLIME_EPS_CLIP={1 - low:g} SLIME_EPS_CLIP_HIGH={high - 1:g} before create_model",
         )
+
+
+def _refuse_topk(backend: str, topk_sample_logprobs: int, topk_prompt_logprobs: int) -> None:
+    """The SGLang path carries only the sampled token's logprob; a top-k request
+    fails by name instead of returning a response the SDK reads as k=0."""
+    for name, k in (("topk_sample_logprobs", topk_sample_logprobs),
+                    ("topk_prompt_logprobs", topk_prompt_logprobs)):
+        if k > 0:
+            raise SampleRequestError(f"{name} is not supported on the {backend} backend", backend=backend)
 
 
 class MilesBackend(TrainingBackend[MilesHandle]):
@@ -1421,6 +1430,8 @@ class MilesBackend(TrainingBackend[MilesHandle]):
         sampling_params: Optional[Dict[str, Any]] = None,
         prompt_logprobs: bool = False,
         pinned_version: Optional[int] = None,
+        topk_sample_logprobs: int = 0,
+        topk_prompt_logprobs: int = 0,
     ) -> Dict[str, Any]:
         """Sample via per-request HTTP calls to the SGLang router.
 
@@ -1432,6 +1443,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
         aliasing class; logged loudly rather than silently aliased.
         """
         client = self._sglang_client(handle, "sample")
+        _refuse_topk("miles", topk_sample_logprobs, topk_prompt_logprobs)
 
         # Pool mode: route to this model's adapter by engine-side slot name.
         lora_path = None

@@ -26,6 +26,7 @@ class NemoRLConfig(EnvConfig):
     megatron_precision_aware: bool = Field(True, description="use_precision_aware_optimizer")
     refit_buffer_memory_ratio: float = Field(0.3, description="Share of free GPU memory for the IPC refit buffer")
     vllm_max_connections: Optional[int] = Field(None, description="Concurrent connections per vLLM worker server; None = unbounded (engine queue)")
+    vllm_max_logprobs: int = Field(20, ge=1, description="vLLM max_logprobs: cap on topk_sample_logprobs / topk_prompt_logprobs per request")
     # specs/021: vLLM either shares the training GPUs (sleeps during training,
     # IPC refit) or owns `inference_gpus` of create_model's num_gpus (NCCL refit).
     colocated: bool = Field(True, description="vLLM shares the training GPUs; False = separate inference GPUs")
@@ -48,6 +49,7 @@ class NemoRLConfig(EnvConfig):
         "megatron_precision_aware": "NEMORL_MEGATRON_PRECISION_AWARE",
         "refit_buffer_memory_ratio": "NRL_REFIT_BUFFER_MEMORY_RATIO",
         "vllm_max_connections": "TINKERCLOUD_VLLM_MAX_CONNECTIONS",
+        "vllm_max_logprobs": "NEMORL_VLLM_MAX_LOGPROBS",
         "colocated": "NEMORL_COLOCATED",
         "inference_gpus": "NEMORL_INFERENCE_GPUS",
         "inference_tp": "NEMORL_INFERENCE_TP",

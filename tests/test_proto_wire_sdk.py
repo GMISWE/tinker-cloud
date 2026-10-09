@@ -52,3 +52,20 @@ def test_sdk_response_decoder_reads_sample():
     assert out.prompt_logprobs == [None, pytest.approx(-0.25)]
     assert out.topk_prompt_logprobs[0] is None
     assert out.topk_prompt_logprobs[2] == [(13, pytest.approx(-0.3))]
+
+
+def test_sdk_response_decoder_reads_sampled_topk_and_last_n_mask():
+    from tinker import SampleResponse
+    # prompt_logprobs_last_n=2 over a 4-token prompt: positions 0, 1 masked (None)
+    result = {"sequences": [{"stop_reason": "length", "tokens": [1, 2], "logprobs": [-0.5, -1.0],
+                             "topk_sample_logprobs": [[(1, -0.5), (9, -0.7)], [(2, -1.0), (8, -1.5)]]}],
+              "prompt_logprobs": [None, None, -0.25, -0.5],
+              "topk_prompt_logprobs": [None, None, [(11, -0.25), (12, -0.3)], [(13, -0.5), (14, -0.6)]]}
+    out = sdk_resp.deserialize_proto_response(serialize_result("asample", result), SampleResponse)
+    seq = out.sequences[0]
+    assert seq.topk_logprobs_np.token_ids.shape == (2, 2)
+    assert seq.topk_logprobs == [[(1, pytest.approx(-0.5)), (9, pytest.approx(-0.7))],
+                                 [(2, pytest.approx(-1.0)), (8, pytest.approx(-1.5))]]
+    assert out.prompt_logprobs == [None, None, pytest.approx(-0.25), pytest.approx(-0.5)]
+    assert out.topk_prompt_logprobs[:2] == [None, None]
+    assert out.topk_prompt_logprobs[2] == [(11, pytest.approx(-0.25)), (12, pytest.approx(-0.3))]

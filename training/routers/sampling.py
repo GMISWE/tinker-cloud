@@ -116,6 +116,26 @@ def resolve_target_model(
     )
 
 
+def check_sample_extensions(request: ASampleRequest, prompt_len: int) -> None:
+    """Boundary check of the SDK 0.33 sampling fields; each refusal names the field.
+    target_prompt_logprobs and prompt_alt_tokens_k have no backend here, so a
+    request that carries them fails now rather than returning a response the
+    SDK then rejects for lacking them."""
+    if request.target_prompt_logprobs is not None:
+        raise HTTPException(status_code=400, detail="target_prompt_logprobs is unsupported on this server")
+    if request.prompt_alt_tokens_k > 0:
+        raise HTTPException(status_code=400, detail="prompt_alt_tokens_k is unsupported on this server")
+    last_n = request.prompt_logprobs_last_n
+    if last_n is not None:
+        if not request.prompt_logprobs:
+            raise HTTPException(status_code=400, detail="prompt_logprobs_last_n requires prompt_logprobs")
+        if not 1 <= last_n <= prompt_len - 1:
+            raise HTTPException(
+                status_code=400,
+                detail=f"prompt_logprobs_last_n must be between 1 and len(prompt) - 1 = {prompt_len - 1}, got {last_n}",
+            )
+
+
 def _sequence_ids(request_id: str, n: int) -> List[str]:
     """Identity of each sequence a sampling request will return, fixed at
     submission (SDK >= 0.25 requires one per sequence on the promise)."""
@@ -140,6 +160,7 @@ async def asample(
 
     # Extract prompt tokens
     prompt_tokens = request.prompt.get_tokens()
+    check_sample_extensions(request, len(prompt_tokens))
 
     # BUG-015: resolve the sampler's pinned weight version (snapshot samplers,
     # e.g. DPO's frozen reference) so pinned logprob reads aren't served from
@@ -181,11 +202,15 @@ async def asample(
             training_clients=training_clients,
             pinned_version=pinned_version,
             model_id=model_id,
+            topk_sample_logprobs=request.topk_sample_logprobs,
+            topk_prompt_logprobs=request.topk_prompt_logprobs,
+            prompt_logprobs_last_n=request.prompt_logprobs_last_n,
         )
         sequences = [SamplingSequence(**seq) for seq in result_dict["sequences"]]
         return SampleResult(
             sequences=sequences,
             prompt_logprobs=result_dict.get("prompt_logprobs"),
+            topk_prompt_logprobs=result_dict.get("topk_prompt_logprobs"),
             weight_version=result_dict.get("weight_version"),
             latest_weight_version=result_dict.get("latest_weight_version"),
         )

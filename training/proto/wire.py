@@ -10,7 +10,8 @@ Results: the SDK retrieves sample and forward/forward_backward results with
 `Accept: application/x-protobuf` and rejects JSON for those two types.
 `serialize_result` is the inverse of the SDK's `proto/response_conv.py`:
 tokens as little-endian int32 bytes, logprobs as float32 bytes, undefined
-prompt logprobs as NaN, undefined top-k slots sentinel-filled, and per-datum
+prompt logprobs as NaN, undefined top-k slots (prompt and sampled)
+sentinel-filled, and per-datum
 loss outputs concatenated into one `BatchedTensor` with int64 byte offsets.
 
 Everything else on the API stays JSON.
@@ -158,11 +159,15 @@ def _serialize_sample(result: Dict[str, Any]) -> bytes:
         if stop_reason is None:
             raise ValueError(f"stop_reason {seq['stop_reason']!r} has no proto value")
         logprobs = seq.get("logprobs")
-        proto.sequences.append(pb.SampledSequence(
+        msg = pb.SampledSequence(
             stop_reason=stop_reason,
             tokens=np.asarray(seq["tokens"], dtype=np.int32).tobytes(),
             logprobs=np.asarray(logprobs, dtype=np.float32).tobytes() if logprobs is not None else b"",
-        ))
+        )
+        rows = seq.get("topk_sample_logprobs")
+        if rows is not None:
+            msg.topk_sampled_logprobs.CopyFrom(_topk_message(rows))
+        proto.sequences.append(msg)
 
     prompt_logprobs = result.get("prompt_logprobs")
     if prompt_logprobs is not None:
@@ -172,19 +177,26 @@ def _serialize_sample(result: Dict[str, Any]) -> bytes:
 
     rows = result.get("topk_prompt_logprobs")
     if rows is not None:
-        # k is not recorded in the result; recover it from the widest row and
-        # keep k=1 when every row is undefined so length still encodes.
-        k = max((len(row) for row in rows if row), default=1)
-        token_ids = np.full((len(rows), k), _TOPK_MASK_TOKEN_ID, dtype=np.int32)
-        logprobs = np.full((len(rows), k), _TOPK_MASK_LOGPROB, dtype=np.float32)
-        for i, row in enumerate(rows):
-            for j, (token_id, logprob) in enumerate(row or ()):
-                token_ids[i, j] = token_id
-                logprobs[i, j] = logprob
-        proto.topk_prompt_logprobs.CopyFrom(pb.TopkLogprobs(
-            length=len(rows), k=k, token_ids=token_ids.tobytes(), logprobs=logprobs.tobytes(),
-        ))
+        proto.topk_prompt_logprobs.CopyFrom(_topk_message(rows))
     return proto.SerializeToString()
+
+
+def _topk_message(rows: List[Optional[List[Tuple[int, float]]]]) -> pb.TopkLogprobs:
+    """Rows of (token_id, logprob), best first, None for an undefined position
+    -> dense N x k matrices, undefined slots sentinel-filled (the SDK's
+    topk_to_lists reads a sentinel-led row back as None). k is not recorded in
+    the result; recover it from the widest row and keep k=1 when every row is
+    undefined so length still encodes."""
+    k = max((len(row) for row in rows if row), default=1)
+    token_ids = np.full((len(rows), k), _TOPK_MASK_TOKEN_ID, dtype=np.int32)
+    logprobs = np.full((len(rows), k), _TOPK_MASK_LOGPROB, dtype=np.float32)
+    for i, row in enumerate(rows):
+        for j, (token_id, logprob) in enumerate(row or ()):
+            token_ids[i, j] = token_id
+            logprobs[i, j] = logprob
+    return pb.TopkLogprobs(
+        length=len(rows), k=k, token_ids=token_ids.tobytes(), logprobs=logprobs.tobytes(),
+    )
 
 
 def _serialize_forward_backward(result: Dict[str, Any]) -> bytes:

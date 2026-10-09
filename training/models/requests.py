@@ -409,6 +409,14 @@ class ASampleRequest(BaseModel):
     seq_id: Optional[int] = Field(default=None, description="Sequence ID within sampling session")
     prompt_logprobs: bool = Field(default=False, description="Return prompt logprobs")
     topk_prompt_logprobs: int = Field(default=0, ge=0, description="Top-k prompt logprobs to return")
+    topk_sample_logprobs: int = Field(default=0, ge=0, description="Top-k logprobs per sampled token")
+    # Score only the last N prompt tokens; earlier prompt_logprobs / top-k rows
+    # are None. Requires prompt_logprobs and 1 <= N <= len(prompt) - 1 (router).
+    prompt_logprobs_last_n: Optional[int] = Field(default=None, description="Score only the last N prompt tokens")
+    # SDK 0.33 fields this server does not serve; accepted so the router can
+    # refuse them by name (400) instead of pydantic silently dropping them.
+    target_prompt_logprobs: Optional[TensorData] = Field(default=None, description="Unsupported: token ids to score")
+    prompt_alt_tokens_k: int = Field(default=0, ge=0, description="Unsupported: alternative prompt draws")
 
 
 class SampleRequest(BaseModel):

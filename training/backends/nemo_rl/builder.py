@@ -231,7 +231,9 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
                     "enable_vllm_metrics_logger": False,
                     "vllm_metrics_logger_interval": 0.5,
                 },
-                "vllm_kwargs": {},
+                # top-k logprobs per position the engine will compute; the
+                # service refuses a larger request (handle.max_topk_logprobs)
+                "vllm_kwargs": {"max_logprobs": self.cfg.vllm_max_logprobs},
                 "colocated": {
                     "enabled": self.cfg.colocated,
                     "resources": {

@@ -45,6 +45,10 @@ class BackendHandle:
     # create_model from the number its engine was actually booted with; None
     # means unknown and the service skips the check.
     context_length: Optional[int] = None
+    # Largest top-k the inference engine computes per position
+    # (topk_sample_logprobs / topk_prompt_logprobs); None means unknown and
+    # the service skips the check.
+    max_topk_logprobs: Optional[int] = None
     # Optimizer steps applied since create; pins samplers and checkpoint records.
     weight_version: int = 0
     # HF model directory the engine loaded (tokenizer source for get_tokenizer_info);
@@ -384,6 +388,8 @@ class TrainingBackend(ABC, Generic[H]):
         sampling_params: Optional[Dict[str, Any]] = None,
         prompt_logprobs: bool = False,
         pinned_version: Optional[int] = None,
+        topk_sample_logprobs: int = 0,
+        topk_prompt_logprobs: int = 0,
     ) -> Dict[str, Any]:
         """
         Generate num_samples completions for one prompt via the backend's
@@ -391,17 +397,24 @@ class TrainingBackend(ABC, Generic[H]):
 
         Backend behavior:
         - Miles: per-sample HTTP calls to the SGLang router.
-        - NeMo RL: requests are batch-accumulated and flushed as a single
-          Policy.generate() call (PERF-002).
+        - NeMo RL: one HTTP request per call to a vLLM worker (specs/019).
+
+        `topk_sample_logprobs` / `topk_prompt_logprobs` = k > 0 ask for the k
+        most likely tokens at every sampled / prompt position; a backend that
+        cannot serve them raises SampleRequestError. `prompt_logprobs_last_n`
+        is applied by the service, not here.
 
         Returns:
             {
                 "sequences": [
                     {"tokens": [...], "logprobs": [...],
-                     "text": Optional[str], "stop_reason": "stop" | "length"},
+                     "text": Optional[str], "stop_reason": "stop" | "length",
+                     "topk_sample_logprobs": [[(token_id, logprob), ...], ...]  # when k > 0
+                    },
                     ...
                 ],
                 "prompt_logprobs": Optional[List],  # [None, lp1, ...] when requested
+                "topk_prompt_logprobs": Optional[List],  # [None, [(token_id, logprob), ...], ...] when k > 0
             }
 
         Raises:
