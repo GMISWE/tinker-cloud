@@ -1187,6 +1187,11 @@ async def _advance_weights(handle: NemoRLHandle) -> None:
                     handle.policy_generation,
                     handle.colocated_inference,
                 )
+                if handle.colocated_inference:
+                    # the stale wake offloads the policy exactly like a refit does;
+                    # without this the next step skips prepare_for_training and
+                    # trains a CPU-resident model (G10 phase A, 2026-10-09)
+                    handle.training_resident = False
     finally:
         handle.weight_version = new_version
 
