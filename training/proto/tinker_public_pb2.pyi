@@ -67,6 +67,8 @@ class SampleResponse(google.protobuf.message.Message):
     PROMPT_LOGPROBS_FIELD_NUMBER: builtins.int
     TOPK_PROMPT_LOGPROBS_FIELD_NUMBER: builtins.int
     PROMPT_CACHE_HIT_TOKENS_FIELD_NUMBER: builtins.int
+    TARGET_PROMPT_LOGPROBS_FIELD_NUMBER: builtins.int
+    PROMPT_ALT_TOKENS_FIELD_NUMBER: builtins.int
     prompt_logprobs: builtins.bytes
     """np.array(prompt_logprobs, dtype=np.float32).tobytes()
     NaN for missing positions (e.g. first prompt token)
@@ -78,25 +80,76 @@ class SampleResponse(google.protobuf.message.Message):
     @property
     def sequences(self) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[Global___SampledSequence]: ...
     @property
-    def topk_prompt_logprobs(self) -> Global___TopkPromptLogprobs:
+    def topk_prompt_logprobs(self) -> Global___TopkLogprobs:
         """Optional: absent means no topk was requested."""
+
+    @property
+    def target_prompt_logprobs(self) -> Global___Tensor:
+        """Logprobs of the token ids the request's `target_prompt_logprobs` named: a
+        float32 tensor of the request's shape and layout (same CSR indices when
+        sparse), 0.0 in placeholder cells. Absent means none were requested.
+        """
+
+    @property
+    def prompt_alt_tokens(self) -> Global___PromptAltTokens:
+        """The draws the request's `prompt_alt_tokens_k` asked for. Absent means
+        none were requested.
+        """
 
     def __init__(
         self,
         *,
         sequences: collections.abc.Iterable[Global___SampledSequence] | None = ...,
         prompt_logprobs: builtins.bytes | None = ...,
-        topk_prompt_logprobs: Global___TopkPromptLogprobs | None = ...,
+        topk_prompt_logprobs: Global___TopkLogprobs | None = ...,
         prompt_cache_hit_tokens: builtins.int = ...,
+        target_prompt_logprobs: Global___Tensor | None = ...,
+        prompt_alt_tokens: Global___PromptAltTokens | None = ...,
     ) -> None: ...
-    def HasField(self, field_name: typing.Literal["_prompt_logprobs", b"_prompt_logprobs", "_topk_prompt_logprobs", b"_topk_prompt_logprobs", "prompt_logprobs", b"prompt_logprobs", "topk_prompt_logprobs", b"topk_prompt_logprobs"]) -> builtins.bool: ...
-    def ClearField(self, field_name: typing.Literal["_prompt_logprobs", b"_prompt_logprobs", "_topk_prompt_logprobs", b"_topk_prompt_logprobs", "prompt_cache_hit_tokens", b"prompt_cache_hit_tokens", "prompt_logprobs", b"prompt_logprobs", "sequences", b"sequences", "topk_prompt_logprobs", b"topk_prompt_logprobs"]) -> None: ...
+    def HasField(self, field_name: typing.Literal["_prompt_alt_tokens", b"_prompt_alt_tokens", "_prompt_logprobs", b"_prompt_logprobs", "_target_prompt_logprobs", b"_target_prompt_logprobs", "_topk_prompt_logprobs", b"_topk_prompt_logprobs", "prompt_alt_tokens", b"prompt_alt_tokens", "prompt_logprobs", b"prompt_logprobs", "target_prompt_logprobs", b"target_prompt_logprobs", "topk_prompt_logprobs", b"topk_prompt_logprobs"]) -> builtins.bool: ...
+    def ClearField(self, field_name: typing.Literal["_prompt_alt_tokens", b"_prompt_alt_tokens", "_prompt_logprobs", b"_prompt_logprobs", "_target_prompt_logprobs", b"_target_prompt_logprobs", "_topk_prompt_logprobs", b"_topk_prompt_logprobs", "prompt_alt_tokens", b"prompt_alt_tokens", "prompt_cache_hit_tokens", b"prompt_cache_hit_tokens", "prompt_logprobs", b"prompt_logprobs", "sequences", b"sequences", "target_prompt_logprobs", b"target_prompt_logprobs", "topk_prompt_logprobs", b"topk_prompt_logprobs"]) -> None: ...
+    @typing.overload
+    def WhichOneof(self, oneof_group: typing.Literal["_prompt_alt_tokens", b"_prompt_alt_tokens"]) -> typing.Literal["prompt_alt_tokens"] | None: ...
     @typing.overload
     def WhichOneof(self, oneof_group: typing.Literal["_prompt_logprobs", b"_prompt_logprobs"]) -> typing.Literal["prompt_logprobs"] | None: ...
+    @typing.overload
+    def WhichOneof(self, oneof_group: typing.Literal["_target_prompt_logprobs", b"_target_prompt_logprobs"]) -> typing.Literal["target_prompt_logprobs"] | None: ...
     @typing.overload
     def WhichOneof(self, oneof_group: typing.Literal["_topk_prompt_logprobs", b"_topk_prompt_logprobs"]) -> typing.Literal["topk_prompt_logprobs"] | None: ...
 
 Global___SampleResponse: typing_extensions.TypeAlias = SampleResponse
+
+@typing.final
+class PromptAltTokens(google.protobuf.message.Message):
+    """Independent draws from the model's next-token distribution at every prompt
+    position after the first, taken in the prefill that served the request.
+    Both tensors are dense [len(prompt) - 1, k]: row i holds k draws from the
+    distribution over prompt token i + 1 (position 0 has no preceding context),
+    and `logprobs[i][j]` is the model's logprob of `tokens[i][j]` there.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    TOKENS_FIELD_NUMBER: builtins.int
+    LOGPROBS_FIELD_NUMBER: builtins.int
+    @property
+    def tokens(self) -> Global___Tensor:
+        """int32 token ids."""
+
+    @property
+    def logprobs(self) -> Global___Tensor:
+        """float32 logprobs."""
+
+    def __init__(
+        self,
+        *,
+        tokens: Global___Tensor | None = ...,
+        logprobs: Global___Tensor | None = ...,
+    ) -> None: ...
+    def HasField(self, field_name: typing.Literal["logprobs", b"logprobs", "tokens", b"tokens"]) -> builtins.bool: ...
+    def ClearField(self, field_name: typing.Literal["logprobs", b"logprobs", "tokens", b"tokens"]) -> None: ...
+
+Global___PromptAltTokens: typing_extensions.TypeAlias = PromptAltTokens
 
 @typing.final
 class SampledSequence(google.protobuf.message.Message):
@@ -105,6 +158,7 @@ class SampledSequence(google.protobuf.message.Message):
     STOP_REASON_FIELD_NUMBER: builtins.int
     TOKENS_FIELD_NUMBER: builtins.int
     LOGPROBS_FIELD_NUMBER: builtins.int
+    TOPK_SAMPLED_LOGPROBS_FIELD_NUMBER: builtins.int
     stop_reason: Global___StopReason.ValueType
     tokens: builtins.bytes
     """np.array(tokens, dtype=np.int32).tobytes()"""
@@ -112,22 +166,32 @@ class SampledSequence(google.protobuf.message.Message):
     """np.array(logprobs, dtype=np.float32).tobytes()
     Optional, same length as tokens when present
     """
+    @property
+    def topk_sampled_logprobs(self) -> Global___TopkLogprobs:
+        """Top-k logprobs over this sequence's sampled tokens, one row per token.
+        Optional: absent means no topk was requested.
+        """
+
     def __init__(
         self,
         *,
         stop_reason: Global___StopReason.ValueType = ...,
         tokens: builtins.bytes = ...,
         logprobs: builtins.bytes | None = ...,
+        topk_sampled_logprobs: Global___TopkLogprobs | None = ...,
     ) -> None: ...
-    def HasField(self, field_name: typing.Literal["_logprobs", b"_logprobs", "logprobs", b"logprobs"]) -> builtins.bool: ...
-    def ClearField(self, field_name: typing.Literal["_logprobs", b"_logprobs", "logprobs", b"logprobs", "stop_reason", b"stop_reason", "tokens", b"tokens"]) -> None: ...
+    def HasField(self, field_name: typing.Literal["_logprobs", b"_logprobs", "_topk_sampled_logprobs", b"_topk_sampled_logprobs", "logprobs", b"logprobs", "topk_sampled_logprobs", b"topk_sampled_logprobs"]) -> builtins.bool: ...
+    def ClearField(self, field_name: typing.Literal["_logprobs", b"_logprobs", "_topk_sampled_logprobs", b"_topk_sampled_logprobs", "logprobs", b"logprobs", "stop_reason", b"stop_reason", "tokens", b"tokens", "topk_sampled_logprobs", b"topk_sampled_logprobs"]) -> None: ...
+    @typing.overload
     def WhichOneof(self, oneof_group: typing.Literal["_logprobs", b"_logprobs"]) -> typing.Literal["logprobs"] | None: ...
+    @typing.overload
+    def WhichOneof(self, oneof_group: typing.Literal["_topk_sampled_logprobs", b"_topk_sampled_logprobs"]) -> typing.Literal["topk_sampled_logprobs"] | None: ...
 
 Global___SampledSequence: typing_extensions.TypeAlias = SampledSequence
 
 @typing.final
-class TopkPromptLogprobs(google.protobuf.message.Message):
-    """Dense N×K matrices for top-k prompt logprobs.
+class TopkLogprobs(google.protobuf.message.Message):
+    """Dense N×K matrices for top-k logprobs.
     Both token_ids and logprobs are row-major flattened: position i, rank j
     is at index i*k + j. Empty cells use token_id=0 and logprob=-99999.0.
     """
@@ -137,26 +201,26 @@ class TopkPromptLogprobs(google.protobuf.message.Message):
     TOKEN_IDS_FIELD_NUMBER: builtins.int
     LOGPROBS_FIELD_NUMBER: builtins.int
     K_FIELD_NUMBER: builtins.int
-    PROMPT_LENGTH_FIELD_NUMBER: builtins.int
+    LENGTH_FIELD_NUMBER: builtins.int
     token_ids: builtins.bytes
     """Row-major N×K matrix of int32 token IDs"""
     logprobs: builtins.bytes
     """Row-major N×K matrix of float32 logprobs"""
     k: builtins.int
     """Number of top-k entries per position"""
-    prompt_length: builtins.int
-    """Number of prompt positions"""
+    length: builtins.int
+    """Number of positions (prompt or sampled, depending on the enclosing field)"""
     def __init__(
         self,
         *,
         token_ids: builtins.bytes = ...,
         logprobs: builtins.bytes = ...,
         k: builtins.int = ...,
-        prompt_length: builtins.int = ...,
+        length: builtins.int = ...,
     ) -> None: ...
-    def ClearField(self, field_name: typing.Literal["k", b"k", "logprobs", b"logprobs", "prompt_length", b"prompt_length", "token_ids", b"token_ids"]) -> None: ...
+    def ClearField(self, field_name: typing.Literal["k", b"k", "length", b"length", "logprobs", b"logprobs", "token_ids", b"token_ids"]) -> None: ...
 
-Global___TopkPromptLogprobs: typing_extensions.TypeAlias = TopkPromptLogprobs
+Global___TopkLogprobs: typing_extensions.TypeAlias = TopkLogprobs
 
 @typing.final
 class SparseCsr(google.protobuf.message.Message):
@@ -601,21 +665,50 @@ class ImageChunk(google.protobuf.message.Message):
     DATA_FIELD_NUMBER: builtins.int
     FORMAT_FIELD_NUMBER: builtins.int
     EXPECTED_TOKENS_FIELD_NUMBER: builtins.int
+    OVERRIDE_DIMENSIONS_FIELD_NUMBER: builtins.int
     data: builtins.bytes
     format: builtins.str
     expected_tokens: builtins.int
+    @property
+    def override_dimensions(self) -> Global___ImageDimensions:
+        """Optional dimensions used for token counting and image preprocessing. When
+        unset, the encoded image dimensions are used.
+        """
+
     def __init__(
         self,
         *,
         data: builtins.bytes = ...,
         format: builtins.str = ...,
         expected_tokens: builtins.int | None = ...,
+        override_dimensions: Global___ImageDimensions | None = ...,
     ) -> None: ...
-    def HasField(self, field_name: typing.Literal["_expected_tokens", b"_expected_tokens", "expected_tokens", b"expected_tokens"]) -> builtins.bool: ...
-    def ClearField(self, field_name: typing.Literal["_expected_tokens", b"_expected_tokens", "data", b"data", "expected_tokens", b"expected_tokens", "format", b"format"]) -> None: ...
+    def HasField(self, field_name: typing.Literal["_expected_tokens", b"_expected_tokens", "_override_dimensions", b"_override_dimensions", "expected_tokens", b"expected_tokens", "override_dimensions", b"override_dimensions"]) -> builtins.bool: ...
+    def ClearField(self, field_name: typing.Literal["_expected_tokens", b"_expected_tokens", "_override_dimensions", b"_override_dimensions", "data", b"data", "expected_tokens", b"expected_tokens", "format", b"format", "override_dimensions", b"override_dimensions"]) -> None: ...
+    @typing.overload
     def WhichOneof(self, oneof_group: typing.Literal["_expected_tokens", b"_expected_tokens"]) -> typing.Literal["expected_tokens"] | None: ...
+    @typing.overload
+    def WhichOneof(self, oneof_group: typing.Literal["_override_dimensions", b"_override_dimensions"]) -> typing.Literal["override_dimensions"] | None: ...
 
 Global___ImageChunk: typing_extensions.TypeAlias = ImageChunk
+
+@typing.final
+class ImageDimensions(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    WIDTH_FIELD_NUMBER: builtins.int
+    HEIGHT_FIELD_NUMBER: builtins.int
+    width: builtins.int
+    height: builtins.int
+    def __init__(
+        self,
+        *,
+        width: builtins.int = ...,
+        height: builtins.int = ...,
+    ) -> None: ...
+    def ClearField(self, field_name: typing.Literal["height", b"height", "width", b"width"]) -> None: ...
+
+Global___ImageDimensions: typing_extensions.TypeAlias = ImageDimensions
 
 @typing.final
 class DmelChunk(google.protobuf.message.Message):
