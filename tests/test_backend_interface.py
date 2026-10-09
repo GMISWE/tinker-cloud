@@ -15,12 +15,10 @@ Tests are organized by dependency level:
 import asyncio
 import importlib.util
 import inspect
-import logging
 import pytest
 
 from tinkercloud.training.backends.base import (
     BackendError,
-    BackendHandle,
     TrainingBackend,
     UnsupportedFeatureError,
 )
@@ -265,6 +263,14 @@ class TestSamplingContract:
 class TestNemoRLArgumentBuilder:
     """Test NemoRLArgumentBuilder config generation."""
 
+    @pytest.fixture(autouse=True)
+    def model_config_on_disk(self, monkeypatch):
+        # The builder sizes itself from the model's raw config.json (D17); no hub here.
+        from tinkercloud.training.backends.nemo_rl import builder as mod
+        monkeypatch.setattr(mod, "read_raw_hf_config", lambda base_model: {
+            "architectures": ["LlamaForCausalLM"], "max_position_embeddings": 131072,
+        })
+
     @pytest.fixture
     def builder(self):
         from tinkercloud.training.backends.nemo_rl.builder import NemoRLArgumentBuilder
@@ -374,18 +380,6 @@ class TestNemoRLArgumentBuilder:
             num_gpus=4,
         )
         assert config_dict["policy"]["precision"] == "float32"
-
-    def test_rlve_miles_only_warning(self, builder, caplog):
-        with caplog.at_level(logging.WARNING):
-            builder.build_args(
-                base_model="meta-llama/Llama-3.1-8B",
-                num_gpus=4,
-                rlve_config={
-                    "enabled": True,
-                    "custom_prompt_preprocessor": "math",
-                },
-            )
-        assert "Miles-only" in caplog.text
 
 
 # ---------------------------------------------------------------------------

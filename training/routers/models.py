@@ -28,6 +28,7 @@ from ..core.dependencies import (
 )
 from ..storage import MetadataStorage, FuturesStorage
 from ..models.requests import (
+    SERVED_OPTIMIZER,
     CreateModelRequest,
     DeleteModelRequest,
     UnloadModelRequest,
@@ -78,6 +79,15 @@ async def create_model(
     request_id = generate_request_id()
     model_id = generate_model_id()
 
+    # API-CONTRACT: only AdamW is served; a Dimuon run must fail here, not
+    # train under AdamW with its learning rate ignored.
+    if request.optimizer_config.type != SERVED_OPTIMIZER:
+        raise HTTPException(
+            status_code=400,
+            detail=f"optimizer_config.type {request.optimizer_config.type!r} is not supported "
+                   f"on this server; only {SERVED_OPTIMIZER!r} is",
+        )
+
     # Validate session exists (fail fast)
     if not session_service.session_exists(request.session_id):
         raise HTTPException(
@@ -91,20 +101,10 @@ async def create_model(
             request_id=request_id,
             base_model=request.base_model,
             lora_config=request.lora_config.dict() if request.lora_config else None,
-            debug_train_only=request.debug_train_only,
-            checkpoint_path=request.checkpoint_path,
             parallelism_config=request.parallelism_config.dict() if request.parallelism_config else None,
-            max_batch_size=request.max_batch_size,
-            max_seq_len=request.max_seq_len,
             metadata_storage=metadata_storage,
             training_clients=training_clients,
             training_runs_metadata=training_runs_metadata,
-            rlve_config=request.rlve_config.dict() if request.rlve_config else None,
-            wandb_config=request.wandb_config.dict() if request.wandb_config else None,
-            staleness_k=request.staleness_k,
-            objective=request.objective,
-            num_labels=request.num_labels,
-            head_config=request.head_config,
         )
         # Link only once the backend holds the model, so a failed create
         # leaves no dangling session->model entry.
@@ -113,7 +113,6 @@ async def create_model(
             model_id=model_id,
             model_seq_id=request.model_seq_id,
             base_model=request.base_model,
-            model_path=request.checkpoint_path,
         )
         logger.info(f"Model {model_id} (seq={request.model_seq_id}) linked to session {request.session_id}")
         return result

@@ -12,6 +12,9 @@ from ..env_config import EnvConfig
 
 class NemoRLConfig(EnvConfig):
     max_seq_len_cap: int = Field(32768, description="Ceiling when sizing max_seq_len up to the model's context")
+    max_seq_len: Optional[int] = Field(None, description="Sequence length to size for; None = the model's context, capped by max_seq_len_cap")
+    debug_train_only: bool = Field(False, description="No inference engine and no reference model; steps never refit")
+    staleness_k: int = Field(0, ge=0, description="Refit-elision bound (specs/012): defer the engine refit while latest - synced <= k; 0 = refit every step")
     default_tp: Optional[int] = Field(None, description="Force tensor parallel size")
     train_mbs: int = Field(1, description="Static micro-batch size when dynamic batching is off")
     train_mb_tokens: Optional[int] = Field(None, description="Dynamic-batch token budget; 0 disables; None = min(max_seq_len, 8192)")
@@ -31,6 +34,9 @@ class NemoRLConfig(EnvConfig):
 
     ENV = {
         "max_seq_len_cap": "TINKERCLOUD_MAX_SEQ_LEN_CAP",
+        "max_seq_len": "NEMORL_MAX_SEQ_LEN",
+        "debug_train_only": "NEMORL_DEBUG_TRAIN_ONLY",
+        "staleness_k": "NEMORL_STALENESS_K",
         "default_tp": "NEMORL_DEFAULT_TP",
         "train_mbs": "NEMORL_TRAIN_MBS",
         "train_mb_tokens": "NEMORL_TRAIN_MB_TOKENS",

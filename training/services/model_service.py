@@ -36,20 +36,10 @@ class ModelService:
         request_id: str,
         base_model: str,
         lora_config: Optional[Dict[str, Any]],
-        debug_train_only: bool,
-        checkpoint_path: Optional[str],
         parallelism_config: Optional[Dict[str, Any]],
-        max_batch_size: int,
-        max_seq_len: int,
         metadata_storage: MetadataStorage,
         training_clients: Dict[str, Dict[str, Any]],
         training_runs_metadata: Dict[str, Dict[str, Any]],
-        rlve_config: Optional[Dict[str, Any]] = None,
-        wandb_config: Optional[Dict[str, Any]] = None,
-        staleness_k: int = 0,
-        objective: str = "language_modeling",
-        num_labels: Optional[int] = None,
-        head_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Create a new training model via the backend abstraction.
@@ -63,14 +53,12 @@ class ModelService:
         if parallelism_config:
             num_gpus = parallelism_config.get("num_gpus", num_gpus)
 
-        # The URI is an identity; the backend gets the resolved directory of a
-        # completed weights checkpoint, and its own private area for this model.
-        resume_from = self.store.resolve_resume(checkpoint_path) if checkpoint_path else None
+        # The backend reads everything else from the model's own config.json
+        # and its backend configuration (D17). The URI is an identity; the
+        # backend gets its own private area for this model, and weights arrive
+        # through load_weights (D9), never at create.
         native_root = self.store.native_root(model_id)
 
-        # Delegate to backend. The objective axis (feature 004) is forwarded so
-        # classification backends can stand up a classification head; LM-only
-        # backends reject non-LM objectives. See specs/004-bionemo-classification.
         handle = await self.backend.create_model(
             model_id=model_id,
             request_id=request_id,
@@ -78,17 +66,7 @@ class ModelService:
             num_gpus=num_gpus,
             lora_config=lora_config,
             parallelism=parallelism_config,
-            debug_train_only=debug_train_only,
-            resume_from=resume_from,
             native_root=native_root,
-            max_batch_size=max_batch_size,
-            max_seq_len=max_seq_len,
-            rlve_config=rlve_config,
-            wandb_config=wandb_config,
-            staleness_k=staleness_k,
-            objective=objective,
-            num_labels=num_labels,
-            head_config=head_config,
         )
 
         # Save metadata
@@ -100,16 +78,12 @@ class ModelService:
             "base_model": base_model,
             "hf_path": hf_path,
             "lora_config": lora_config,
-            "rlve_config": rlve_config,
-            "wandb_config": wandb_config,
-            "objective": objective,
-            "num_labels": num_labels,
+            "objective": handle.objective,
+            "num_labels": handle.num_labels,
             "created_at": datetime.now().isoformat(),
-            "checkpoint_path": checkpoint_path,
             "model_owner": "kgateway-user",
             "is_lora": bool(lora_config and lora_config.get("rank", 0) > 0),
             "lora_rank": lora_config.get("rank", 0) if lora_config else 0,
-            "is_rlve": rlve_config is not None and rlve_config.get("enabled", False),
             "corrupted": False,
             "last_request_time": datetime.now().isoformat(),
             "last_checkpoint": None,
@@ -125,8 +99,6 @@ class ModelService:
             "hf_path": hf_path,
             "base_model": base_model,
             "lora_config": lora_config,
-            "rlve_config": rlve_config,
-            "wandb_config": wandb_config,
             "created_at": datetime.now().isoformat(),
         }
         training_clients[model_id] = client_info

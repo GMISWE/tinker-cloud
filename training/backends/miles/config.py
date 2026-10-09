@@ -41,6 +41,10 @@ class MilesConfig(EnvConfig):
     dyn_batch: bool = Field(True, description="use_dynamic_batch_size")
     max_tokens_per_gpu: Optional[int] = Field(None, description="max_tokens_per_gpu; None = max(8192, max_seq_len)")
     enable_wandb: bool = Field(False, description="Slime-side wandb logging when the client sends none")
+    # Formerly client-declared on create_model (specs/025, D17): now operator knobs.
+    debug_train_only: bool = Field(False, description="Skip SGLang weight pushes after optim_step")
+    global_batch_size: int = Field(4096, ge=1, description="Megatron --global-batch-size (samples per train step without accumulation)")
+    max_seq_len: int = Field(2048, ge=1, description="Sequence length for parallelism auto-detect and token budgets")
 
     ENV = {
         "multilora_slots": "TINKERCLOUD_MILES_MULTILORA_SLOTS",
@@ -68,4 +72,7 @@ class MilesConfig(EnvConfig):
         "dyn_batch": "SLIME_DYN_BATCH",
         "max_tokens_per_gpu": "SLIME_MAX_TOKENS_PER_GPU",
         "enable_wandb": "SLIME_ENABLE_WANDB",
+        "debug_train_only": "TINKERCLOUD_MILES_DEBUG_TRAIN_ONLY",
+        "global_batch_size": "TINKERCLOUD_MILES_GLOBAL_BATCH_SIZE",
+        "max_seq_len": "TINKERCLOUD_MILES_MAX_SEQ_LEN",
     }

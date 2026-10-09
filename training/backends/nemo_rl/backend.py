@@ -23,6 +23,8 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from ..base import BackendError, BackendHandle, TrainingBackend
+from ...utils.model_config import read_raw_hf_config
+from ..objectives import classification_spec
 from ..http_pool import HttpClientPool
 from ...models.requests import Datum
 from .config import NemoRLConfig
@@ -63,11 +65,9 @@ class NemoRLHandle(BackendHandle):
     image_preprocessor: Any = None   # ImagePreprocessor (VLM only)
     colocated_inference: bool = True
     refit_memory_ratio: float = 0.3      # share of free GPU memory for the IPC refit buffer
-    rlve_config: Optional[Dict[str, Any]] = None
-    wandb_config: Optional[Dict[str, Any]] = None
     created_at: str = ""
     training_run_id: str = ""
-    debug_train_only: bool = False
+    debug_train_only: bool = False   # NEMORL_DEBUG_TRAIN_ONLY at create
     loss_fn_name: str = ""               # String name from last forward_backward()
     loss_fn_config: Optional[Dict[str, float]] = None  # per-call hyperparameters of the buffered batch
     generation_state: str = "generation_ready"  # "generation_ready" | "training_ready"
@@ -137,24 +137,18 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         parallelism: Optional[Dict[str, Any]] = None,
         rl_config: Optional[Dict[str, Any]] = None,
         rollout_config: Optional[Dict[str, Any]] = None,
-        debug_train_only: bool = False,
-        resume_from: Optional[Path] = None,
-        max_batch_size: int = 4096,
-        max_seq_len: int = 2048,
-        rlve_config: Optional[Dict[str, Any]] = None,
-        wandb_config: Optional[Dict[str, Any]] = None,
-        staleness_k: int = 0,
-        objective: str = "language_modeling",
-        num_labels: Optional[int] = None,
-        head_config: Optional[Dict[str, Any]] = None,
         native_root: Optional[Path] = None,
     ) -> NemoRLHandle:
-        if objective != "language_modeling":
+        classification = classification_spec(await asyncio.to_thread(read_raw_hf_config, base_model))
+        if classification is not None:
             raise BackendError(
-                f"NeMo RL is a language-modeling backend; objective {objective!r} "
-                f"requires a classification backend (automodel / megatron_bridge)",
+                f"NeMo RL is a language-modeling backend; {base_model!r} declares a "
+                f"{classification.objective.value} head, which needs the automodel or "
+                f"megatron_bridge backend",
                 backend="nemo_rl", operation="create_model",
             )
+        debug_train_only = self.config.debug_train_only
+        staleness_k = self.config.staleness_k
         try:
             logger.info("[%s] Creating NeMo RL model %s", request_id, model_id)
 
@@ -166,24 +160,14 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                 parallelism=parallelism,
                 rl_config=rl_config,
                 rollout_config=rollout_config,
-                debug_train_only=debug_train_only,
-                max_batch_size=max_batch_size,
-                max_seq_len=max_seq_len,
-                rlve_config=rlve_config,
-                wandb_config=wandb_config,
             )
             logger.info("[%s] NeMo RL config built, hf_path=%s", request_id, hf_path)
-
-            # Policy(weights_path=...) goes straight to the checkpoint
-            # manager's load_checkpoint, so it needs the <root>/weights dir,
-            # with a foreign adapter staged into the layout that loader sniffs.
-            init_weights_path = _stage_foreign_adapter(str(resume_from)) if resume_from else None
 
             colocated_inference = self.config.colocated and not debug_train_only
             components = await asyncio.to_thread(
                 _init_nemo_rl_components,
                 config_dict=config_dict,
-                checkpoint_path=init_weights_path,
+                checkpoint_path=None,
                 debug_train_only=debug_train_only,
                 colocated_inference=colocated_inference,
                 refit_memory_ratio=self.config.refit_buffer_memory_ratio,
@@ -219,8 +203,6 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                 hf_path=hf_path,
                 colocated_inference=colocated_inference,
                 refit_memory_ratio=self.config.refit_buffer_memory_ratio,
-                rlve_config=rlve_config,
-                wandb_config=wandb_config,
                 created_at=datetime.now().isoformat(),
                 training_run_id=model_id,
                 debug_train_only=debug_train_only,
@@ -229,7 +211,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             )
             if staleness_k > 0:
                 logger.info(
-                    "[%s] staleness_k=%d declared: inference-engine refit deferred "
+                    "[%s] NEMORL_STALENESS_K=%d: inference-engine refit deferred "
                     "while latest - synced <= k; ver(S) certified per sample",
                     request_id, staleness_k,
                 )
@@ -503,16 +485,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             all_data = await asyncio.to_thread(_concatenate_batches, buffered_batches)
             phases["concat"] = time.time() - _t
 
-            # CHK027: Warn if buffered sample count doesn't match train_global_batch_size
-            # (check BEFORE padding so the warning reflects actual data volume)
             original_size = all_data.size
-            gbs = handle.config["policy"]["train_global_batch_size"]
-            if gbs > 0 and original_size != gbs:
-                logger.warning(
-                    "Buffered %d samples but train_global_batch_size=%d. "
-                    "NeMo RL will process all %d samples. Verify this is intended.",
-                    original_size, gbs, original_size,
-                )
 
             # Pad partial batch if needed — policy.train() → shard_by_batch_size()
             # asserts batch_size % dp_size == 0, so a partial batch will crash.

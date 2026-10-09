@@ -54,6 +54,10 @@ class BackendHandle:
     # engines. The model service publishes them to core.routing at
     # create_model; sample paths read the table, not this.
     inference_endpoints: Tuple[str, ...] = ()
+    # The head the model's config.json declared at create (objectives.py);
+    # language modeling unless a classification backend read one.
+    objective: str = "language_modeling"
+    num_labels: Optional[int] = None
 
 
 # Each backend's handle subclass: a backend only ever receives the handles its
@@ -92,36 +96,28 @@ class TrainingBackend(ABC, Generic[H]):
         parallelism: Optional[Dict[str, Any]] = None,
         rl_config: Optional[Dict[str, Any]] = None,
         rollout_config: Optional[Dict[str, Any]] = None,
-        debug_train_only: bool = False,
-        resume_from: Optional[Path] = None,
-        max_batch_size: int = 4096,
-        max_seq_len: int = 2048,
-        rlve_config: Optional[Dict[str, Any]] = None,
-        wandb_config: Optional[Dict[str, Any]] = None,
-        staleness_k: int = 0,
-        objective: str = "language_modeling",
-        num_labels: Optional[int] = None,
-        head_config: Optional[Dict[str, Any]] = None,
         native_root: Optional[Path] = None,
     ) -> H:
         """
         Initialize training actors and inference engine.
 
-        Checkpoint directories come resolved from the checkpoint store
-        (training/checkpoints); a backend never sees a tinker:// URI.
-        `resume_from` is the root of a completed `weights` checkpoint to load
-        weights-only from (fresh optimizer, RNG and iteration count).
+        Everything a backend sizes itself by comes from its own configuration
+        or the model's config.json, never from the request (specs/025, D17):
+        context length, batch shape, debug mode, staleness bound. Weights
+        arrive through load_checkpoint (D9); nothing is loaded at create.
         `native_root` is this model's private directory under the checkpoint
         base -- the place for anything the engine writes on its own terms
         (Megatron --save, per-adapter step checkpoints); the service always
         passes it, and it outlives the model so a later resume can find what
         was written there.
 
-        The objective axis (feature 004) is additive: language_modeling is the
-        default and leaves the existing causal path unchanged. LM-only backends
-        (Miles, NeMo RL) must reject classification objectives with a
-        BackendError; classification backends (Automodel, Megatron-Bridge)
-        require num_labels. See specs/004-bionemo-classification/plan.md.
+        The backend reads the model's raw config.json itself
+        (utils.model_config.read_raw_hf_config): context length for its own
+        sizing, and the classification head via objectives.classification_spec.
+        Language-modeling backends (Miles, NeMo RL, verl) must reject a model
+        that declares a head with BackendError; classification backends
+        (Automodel, Megatron-Bridge) require one. The fake backend reads
+        nothing: it is a test double.
 
         Returns:
             BackendHandle with backend-specific state.

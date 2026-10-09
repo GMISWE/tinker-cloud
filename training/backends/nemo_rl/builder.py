@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 
 from ..base import ArgumentBuilder
 from .config import NemoRLConfig
-from ...utils.model_config import detect_num_gpus
+from ...utils.model_config import derive_max_seq_len, detect_num_gpus, read_raw_hf_config
 from .loss_config import NO_GRAD_CLIP, TINKER_PG_LOSS_DEFAULTS
 
 logger = logging.getLogger(__name__)
@@ -20,33 +20,6 @@ logger = logging.getLogger(__name__)
 # can raise it (Explicit Configuration) for long-context runs.
 
 # HF config attributes that report a model's max context window, in priority order.
-_MAX_POSITIONS_ATTRS = (
-    "max_position_embeddings",
-    "n_positions",
-    "max_sequence_length",
-    "seq_length",
-    "model_max_length",
-)
-
-
-def _read_model_max_positions(cfg: Any) -> Optional[int]:
-    """Best-effort read of a model's native context window from its HF config.
-
-    Falls back to a nested text_config (VLMs / composite configs). Returns None
-    when no sane positive value is found.
-    """
-    candidates = [cfg]
-    text_cfg = getattr(cfg, "text_config", None)
-    if text_cfg is not None:
-        candidates.append(text_cfg)
-    for c in candidates:
-        for attr in _MAX_POSITIONS_ATTRS:
-            val = getattr(c, attr, None)
-            if isinstance(val, int) and 0 < val < 10_000_000:
-                return val
-    return None
-
-
 class NemoRLArgumentBuilder(ArgumentBuilder):
     """Builds NeMo RL PolicyConfig + loss config from Tinker API parameters."""
 
@@ -79,21 +52,21 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
             num_gpus = detect_num_gpus()
             logger.info("Auto-detected %d GPUs for NeMo RL config", num_gpus)
 
-        debug_train_only = kwargs.get("debug_train_only", False)
-        max_batch_size = kwargs.get("max_batch_size", 4096)
-        # The client sends max_seq_len=2048 by default (upstream Tinker never has
-        # the training script declare a context length). Treat it as a floor and
-        # size up to the model's native context below, so long-context recipes
-        # (e.g. harbor_rl, 32K trajectories) work with no cookbook/SDK change.
-        requested_seq_len = kwargs.get("max_seq_len", 2048)
-        seq_len_cap = self.cfg.max_seq_len_cap
-        max_seq_len = requested_seq_len
-        rlve_config = kwargs.get("rlve_config")
-        wandb_config = kwargs.get("wandb_config")
-
+        debug_train_only = self.cfg.debug_train_only
         hf_path = base_model
 
-        # Detect VLM + read the model's native context window (cheap — reads config.json)
+        # The model's own config.json is the single source for its context
+        # window (D17): NEMORL_MAX_SEQ_LEN overrides, TINKERCLOUD_MAX_SEQ_LEN_CAP
+        # caps. A config that declares no context length is an error, not 2048.
+        raw_config = read_raw_hf_config(hf_path)
+        max_seq_len = derive_max_seq_len(raw_config, self.cfg.max_seq_len_cap, self.cfg.max_seq_len)
+        logger.info(
+            "max_seq_len=%d (%s)", max_seq_len,
+            "NEMORL_MAX_SEQ_LEN" if self.cfg.max_seq_len is not None
+            else f"model context capped at {self.cfg.max_seq_len_cap}",
+        )
+
+        # Detect VLM (cheap — reads config.json)
         is_vlm = False
         try:
             from transformers import AutoConfig
@@ -105,33 +78,8 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
             )
             if is_vlm:
                 logger.info("VLM detected: %s — enforcing sequence_packing=False, cp_size=1", cfg.__class__.__name__)
-
-            model_ctx = _read_model_max_positions(cfg)
-            if model_ctx:
-                derived = min(model_ctx, seq_len_cap)
-                max_seq_len = max(requested_seq_len, derived)
-                if max_seq_len != requested_seq_len:
-                    logger.info(
-                        "max_seq_len raised %d -> %d (model context %d, cap %d)",
-                        requested_seq_len, max_seq_len, model_ctx, seq_len_cap,
-                    )
         except Exception as e:
-            logger.debug("model config read skipped (VLM/seq-len detection): %s", e)
-
-        if rlve_config and rlve_config.get("enabled", False):
-            miles_only_keys = [
-                "custom_prompt_preprocessor", "answer_marker_type",
-                "difficulty_sliding_window_size", "min_metric_to_increase_difficulty",
-                "min_prompts_before_difficulty_check", "over_sampling_batch_size",
-                "use_dynamic_sampling_filter", "partial_rollout", "balance_data",
-            ]
-            unsupported = [k for k in miles_only_keys if k in rlve_config]
-            if unsupported:
-                logger.warning(
-                    "RLVE server-side args ignored on NeMo RL backend (Miles-only): %s. "
-                    "RLVE in Tinker mode is client-driven — these settings have no effect.",
-                    unsupported,
-                )
+            logger.debug("model config read skipped (VLM detection): %s", e)
 
         # specs/021: with colocated=False vLLM owns `inference_gpus` of the
         # client's num_gpus and the trainer gets the rest; the train DP is
@@ -197,8 +145,11 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
         # sample-exceeds-budget assert.
         # NEMORL_TRAIN_MB_TOKENS: override base budget; 0 disables dynamic
         # batching; NEMORL_TRAIN_MBS then sets the static micro-batch size.
-        train_global_batch_size = max_batch_size
+        # The backend passes the real sample count as gbs on every train() call
+        # (apply_optimizer_step), so the config value is only NeMo RL's shape
+        # check: the smallest batch the DP layout admits.
         train_micro_batch_size = self.cfg.train_mbs
+        train_global_batch_size = train_micro_batch_size * (train_gpus // model_parallel)
         dyn_env = self.cfg.train_mb_tokens
         # VLMs keep the static path: dynamic batching's slice/truncate is
         # unvalidated against multimodal kwargs (same conservatism as the
@@ -487,8 +438,6 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
             "checkpointing": checkpointing_config,
             "num_gpus": num_gpus,
             "debug_train_only": debug_train_only,
-            "wandb_config": wandb_config,
-            "rlve_config": rlve_config,
         }
 
         if self.overrides:

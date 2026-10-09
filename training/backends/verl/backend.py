@@ -27,6 +27,9 @@ from typing import Any, Dict, List, Optional
 import torch
 
 from ..base import BackendError, BackendHandle, TrainingBackend, UnsupportedFeatureError
+from ...utils.model_config import read_raw_hf_config
+from ..objectives import classification_spec
+from .config import VerlConfig
 from ...models.requests import Datum
 from ...checkpoints.interchange import (
     HF_ADAPTER_DIRNAME,
@@ -74,6 +77,7 @@ class VerlBackend(TrainingBackend[VerlHandle]):
 
     def __init__(self, overrides: Optional[Dict[str, Any]] = None):
         self.overrides = overrides or {}
+        self.config = VerlConfig.from_env()
         self._converter = None
         self._builder = None
 
@@ -103,51 +107,29 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         parallelism: Optional[Dict[str, Any]] = None,
         rl_config: Optional[Dict[str, Any]] = None,
         rollout_config: Optional[Dict[str, Any]] = None,
-        debug_train_only: bool = False,
-        resume_from: Optional[Path] = None,
-        max_batch_size: int = 4096,
-        max_seq_len: int = 2048,
-        rlve_config: Optional[Dict[str, Any]] = None,
-        wandb_config: Optional[Dict[str, Any]] = None,
-        staleness_k: int = 0,
-        objective: str = "language_modeling",
-        num_labels: Optional[int] = None,
-        head_config: Optional[Dict[str, Any]] = None,
         native_root: Optional[Path] = None,
     ) -> VerlHandle:
-        if staleness_k > 0:
-            # verl's sync is already lazy but version-gated to staleness 0 at
-            # sample time; the declaration is accepted but unexploited.
-            logger.info(
-                "[%s] staleness_k=%d declared; verl serves staleness 0 "
-                "(lazy sync, version-gated) — declaration unexploited",
-                request_id, staleness_k,
-            )
-        if objective != "language_modeling":
+        classification = classification_spec(await asyncio.to_thread(read_raw_hf_config, base_model))
+        if classification is not None:
             raise BackendError(
-                f"verl is a language-modeling backend; objective {objective!r} unsupported",
+                f"verl is a language-modeling backend; {base_model!r} declares a "
+                f"{classification.objective.value} head",
                 backend="verl", operation="create_model",
             )
         try:
             cfg = self.builder.build_args(
                 base_model=base_model, num_gpus=num_gpus, lora_config=lora_config,
                 parallelism=parallelism, rl_config=rl_config,
-                rollout_config=rollout_config, max_seq_len=max_seq_len,
+                rollout_config=rollout_config, max_seq_len=self.config.max_seq_len,
             )
 
-            # A checkpoint carrying an interchange adapter (written by another
-            # backend, or by us) is attached at model build time — verl's PEFT
-            # path wraps the module BEFORE FSDP, so it cannot be a post-boot
-            # load_checkpoint. Native verl shards still resume that way.
+            # Interchange adapters attach at model build (verl's PEFT path wraps
+            # the module before FSDP), and nothing is loaded at create any more
+            # (D9): a foreign adapter resumes only through load_checkpoint's
+            # native path. verl is UNGATED; see specs/025.
             adapter_dir = None
-            if resume_from:
-                ckpt_root = str(resume_from)
-                adapter_dir = find_hf_adapter(ckpt_root)
-                if adapter_dir:
-                    cfg["model"]["lora_adapter_path"] = adapter_dir
-                    _adopt_adapter_shape(ckpt_root, cfg["model"])
 
-            enable_rollout = not debug_train_only
+            enable_rollout = not self.config.debug_train_only
             boot = await asyncio.to_thread(
                 _boot_worker_group, cfg, model_id, enable_rollout,
             )
@@ -171,8 +153,6 @@ class VerlBackend(TrainingBackend[VerlHandle]):
                 rollout_synced_version=0 if enable_rollout else -1,
                 lora_rank=int(cfg["model"]["lora_rank"] or 0),
             )
-            if resume_from and adapter_dir is None:
-                await self.load_checkpoint(handle, resume_from)
             logger.info(
                 "[%s] verl model %s created (dp=%d, rollout=%s, adapter=%s)",
                 request_id, model_id, handle.dp_size, enable_rollout, adapter_dir,
