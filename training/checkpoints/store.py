@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..storage.metadata import MetadataStorage
 
@@ -277,6 +277,23 @@ class CheckpointStore:
             out.append(item)
         out.sort(key=lambda r: r.get("created_at") or "", reverse=True)
         return out
+
+    def model_ids(self) -> List[str]:
+        """Every model with a checkpoint record, live or not."""
+        return sorted(d.name for d in self.metadata.checkpoints_dir.glob("*") if d.is_dir())
+
+    def usage(self) -> Tuple[int, int]:
+        """(count, bytes) over the completed persistent checkpoints of every
+        model. A completed record whose root is gone counts with 0 bytes."""
+        count = 0
+        size_bytes = 0
+        for model_id in self.model_ids():
+            for item in self.list(model_id, with_size=True):
+                if item["status"] != CheckpointStatus.COMPLETED.value:
+                    continue
+                count += 1
+                size_bytes += item["size_bytes"] or 0
+        return count, size_bytes
 
     # deletion ----------------------------------------------------------------
 

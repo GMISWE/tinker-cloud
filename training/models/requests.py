@@ -433,6 +433,23 @@ class CreateSamplingSessionRequest(BaseModel):
     type: str = Field(default="create_sampling_session", description="Request type")
 
 
+class JoinSamplingSessionRequest(BaseModel):
+    """Request from a cloned SamplingClient for its own client id."""
+    sampling_session_id: str = Field(..., description="Existing sampling session to join")
+    type: str = Field(default="join_sampling_session", description="Request type")
+
+
+class FinishReason(BaseModel):
+    """Why the client finished its session."""
+    type: Literal["success", "errored", "interrupted"] = Field(..., description="Terminal outcome")
+
+
+class FinishSessionRequest(BaseModel):
+    """Request to mark a session terminal (POST /api/v1/sessions/{id}/finish)."""
+    reason: FinishReason = Field(..., description="Terminal outcome; first-wins")
+    detail: Optional[str] = Field(default=None, description="Human-readable explanation")
+
+
 # ============= Weights Info Models =============
 
 class WeightsInfoRequest(BaseModel):

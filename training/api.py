@@ -44,6 +44,7 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
     from .routers import checkpoints as checkpoints_router_module
     from .routers import sampling as sampling_router_module
     from .routers import session as session_router_module
+    from .routers import billing as billing_router_module
 
     # Include all routers
     application.include_router(training_router_module.router)
@@ -53,7 +54,8 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
     application.include_router(checkpoints_router_module.router)
     application.include_router(sampling_router_module.router)
     application.include_router(session_router_module.router)
-    logger.info("✅ Modular routers integrated: training, health, futures, models, checkpoints, sampling, session")
+    application.include_router(billing_router_module.router)
+    logger.info("✅ Modular routers integrated: training, health, futures, models, checkpoints, sampling, session, billing")
 
     @application.on_event("startup")
     async def startup_event():

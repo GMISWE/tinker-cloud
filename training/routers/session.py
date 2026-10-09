@@ -5,22 +5,29 @@ Endpoints:
 - POST /api/v1/create_session - Create client session with metadata
 - POST /api/v1/session_heartbeat - Keep session alive
 - POST /api/v1/create_sampling_session - Create a sampling session
+- POST /api/v1/join_sampling_session - Allocate a client id for a cloned SamplingClient
+- POST /api/v1/sessions/{session_id}/finish - Mark a session terminal (first-wins)
 - GET /api/v1/sessions - List sessions with pagination
 - GET /api/v1/sessions/{session_id} - Get session details
 - GET /api/v1/samplers/{sampler_id} - Get sampler details
 """
+import json
 import logging
 import uuid
-from typing import Dict
+from typing import Any, Dict
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..models.requests import (
     CreateSessionRequest,
+    FinishSessionRequest,
+    JoinSamplingSessionRequest,
     SessionHeartbeatRequest,
     CreateSamplingSessionRequest,
 )
 from ..models.responses import (
     CreateSessionResponse,
+    FinishSessionResponse,
+    JoinSamplingSessionResponse,
     SessionHeartbeatResponse,
     CreateSamplingSessionResponse,
     GetSessionResponse,
@@ -82,12 +89,19 @@ async def session_heartbeat(
     This endpoint is called periodically by the tinker client
     to signal that the session is still active.
     """
-    # Update heartbeat timestamp (returns False if session not found)
-    if not session_service.heartbeat(request.session_id):
+    session = session_service.get_session(request.session_id)
+    if session is None:
         raise HTTPException(
             status_code=404,
             detail=f"Session not found: {request.session_id}"
         )
+    # The SDK stops its heartbeat loop on 410 ("session has finished").
+    if session.finished_at is not None:
+        raise HTTPException(
+            status_code=410,
+            detail=f"Session finished ({session.finish_reason}): {request.session_id}"
+        )
+    session_service.heartbeat(request.session_id)
 
     return SessionHeartbeatResponse()
 
@@ -145,6 +159,47 @@ async def create_sampling_session(
     return CreateSamplingSessionResponse(sampling_session_id=sampling_session_id)
 
 
+@router.post("/api/v1/join_sampling_session", response_model=JoinSamplingSessionResponse)
+async def join_sampling_session(
+    request: JoinSamplingSessionRequest,
+    _: None = Depends(verify_api_key_dep),
+    session_service: SessionService = Depends(get_session_service),
+):
+    """Allocate a client id for a new client (unpickled SamplingClient) of an
+    existing sampling session. The creator is 0; joiners get 1, 2, ... and
+    put their seq_ids in the block 1e9 * client_counter."""
+    client_counter = session_service.join_sampling_session(request.sampling_session_id)
+    if client_counter is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Sampling session not found: {request.sampling_session_id}"
+        )
+    return JoinSamplingSessionResponse(client_counter=client_counter)
+
+
+@router.post("/api/v1/sessions/{session_id}/finish", response_model=FinishSessionResponse)
+async def finish_session(
+    session_id: str,
+    request: FinishSessionRequest,
+    _: None = Depends(verify_api_key_dep),
+    session_service: SessionService = Depends(get_session_service),
+):
+    """Mark the session terminal. Every ServiceClient exit sends this.
+    First-wins: a second finish is accepted and returns the recorded reason.
+    Live models and samplers are untouched; the reaper frees them once
+    heartbeats stop (the SDK stops heartbeating after finish)."""
+    session = session_service.finish_session(session_id, request.reason.type, request.detail)
+    if session is None:
+        raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
+    assert session.finished_at is not None and session.finish_reason is not None
+    return FinishSessionResponse(
+        session_id=session_id,
+        reason=session.finish_reason,
+        detail=session.finish_detail,
+        finished_at=session.finished_at.isoformat(),
+    )
+
+
 # ============================================================================
 # Session Query Endpoints
 # ============================================================================
@@ -186,10 +241,16 @@ async def get_session(
             detail=f"Session not found: {session_id}"
         )
 
+    # The SDK validates dict[str, str] strictly; create_session accepted any JSON value.
     return GetSessionResponse(
         training_run_ids=session.model_ids,
-        sampler_ids=session.sampling_session_ids
+        sampler_ids=session.sampling_session_ids,
+        user_metadata={k: _metadata_str(v) for k, v in session.user_metadata.items()},
     )
+
+
+def _metadata_str(value: Any) -> str:
+    return value if isinstance(value, str) else json.dumps(value)
 
 
 @router.get("/api/v1/samplers/{sampler_id}", response_model=GetSamplerResponse)

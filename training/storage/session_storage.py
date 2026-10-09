@@ -49,7 +49,10 @@ class SessionStorage:
                         tags TEXT,
                         user_metadata TEXT,
                         created_at TEXT NOT NULL,
-                        last_heartbeat TEXT NOT NULL
+                        last_heartbeat TEXT NOT NULL,
+                        finished_at TEXT,
+                        finish_reason TEXT,
+                        finish_detail TEXT
                     )
                 """)
 
@@ -61,9 +64,18 @@ class SessionStorage:
                         model_id TEXT,
                         base_model TEXT,
                         model_path TEXT,
-                        created_at TEXT NOT NULL
+                        created_at TEXT NOT NULL,
+                        client_counter INTEGER NOT NULL DEFAULT 0
                     )
                 """)
+
+                # Columns added after the first release; a pre-existing db lacks them.
+                self._add_missing_columns(cursor, "sessions", {
+                    "finished_at": "TEXT", "finish_reason": "TEXT", "finish_detail": "TEXT",
+                })
+                self._add_missing_columns(cursor, "samplers", {
+                    "client_counter": "INTEGER NOT NULL DEFAULT 0",
+                })
 
                 # Session models table (track model_seq_id + context for matching)
                 cursor.execute("""
@@ -96,6 +108,30 @@ class SessionStorage:
                 logger.info(f"Initialized session database at {self.db_path}")
             finally:
                 conn.close()
+
+    @staticmethod
+    def _add_missing_columns(cursor: sqlite3.Cursor, table: str, columns: Dict[str, str]) -> None:
+        present = {row[1] for row in cursor.execute(f"PRAGMA table_info({table})").fetchall()}
+        for name, decl in columns.items():
+            if name not in present:
+                cursor.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
+    @staticmethod
+    def _session_row(row: Tuple[Any, ...]) -> Dict[str, Any]:
+        return {
+            "session_id": row[0],
+            "sdk_version": row[1],
+            "tags": json.loads(row[2]) if row[2] else [],
+            "user_metadata": json.loads(row[3]) if row[3] else {},
+            "created_at": row[4],
+            "last_heartbeat": row[5],
+            "finished_at": row[6],
+            "finish_reason": row[7],
+            "finish_detail": row[8],
+        }
+
+    _SESSION_COLUMNS = ("session_id, sdk_version, tags, user_metadata, created_at, last_heartbeat, "
+                        "finished_at, finish_reason, finish_detail")
 
     # =========================================================================
     # Session CRUD
@@ -162,23 +198,12 @@ class SessionStorage:
             conn = sqlite3.connect(str(self.db_path))
             try:
                 cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT session_id, sdk_version, tags, user_metadata, created_at, last_heartbeat
-                    FROM sessions
-                    WHERE session_id = ?
-                """, (session_id,))
+                cursor.execute(
+                    f"SELECT {self._SESSION_COLUMNS} FROM sessions WHERE session_id = ?",
+                    (session_id,),
+                )
                 row = cursor.fetchone()
-
-                if row:
-                    return {
-                        "session_id": row[0],
-                        "sdk_version": row[1],
-                        "tags": json.loads(row[2]) if row[2] else [],
-                        "user_metadata": json.loads(row[3]) if row[3] else {},
-                        "created_at": row[4],
-                        "last_heartbeat": row[5]
-                    }
-                return None
+                return self._session_row(row) if row else None
             finally:
                 conn.close()
 
@@ -197,24 +222,11 @@ class SessionStorage:
             conn = sqlite3.connect(str(self.db_path))
             try:
                 cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT session_id, sdk_version, tags, user_metadata, created_at, last_heartbeat
-                    FROM sessions
-                    ORDER BY created_at DESC
-                    LIMIT ? OFFSET ?
-                """, (limit, offset))
-
-                sessions = []
-                for row in cursor.fetchall():
-                    sessions.append({
-                        "session_id": row[0],
-                        "sdk_version": row[1],
-                        "tags": json.loads(row[2]) if row[2] else [],
-                        "user_metadata": json.loads(row[3]) if row[3] else {},
-                        "created_at": row[4],
-                        "last_heartbeat": row[5]
-                    })
-                return sessions
+                cursor.execute(
+                    f"SELECT {self._SESSION_COLUMNS} FROM sessions ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                    (limit, offset),
+                )
+                return [self._session_row(row) for row in cursor.fetchall()]
             finally:
                 conn.close()
 
@@ -237,6 +249,24 @@ class SessionStorage:
                     SET last_heartbeat = ?
                     WHERE session_id = ?
                 """, (datetime.utcnow().isoformat(), session_id))
+                conn.commit()
+                return cursor.rowcount > 0
+            finally:
+                conn.close()
+
+    def finish_session(
+        self, session_id: str, finished_at: datetime, reason: str, detail: Optional[str]
+    ) -> bool:
+        """Record the terminal reason; the caller has already enforced first-wins."""
+        with self._lock:
+            conn = sqlite3.connect(str(self.db_path))
+            try:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE sessions
+                    SET finished_at = ?, finish_reason = ?, finish_detail = ?
+                    WHERE session_id = ?
+                """, (finished_at.isoformat(), reason, detail, session_id))
                 conn.commit()
                 return cursor.rowcount > 0
             finally:
@@ -342,6 +372,33 @@ class SessionStorage:
             finally:
                 conn.close()
 
+    @staticmethod
+    def _sampler_row(row: Tuple[Any, ...]) -> Dict[str, Any]:
+        return {
+            "sampler_id": row[0],
+            "session_id": row[1],
+            "model_id": row[2],
+            "base_model": row[3],
+            "model_path": row[4],
+            "created_at": row[5],
+            "client_counter": row[6],
+        }
+
+    def set_sampler_client_counter(self, sampler_id: str, client_counter: int) -> bool:
+        """Persist the last client id handed out for a sampler."""
+        with self._lock:
+            conn = sqlite3.connect(str(self.db_path))
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE samplers SET client_counter = ? WHERE sampler_id = ?",
+                    (client_counter, sampler_id),
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+            finally:
+                conn.close()
+
     def load_sampler(self, sampler_id: str) -> Optional[Dict[str, Any]]:
         """
         Load a sampler from storage.
@@ -357,22 +414,12 @@ class SessionStorage:
             try:
                 cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT sampler_id, session_id, model_id, base_model, model_path, created_at
+                    SELECT sampler_id, session_id, model_id, base_model, model_path, created_at, client_counter
                     FROM samplers
                     WHERE sampler_id = ?
                 """, (sampler_id,))
                 row = cursor.fetchone()
-
-                if row:
-                    return {
-                        "sampler_id": row[0],
-                        "session_id": row[1],
-                        "model_id": row[2],
-                        "base_model": row[3],
-                        "model_path": row[4],
-                        "created_at": row[5]
-                    }
-                return None
+                return self._sampler_row(row) if row else None
             finally:
                 conn.close()
 
@@ -391,23 +438,12 @@ class SessionStorage:
             try:
                 cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT sampler_id, session_id, model_id, base_model, model_path, created_at
+                    SELECT sampler_id, session_id, model_id, base_model, model_path, created_at, client_counter
                     FROM samplers
                     WHERE session_id = ?
                     ORDER BY created_at ASC
                 """, (session_id,))
-
-                samplers = []
-                for row in cursor.fetchall():
-                    samplers.append({
-                        "sampler_id": row[0],
-                        "session_id": row[1],
-                        "model_id": row[2],
-                        "base_model": row[3],
-                        "model_path": row[4],
-                        "created_at": row[5]
-                    })
-                return samplers
+                return [self._sampler_row(row) for row in cursor.fetchall()]
             finally:
                 conn.close()
 
