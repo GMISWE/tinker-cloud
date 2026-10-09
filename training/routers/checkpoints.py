@@ -27,6 +27,7 @@ from ..core.dependencies import (
 from ..checkpoints import CheckpointKind, CheckpointRef, CheckpointStore
 from ..storage import MetadataStorage, FuturesStorage
 from ..models.requests import (
+    SERVED_OPTIMIZER,
     LoadWeightsRequest,
     SaveWeightsRequest,
     SaveWeightsForSamplerRequest,
@@ -188,7 +189,13 @@ async def load_weights(
         raise HTTPException(
             status_code=400,
             detail=f"LoadWeights is not permitted with seq_id {request.seq_id}: the model has already "
-                   "trained; create a new model with checkpoint_path instead",
+                   "trained; create a new model and load into it first",
+        )
+    if request.optimizer_config is not None and request.optimizer_config.type != SERVED_OPTIMIZER:
+        raise HTTPException(
+            status_code=400,
+            detail=f"optimizer_config.type {request.optimizer_config.type!r} is not supported "
+                   f"on this server; only {SERVED_OPTIMIZER!r} is",
         )
     ref = CheckpointRef.parse(request.path)           # 400 on a malformed path
     store.require(ref, kind=CheckpointKind.WEIGHTS)   # 404 / 425 / 500 / wrong kind, before the future exists

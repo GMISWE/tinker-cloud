@@ -2,9 +2,11 @@
 
 Shape ported from SkyRL tests/tinker/test_api.py (stop tokens, stop strings).
 The fake backend decodes token t as its decimal digits, space-joined, so stop
-strings are testable without a tokenizer; context_length == create_model's
-max_seq_len.
+strings are testable without a tokenizer. The context window comes from the
+model's own config.json (specs/025, D17): a fake model directory declares it.
 """
+import json
+
 import pytest
 from tinker import types
 
@@ -13,8 +15,16 @@ def _decode(tokens):
     return " ".join(str(t) for t in tokens)
 
 
-def _client(service_client, name, max_seq_len=2048):
-    tc = service_client.create_lora_training_client(base_model="fake/tiny", rank=2, max_seq_len=max_seq_len)
+def _fake_model(tmp_path, context: int) -> str:
+    d = tmp_path / f"fake-ctx{context}"
+    d.mkdir()
+    (d / "config.json").write_text(json.dumps(
+        {"architectures": ["FakeForCausalLM"], "max_position_embeddings": context}))
+    return str(d)
+
+
+def _client(service_client, name, base_model="fake/tiny"):
+    tc = service_client.create_lora_training_client(base_model=base_model, rank=2)
     return tc, tc.save_weights_and_get_sampling_client(name)
 
 
@@ -50,8 +60,8 @@ def test_string_stop_is_included_in_output(service_client):
     assert len(seq.tokens) == len(seq.logprobs)
 
 
-def test_max_tokens_above_4096_is_honoured(service_client):
-    tc, sc = _client(service_client, "c3", max_seq_len=16384)
+def test_max_tokens_above_4096_is_honoured(service_client, tmp_path):
+    tc, sc = _client(service_client, "c3", _fake_model(tmp_path, 16384))
     out = sc.sample(prompt=types.ModelInput.from_ints([1, 2, 3]), num_samples=1,
                     sampling_params=types.SamplingParams(max_tokens=8192, seed=1)).result()
     seq = out.sequences[0]
@@ -71,8 +81,8 @@ def test_missing_max_tokens_is_rejected(service_client, server):
     assert "max_tokens" in r.text
 
 
-def test_prompt_plus_max_tokens_over_context_is_400(service_client):
-    tc, sc = _client(service_client, "c5", max_seq_len=64)
+def test_prompt_plus_max_tokens_over_context_is_400(service_client, tmp_path):
+    tc, sc = _client(service_client, "c5", _fake_model(tmp_path, 64))
     prompt = types.ModelInput.from_ints(list(range(1, 41)))  # 40 tokens
     ok = sc.sample(prompt=prompt, num_samples=1,
                    sampling_params=types.SamplingParams(max_tokens=24, seed=1)).result()

@@ -16,7 +16,7 @@ from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 from typing import Dict, Tuple
 
-from ..models.requests import ForwardRequest, ForwardBackwardRequest, OptimStepRequest
+from ..models.requests import SERVED_OPTIMIZER, ForwardRequest, ForwardBackwardRequest, OptimStepRequest
 from ..models.responses import AsyncOperationResponse
 from ..services.training_service import TrainingService
 from ..core.task_manager import TaskManager
@@ -167,6 +167,15 @@ async def optim_step(
         raise HTTPException(
             status_code=404,
             detail=f"Model {request.model_id} not found"
+        )
+    # The SDK sends Adam as `adam_params` and every other family as
+    # `optimizer_params`. Only AdamW is served (API-CONTRACT UNSUPPORTED rows);
+    # anything else fails loudly instead of stepping AdamW at a stale rate.
+    if request.optimizer_params is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"optimizer_params.type {request.optimizer_params.type!r} is not supported "
+                   f"on this server; only {SERVED_OPTIMIZER!r} (adam_params) is",
         )
 
     # Get client info

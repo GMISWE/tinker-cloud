@@ -17,11 +17,11 @@ from typing import Any, Dict, List, Optional
 
 from ..base import BackendError, BackendHandle, TrainingBackend
 from ...models.requests import Datum
-from ..objectives import Objective, is_classification
+from ...utils.model_config import read_raw_hf_config
+from ..objectives import Objective, classification_spec
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_LORA_TARGETS = ["query", "key", "value", "dense"]
 _DEFAULT_LR = 1e-4
 
 
@@ -32,7 +32,6 @@ class AutomodelHandle(BackendHandle):
     base_model: str = ""
     objective: str = Objective.SEQUENCE_CLASSIFICATION.value
     num_labels: int = 0
-    head_config: Optional[Dict[str, Any]] = None
     lora_config: Optional[Dict[str, Any]] = None
     model: Any = None                 # PeftModel wrapping EsmFor*Classification
     tokenizer: Any = None
@@ -80,39 +79,25 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         parallelism: Optional[Dict[str, Any]] = None,
         rl_config: Optional[Dict[str, Any]] = None,
         rollout_config: Optional[Dict[str, Any]] = None,
-        debug_train_only: bool = False,
-        resume_from: Optional[Path] = None,
-        max_batch_size: int = 4096,
-        max_seq_len: int = 2048,
-        rlve_config: Optional[Dict[str, Any]] = None,
-        wandb_config: Optional[Dict[str, Any]] = None,
-        staleness_k: int = 0,  # vacuous: no generation engine to go stale
-        objective: str = Objective.SEQUENCE_CLASSIFICATION.value,
-        num_labels: Optional[int] = None,
-        head_config: Optional[Dict[str, Any]] = None,
         native_root: Optional[Path] = None,
     ) -> AutomodelHandle:
         """Load an HF classification model + PEFT LoRA (no generation engine)."""
-        if not is_classification(objective):
+        import asyncio
+        classification = classification_spec(await asyncio.to_thread(read_raw_hf_config, base_model))
+        if classification is None:
             raise BackendError(
-                f"Automodel backend only serves classification objectives, "
-                f"got {objective!r}",
+                f"Automodel backend only serves classification models; {base_model!r} "
+                f"declares no classification head in its config.json",
                 backend="automodel", operation="create_model",
             )
-        if not num_labels or num_labels < 2:
-            raise BackendError(
-                f"num_labels must be >= 2 for classification, got {num_labels!r}",
-                backend="automodel", operation="create_model",
-            )
-
-        objective = Objective(objective).value
+        objective = classification.objective.value
+        num_labels = classification.num_labels
         handle = AutomodelHandle(
             model_id=model_id,
             backend_type="automodel",
             base_model=base_model,
             objective=objective,
             num_labels=num_labels,
-            head_config=head_config,
             lora_config=lora_config,
             created_at=datetime.now().isoformat(),
         )
@@ -121,17 +106,14 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
             request_id, model_id, base_model, objective, num_labels,
         )
 
-        import asyncio
         await asyncio.to_thread(
-            self._build_model, handle, base_model, objective, num_labels,
-            lora_config, head_config, str(resume_from) if resume_from else None,
+            self._build_model, handle, base_model, objective, num_labels, lora_config,
         )
         return handle
 
     def _build_model(
         self, handle: AutomodelHandle, base_model: str, objective: str,
         num_labels: int, lora_config: Optional[Dict[str, Any]],
-        head_config: Optional[Dict[str, Any]], checkpoint_path: Optional[str],
     ) -> None:
         """Blocking model construction (runs in a thread)."""
         import torch
@@ -141,9 +123,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
             AutoTokenizer,
         )
 
-        hc = head_config or {}
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        dtype = _resolve_dtype(hc.get("torch_dtype"))
 
         model_cls = (
             AutoModelForTokenClassification
@@ -151,9 +131,10 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
             else AutoModelForSequenceClassification
         )
         try:
-            # transformers >=4.56 renamed torch_dtype -> dtype (old name warns).
+            # dtype="auto": the checkpoint's own torch_dtype, the single source
+            # that used to be head_config["torch_dtype"] (specs/025, D17).
             model = model_cls.from_pretrained(
-                base_model, num_labels=num_labels, dtype=dtype,
+                base_model, num_labels=num_labels, dtype="auto",
                 trust_remote_code=True,
             )
         except Exception as e:  # noqa: BLE001 — surface load failures as BackendError
@@ -164,27 +145,19 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
 
         tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
 
-        model = _apply_lora(model, objective, lora_config, hc)
-        if hc.get("freeze_base"):
-            # Linear-probe / head-only baseline: train only the classification
-            # head, freeze the encoder.
-            for name, p in model.named_parameters():
-                p.requires_grad = "classifier" in name or "score" in name
+        model = _apply_lora(model, objective, lora_config)
         model.to(device)
         model.train()
 
-        lr = float(hc.get("learning_rate", _DEFAULT_LR))
+        # The per-step AdamParams.learning_rate replaces this at optim_step.
         trainable = [p for p in model.parameters() if p.requires_grad]
-        optimizer = torch.optim.AdamW(trainable, lr=lr)
+        optimizer = torch.optim.AdamW(trainable, lr=_DEFAULT_LR)
 
         handle.model = model
         handle.tokenizer = tokenizer
         handle.optimizer = optimizer
         handle.device = device
-        handle.config = {"torch_dtype": str(dtype), "learning_rate": lr}
-
-        if checkpoint_path:
-            self._load_adapter(handle, checkpoint_path)
+        handle.config = {"torch_dtype": str(model.dtype), "learning_rate": _DEFAULT_LR}
 
         n_train = sum(p.numel() for p in trainable)
         n_total = sum(p.numel() for p in model.parameters())
@@ -353,7 +326,27 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         logger.info("Automodel model %s deleted", handle.model_id)
 
 
-def _apply_lora(model, objective: str, lora_config, head_config: Dict[str, Any]):
+# LoraConfig.train_attn / train_mlp select among these (ESM/BERT-style names:
+# attention projections, and `dense`, which covers the FFN and output layers).
+_ATTN_LORA_TARGETS = ["query", "key", "value"]
+_MLP_LORA_TARGETS = ["dense"]
+
+
+def _lora_targets(lora_config: Dict[str, Any]) -> List[str]:
+    targets: List[str] = []
+    if lora_config.get("train_attn", True):
+        targets += _ATTN_LORA_TARGETS
+    if lora_config.get("train_mlp", True):
+        targets += _MLP_LORA_TARGETS
+    if not targets:
+        raise BackendError(
+            "lora_config selects neither attention nor MLP layers; nothing to train",
+            backend="automodel", operation="create_model",
+        )
+    return targets
+
+
+def _apply_lora(model, objective: str, lora_config):
     """Wrap the model in a PEFT LoRA adapter for the classification task type.
 
     Returns the base model unchanged when no LoRA rank is requested.
@@ -369,7 +362,7 @@ def _apply_lora(model, objective: str, lora_config, head_config: Dict[str, Any])
         if Objective(objective) == Objective.TOKEN_CLASSIFICATION
         else TaskType.SEQ_CLS
     )
-    targets = head_config.get("target_modules") or _DEFAULT_LORA_TARGETS
+    targets = _lora_targets(lora_config)
     alpha = (lora_config or {}).get("alpha") or (2 * rank)
     dropout = (lora_config or {}).get("dropout", 0.0)
 
@@ -382,18 +375,6 @@ def _apply_lora(model, objective: str, lora_config, head_config: Dict[str, Any])
         bias="none",
     )
     return get_peft_model(model, peft_config)
-
-
-def _resolve_dtype(name: Optional[str]):
-    import torch
-    mapping = {
-        "float32": torch.float32, "fp32": torch.float32,
-        "float16": torch.float16, "fp16": torch.float16, "half": torch.float16,
-        "bfloat16": torch.bfloat16, "bf16": torch.bfloat16,
-    }
-    if not name:
-        return torch.float32
-    return mapping.get(str(name).lower(), torch.float32)
 
 
 def _to_device(batch, device):

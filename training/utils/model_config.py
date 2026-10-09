@@ -4,12 +4,60 @@ estimation, architecture detection. Miles-specific resolution (torch_dist
 paths, SGLang memory, parallelism auto-detect) lives in
 backends/miles/model_setup.py.
 """
+import json
 import logging
 import os
 import re
-from typing import Any, Dict
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def read_raw_hf_config(base_model: str) -> Dict[str, Any]:
+    """The model's config.json as written: a local directory's file, else the hub's.
+
+    Raw on purpose. transformers fills defaults when it loads a config
+    (num_labels=2, for one), and a default must never pass as a declaration.
+    """
+    hf_path = base_model.replace("_torch_dist", "")
+    local = Path(hf_path) / "config.json"
+    if local.is_file():
+        with local.open() as f:
+            return json.load(f)
+    from huggingface_hub import hf_hub_download
+    with open(hf_hub_download(hf_path, "config.json")) as f:
+        return json.load(f)
+
+
+_CONTEXT_LENGTH_KEYS = (
+    "max_position_embeddings", "n_positions", "seq_length",
+    "max_sequence_length", "max_seq_len",
+)
+
+
+def model_context_length(raw: Dict[str, Any]) -> int:
+    """Native context window declared by a raw config (text_config for composite
+    models). Raises when the config declares none: there is no sane default."""
+    nested = raw.get("text_config")
+    for cfg in (raw, nested if isinstance(nested, dict) else None):
+        if not cfg:
+            continue
+        for key in _CONTEXT_LENGTH_KEYS:
+            value = cfg.get(key)
+            if isinstance(value, int) and 0 < value < 10_000_000:
+                return value
+    raise ValueError(
+        f"config.json declares no context length (looked for {', '.join(_CONTEXT_LENGTH_KEYS)})"
+    )
+
+
+def derive_max_seq_len(raw: Dict[str, Any], cap: int, override: Optional[int]) -> int:
+    """The sequence length a backend sizes itself for: the operator's explicit
+    override, else the model's own context capped by the server ceiling."""
+    if override is not None:
+        return override
+    return min(model_context_length(raw), cap)
 
 
 def detect_num_gpus() -> int:

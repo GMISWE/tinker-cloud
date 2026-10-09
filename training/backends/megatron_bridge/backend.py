@@ -12,7 +12,9 @@ from typing import Any, Dict, List, Optional
 
 from ..base import BackendError, BackendHandle, TrainingBackend
 from ...models.requests import Datum
-from ..objectives import Objective, is_classification
+from ...utils.model_config import read_raw_hf_config
+from ..objectives import Objective, classification_spec
+from .config import MegatronBridgeConfig
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +33,6 @@ class MegatronBridgeHandle(BackendHandle):
     base_model: str = ""
     objective: str = Objective.SEQUENCE_CLASSIFICATION.value
     num_labels: int = 0
-    head_config: Optional[Dict[str, Any]] = None
     lora_config: Optional[Dict[str, Any]] = None
     worker: Any = None                # MegatronBridgeWorker Ray actor handle
     seq_length: int = 1024
@@ -50,6 +51,7 @@ class MegatronBridgeBackend(TrainingBackend[MegatronBridgeHandle]):
 
     def __init__(self, overrides: Optional[Dict[str, Any]] = None):
         self.overrides = overrides or {}
+        self.config = MegatronBridgeConfig.from_env()
         self._converter = None
 
     @property
@@ -69,51 +71,41 @@ class MegatronBridgeBackend(TrainingBackend[MegatronBridgeHandle]):
         parallelism: Optional[Dict[str, Any]] = None,
         rl_config: Optional[Dict[str, Any]] = None,
         rollout_config: Optional[Dict[str, Any]] = None,
-        debug_train_only: bool = False,
-        resume_from: Optional[Path] = None,
-        max_batch_size: int = 4096,
-        max_seq_len: int = 2048,
-        rlve_config: Optional[Dict[str, Any]] = None,
-        wandb_config: Optional[Dict[str, Any]] = None,
-        staleness_k: int = 0,  # vacuous: no generation engine to go stale
-        objective: str = Objective.SEQUENCE_CLASSIFICATION.value,
-        num_labels: Optional[int] = None,
-        head_config: Optional[Dict[str, Any]] = None,
         native_root: Optional[Path] = None,
     ) -> MegatronBridgeHandle:
         """Spawn a GPU worker actor that builds the classifier + LoRA + optimizer."""
-        if not is_classification(objective):
+        classification = classification_spec(await asyncio.to_thread(read_raw_hf_config, base_model))
+        if classification is None:
             raise BackendError(
-                f"Megatron-Bridge backend only serves classification objectives, got {objective!r}",
+                f"Megatron-Bridge backend only serves classification models; {base_model!r} "
+                f"declares no classification head in its config.json",
                 backend="megatron_bridge", operation="create_model")
-        if not num_labels or num_labels < 2:
-            raise BackendError(
-                f"num_labels must be >= 2 for classification, got {num_labels!r}",
-                backend="megatron_bridge", operation="create_model")
+        objective = classification.objective.value
+        num_labels = classification.num_labels
 
-        hc = head_config or {}
+        rc = self.config   # recipe knobs: MEGATRON_BRIDGE_* (specs/025, D17)
         lc = lora_config or {}
-        seq_length = int(hc.get("seq_length", max_seq_len if max_seq_len <= 8192 else 1024))
+        seq_length = rc.seq_length
         # kwargs for evo2_1b_classifier_config (built inside the actor; Path-wrapped there)
         cfg_kwargs = dict(
-            base_ckpt_dir=hc.get("base_ckpt_dir", base_model),
-            train_jsonl=hc.get("train_jsonl"), val_jsonl=hc.get("val_jsonl"),
-            test_jsonl=hc.get("test_jsonl"), num_classes=num_labels,
+            base_ckpt_dir=rc.base_ckpt_dir or base_model,
+            train_jsonl=rc.train_jsonl, val_jsonl=rc.val_jsonl,
+            test_jsonl=rc.test_jsonl, num_classes=num_labels,
             # the recipe writes its own checkpoints under result_dir: the
             # model's private area, so nothing lands outside the checkpoint base
-            result_dir=hc.get("result_dir", str(native_root) if native_root else f"/data/{model_id}"),
-            experiment_name=model_id, model_size=hc.get("model_size", "evo2_1b_base"),
+            result_dir=rc.result_dir or (str(native_root) if native_root else f"/data/{model_id}"),
+            experiment_name=model_id, model_size=rc.model_size,
             tensor_model_parallel_size=(parallelism or {}).get("tp", 1),
             seq_length_tokens=seq_length, backbone_seq_length=seq_length,
-            train_iters=hc.get("train_iters", 1000),
-            global_batch_size=hc.get("global_batch_size", 32),
-            micro_batch_size=hc.get("micro_batch_size", 8),
-            lr=hc.get("lr", 5e-4), min_lr=hc.get("min_lr", 5e-5),
-            warmup_iters=hc.get("warmup_iters", 30),
-            pool=hc.get("pool", "mean"), classifier_dropout=hc.get("classifier_dropout", 0.1),
+            train_iters=rc.train_iters,
+            global_batch_size=rc.global_batch_size,
+            micro_batch_size=rc.micro_batch_size,
+            lr=rc.lr, min_lr=rc.min_lr,
+            warmup_iters=rc.warmup_iters,
+            pool=rc.pool, classifier_dropout=rc.classifier_dropout,
             use_lora=True, lora_dim=lc.get("rank", 16), lora_alpha=lc.get("alpha", 32),
             lora_dropout=lc.get("dropout", 0.1),
-            tokenizer_path=hc.get("tokenizer_path", _TOKENIZER_PATH),
+            tokenizer_path=rc.tokenizer_path or _TOKENIZER_PATH,
         )
 
         try:
@@ -131,13 +123,11 @@ class MegatronBridgeBackend(TrainingBackend[MegatronBridgeHandle]):
         worker_actor: Any = MegatronBridgeWorker
         worker = worker_actor.remote(cfg_kwargs, _RECIPE_EXAMPLES)
         await _get(worker.ready.remote())   # blocks (in a thread) until setup() done
-        if resume_from:
-            await _get(worker.load_checkpoint.remote(str(resume_from), False))
 
         handle = MegatronBridgeHandle(
             model_id=model_id, backend_type="megatron_bridge", base_model=base_model,
-            objective=Objective(objective).value, num_labels=num_labels,
-            head_config=head_config, lora_config=lora_config, worker=worker,
+            objective=objective, num_labels=num_labels,
+            lora_config=lora_config, worker=worker,
             seq_length=seq_length, created_at=datetime.now().isoformat())
         logger.info(
             "[%s] megatron_bridge create_model %s: base=%s num_labels=%d seq_len=%d lora_r=%s (Ray actor)",

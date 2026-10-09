@@ -6,7 +6,7 @@ providing validation and documentation.
 """
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, validator, model_validator
 
 # loss_fn_config values: numbers, or text on the keys core.loss_registry declares
 # as text (the SDK's loss_fn_config_v2 carries both).
@@ -33,68 +33,27 @@ class ParallelismConfig(BaseModel):
     num_gpus: Optional[int] = Field(default=None, ge=1, le=128, description="Total number of GPUs (auto-detected if not set)")
 
 
-class RLVEConfig(BaseModel):
-    """RLVE (Reinforcement Learning with Verifiable Environments) configuration.
-
-    When enabled, Miles handles server-side:
-    - Problem generation from Gym environments
-    - Sampling via SGLang
-    - Reward computation via verifiers
-    - Accuracy/difficulty tracking with curriculum
-    """
-
-    enabled: bool = Field(default=False, description="Enable RLVE training mode")
-    environment_list: List[str] = Field(
-        default_factory=list,
-        description="List of Gym environments (e.g., ['Sorting', 'Division', 'SAT'])"
-    )
-    custom_prompt_preprocessor: str = Field(
-        default="TinyZero",
-        description="Prompt preprocessor: 'TinyZero' or 'ChatTemplate_NoSystemPrompt'"
-    )
-    answer_marker_type: str = Field(
-        default="<answer></answer>",
-        description="Answer marker type: '<answer></answer>' or '\\boxed{}'"
-    )
-    initial_difficulty: int = Field(default=0, ge=0, description="Initial difficulty level")
-    difficulty_sliding_window_size: int = Field(
-        default=4, ge=1, description="Sliding window for difficulty sampling"
-    )
-    min_metric_to_increase_difficulty: float = Field(
-        default=0.9, ge=0.0, le=1.0, description="Accuracy threshold to increase difficulty"
-    )
-    min_prompts_before_difficulty_check: int = Field(
-        default=8, ge=1, description="Min prompts before checking difficulty"
-    )
-    # Rollout configuration
-    rollout_batch_size: int = Field(default=32, ge=1, description="Number of prompts per rollout")
-    n_samples_per_prompt: int = Field(default=8, ge=1, description="Samples generated per prompt")
-    rollout_max_response_len: int = Field(default=4096, ge=1, description="Max response length")
-    rollout_temperature: float = Field(default=1.0, ge=0.0, le=2.0, description="Sampling temperature")
-
-    # GB200-specific RLVE settings
-    balance_data: bool = Field(default=True, description="Balance data across DP ranks by sequence length")
-    partial_rollout: bool = Field(default=True, description="Enable partial rollout with oversampling")
-    over_sampling_batch_size: int = Field(default=384, ge=1, description="Oversampling batch size for partial rollout")
-    use_dynamic_sampling_filter: bool = Field(default=True, description="Filter samples by reward variance (nonzero std)")
-    num_rollout: int = Field(default=500, ge=1, description="Number of rollout iterations")
-
-    @validator('environment_list')
-    def validate_environment_list(cls, v, values):
-        """Ensure environment_list is non-empty when enabled."""
-        if values.get('enabled', False) and not v:
-            raise ValueError("environment_list cannot be empty when RLVE is enabled")
-        return v
+SERVED_OPTIMIZER = "adamw"
 
 
-class WandbConfig(BaseModel):
-    """Wandb logging configuration for RLVE training."""
+class OptimizerConfig(BaseModel):
+    """Optimizer identity, fixed at model creation (SDK `optimizer_config`).
 
-    enabled: bool = Field(default=False, description="Enable Wandb logging")
-    project: str = Field(default="rlve", description="Wandb project name")
-    run_name: Optional[str] = Field(default=None, description="Wandb run name")
-    group: Optional[str] = Field(default=None, description="Wandb run group")
-    api_key: Optional[str] = Field(default=None, description="Wandb API key (if not in env)")
+    Only `adamw` is served; the router rejects any other `type` with 400
+    (API-CONTRACT: Dimuon UNSUPPORTED). Extra keys are kept so the
+    rejection message can echo what the client sent."""
+    model_config = ConfigDict(extra="allow")
+
+    type: str = Field(default=SERVED_OPTIMIZER, description="Optimizer family")
+
+
+class OptimParams(BaseModel):
+    """Per-step parameters of a non-Adam optimizer (the SDK sends them as
+    `optimizer_params`; Adam keeps the `adam_params` key). Parsed only to be
+    rejected with a message that names the family."""
+    model_config = ConfigDict(extra="allow")
+
+    type: str = Field(..., description="Optimizer family")
 
 
 class CreateModelRequest(BaseModel):
@@ -105,30 +64,13 @@ class CreateModelRequest(BaseModel):
     model_seq_id: int = Field(..., description="Model sequence ID within session (required)")
     user_metadata: Optional[Dict[str, Any]] = Field(default=None, description="User-provided metadata")
 
-    # Model configuration
-    base_model: str = Field(..., description="Path to base model")
+    # Model configuration. Everything the server can read from the model's own
+    # config or its backend configuration is not on the wire (specs/025, D17):
+    # context length, batch shape, classification head, debug/staleness knobs.
+    base_model: str = Field(..., description="HF model id or local model directory")
     lora_config: Optional[LoraConfig] = Field(default=None, description="LoRA configuration")
-    debug_train_only: bool = Field(default=False, description="Debug mode (skip SGLang updates)")
-    checkpoint_path: Optional[str] = Field(default=None, description="Checkpoint to resume from")
-    parallelism_config: Optional[ParallelismConfig] = Field(default=None, description="Parallelism settings")
-    max_batch_size: int = Field(default=4096, description="Max batch size for forward_backward (avoids gradient accumulation)")
-    max_seq_len: int = Field(default=2048, description="Max sequence length for parallelism decisions (CP auto-detection)")
-
-    # RLVE (Reinforcement Learning with Verifiable Environments) configuration
-    rlve_config: Optional[RLVEConfig] = Field(default=None, description="RLVE training configuration")
-    wandb_config: Optional[WandbConfig] = Field(default=None, description="Wandb logging configuration")
-
-    # Staleness declaration (A4): max sampler weight-version staleness the tenant
-    # accepts. 0 (default) = strict on-policy; k>0 licenses the service to defer
-    # inference-engine refits while latest - synced <= k. ver(S) is certified per
-    # sample response. See specs/012-a4-staleness.
-    staleness_k: int = Field(default=0, ge=0, description="Max sampler weight-version staleness the tenant declares acceptable (0 = strict)")
-
-    # Objective axis (feature 004). Defaults keep the language-modeling path unchanged.
-    # See specs/004-bionemo-classification/plan.md.
-    objective: str = Field(default="language_modeling", description="language_modeling | sequence_classification | token_classification")
-    num_labels: Optional[int] = Field(default=None, description="Number of classes (classification objectives only)")
-    head_config: Optional[Dict[str, Any]] = Field(default=None, description="Classification head config (classification objectives only)")
+    optimizer_config: OptimizerConfig = Field(default_factory=OptimizerConfig, description="Optimizer family; only adamw is served")
+    parallelism_config: Optional[ParallelismConfig] = Field(default=None, description="Parallelism settings (server-side callers only)")
 
 
 class DeleteModelRequest(BaseModel):
@@ -163,6 +105,7 @@ class LoadWeightsRequest(BaseModel):
     model_id: str = Field(..., description="Model ID")
     path: str = Field(..., description="tinker://<run>/weights/<name> to load from")
     optimizer: bool = Field(default=False, description="Also restore optimizer state (the checkpoint must carry it)")
+    optimizer_config: Optional[OptimizerConfig] = Field(default=None, description="Optimizer family for the restored run; only adamw is served")
     seq_id: Optional[int] = Field(default=None, description="Sequence ID for ordering")
 
 
@@ -429,6 +372,7 @@ class OptimStepRequest(BaseModel):
     """Request to perform optimizer step (new format)."""
     model_id: str = Field(..., description="Model ID")
     adam_params: Optional[AdamParams] = Field(default=None, description="Adam optimizer parameters")
+    optimizer_params: Optional[OptimParams] = Field(default=None, description="Non-Adam parameters (rejected: only adamw is served)")
     step_num: Optional[int] = Field(default=None, ge=0, description="Step number for logging")
     seq_id: Optional[int] = Field(default=None, description="Per-model sequence number (idempotent retries)")
 

@@ -1,6 +1,7 @@
 """LoRA info comes from the stored lora_config; a failed create leaves no session link."""
 import sqlite3
 
+import json
 import requests
 
 from .conftest import API_KEY
@@ -30,13 +31,18 @@ def test_full_param_model_reports_no_lora(service_client, server):
     assert info["is_lora"] is False and info["lora_rank"] is None
 
 
-def test_failed_create_leaves_no_session_link(server):
+def test_failed_create_leaves_no_session_link(server, tmp_path):
     sess = server.post("/api/v1/create_session", {"tags": [], "user_metadata": {}, "sdk_version": "t"}).json()
     session_id = sess["session_id"]
-    # the fake backend rejects non-LM objectives, so this create fails inside the task
+    # a model whose config.json declares a classification head: the fake backend
+    # is language-modeling only, so this create fails inside the task
+    model_dir = tmp_path / "fake-cls"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(json.dumps(
+        {"architectures": ["FakeForSequenceClassification"], "num_labels": 3, "max_position_embeddings": 2048}))
     r = server.post("/api/v1/create_model", {
-        "session_id": session_id, "model_seq_id": 1, "base_model": "fake/tiny",
-        "lora_config": {"rank": 8}, "objective": "classification", "num_labels": 3,
+        "session_id": session_id, "model_seq_id": 1, "base_model": str(model_dir),
+        "lora_config": {"rank": 8},
     })
     assert r.status_code == 200, r.text
     fut = server.post("/api/v1/retrieve_future", {"request_id": r.json()["request_id"]}, timeout=60)

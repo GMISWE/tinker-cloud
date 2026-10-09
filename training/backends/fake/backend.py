@@ -25,10 +25,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..base import BackendError, BackendHandle, TrainingBackend
+from ...utils.model_config import model_context_length, read_raw_hf_config
+from ..objectives import classification_spec
 from ...models.requests import Datum, ModelInput
 from ...core.loss_registry import LOSS_FNS
 
 logger = logging.getLogger(__name__)
+
+# Context window of a bare-name fake model (no directory to read it from).
+FAKE_CONTEXT_LENGTH = 2048
 
 STATE_FILE = "fake_state.json"
 
@@ -92,22 +97,24 @@ class FakeBackend(TrainingBackend[FakeHandle]):
         self, model_id: str, request_id: str, base_model: str, num_gpus: int,
         lora_config: Optional[Dict[str, Any]] = None, parallelism: Optional[Dict[str, Any]] = None,
         rl_config: Optional[Dict[str, Any]] = None, rollout_config: Optional[Dict[str, Any]] = None,
-        debug_train_only: bool = False, resume_from: Optional[Path] = None,
-        max_batch_size: int = 4096, max_seq_len: int = 2048,
-        rlve_config: Optional[Dict[str, Any]] = None, wandb_config: Optional[Dict[str, Any]] = None,
-        staleness_k: int = 0, objective: str = "language_modeling",
-        num_labels: Optional[int] = None, head_config: Optional[Dict[str, Any]] = None,
         native_root: Optional[Path] = None,
     ) -> FakeHandle:
-        if objective != "language_modeling":
-            raise BackendError(f"objective {objective!r} unsupported", backend="fake", operation="create_model")
+        # A model directory is read like the GPU backends read theirs (head,
+        # context window); a bare name ("fake/tiny") is the test double.
+        raw = read_raw_hf_config(base_model) if (Path(base_model) / "config.json").is_file() else None
+        classification = classification_spec(raw) if raw is not None else None
+        context_length = model_context_length(raw) if raw is not None else FAKE_CONTEXT_LENGTH
+        if classification is not None:
+            raise BackendError(
+                f"fake backend is language-modeling only; {base_model!r} declares a "
+                f"{classification.objective.value} head",
+                backend="fake", operation="create_model",
+            )
         h = FakeHandle(model_id=model_id, backend_type="fake", base_model=base_model,
-                       lora_config=lora_config, hf_path=base_model, context_length=max_seq_len)
-        if resume_from:
-            self._load_into(h, resume_from)
+                       lora_config=lora_config, hf_path=base_model, context_length=context_length)
         self._models[model_id] = h
         self._trace("create_model", model_id, base_model=base_model, lora_config=lora_config,
-                    resume_from=resume_from, native_root=native_root)
+                    native_root=native_root)
         return h
 
     async def delete_model(self, handle: FakeHandle) -> None:

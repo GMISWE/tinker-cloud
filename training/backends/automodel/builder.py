@@ -35,23 +35,20 @@ class AutomodelArgumentBuilder(ArgumentBuilder):
         loads HF `AutoModelFor*Classification` directly; this builder resolves
         the LoRA/head knobs into a plain config dict for logging/metadata.
         """
-        head_config = kwargs.get("head_config") or {}
-        num_labels = kwargs.get("num_labels")
-        objective = kwargs.get("objective", "sequence_classification")
+        classification = kwargs["classification"]
         lora = lora_config or {}
         rank = lora.get("rank", 0)
 
         config = {
             "base_model": base_model,
-            "objective": objective,
-            "num_labels": num_labels,
-            "torch_dtype": head_config.get("torch_dtype", "float32"),
-            "learning_rate": head_config.get("learning_rate", 1e-4),
+            "objective": classification.objective.value,
+            "num_labels": classification.num_labels,
             "lora": {
                 "rank": rank,
                 "alpha": lora.get("alpha") or (2 * rank),
                 "dropout": lora.get("dropout", 0.0),
-                "target_modules": head_config.get("target_modules"),
+                "train_attn": lora.get("train_attn", True),
+                "train_mlp": lora.get("train_mlp", True),
             } if rank else None,
         }
         config.update(self.overrides)

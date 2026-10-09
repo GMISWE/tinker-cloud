@@ -17,6 +17,8 @@ from typing import Any, Dict, List, Optional
 import ray
 
 from ..base import BackendError, BackendHandle, TrainingBackend, UnsupportedFeatureError
+from ...utils.model_config import read_raw_hf_config
+from ..objectives import classification_spec
 from ...models.requests import Datum
 from .config import NO_CLIP_EPS_HIGH, MilesConfig
 from ...core import routing
@@ -282,34 +284,26 @@ class MilesBackend(TrainingBackend[MilesHandle]):
         parallelism: Optional[Dict[str, Any]] = None,
         rl_config: Optional[Dict[str, Any]] = None,
         rollout_config: Optional[Dict[str, Any]] = None,
-        debug_train_only: bool = False,
-        resume_from: Optional[Path] = None,
-        max_batch_size: int = 4096,
-        max_seq_len: int = 2048,
-        rlve_config: Optional[Dict[str, Any]] = None,
-        wandb_config: Optional[Dict[str, Any]] = None,
-        objective: str = "language_modeling",
-        staleness_k: int = 0,
-        num_labels: Optional[int] = None,
-        head_config: Optional[Dict[str, Any]] = None,
         native_root: Optional[Path] = None,
     ) -> MilesHandle:
-        if staleness_k > 0:
-            # A staleness declaration is a permission (served staleness <= k), so
-            # eager refit-every-step satisfies it trivially; carried, unexploited.
-            logger.info(
-                "[%s] staleness_k=%d declared; miles refits eagerly — "
-                "declaration accepted but unexploited (served staleness always 0)",
-                request_id, staleness_k,
+        classification = classification_spec(await asyncio.to_thread(read_raw_hf_config, base_model))
+        if classification is not None:
+            raise BackendError(
+                f"Miles is a language-modeling backend; {base_model!r} declares a "
+                f"{classification.objective.value} head, which needs the automodel or "
+                f"megatron_bridge backend",
+                backend="miles", operation="create_model",
             )
+        # Shape and debug knobs are operator configuration (specs/025, D17);
+        # weights arrive through load_checkpoint (D9), so nothing resumes here.
+        debug_train_only = self.config.debug_train_only
+        resume_from: Optional[Path] = None
         boot_kwargs: Dict[str, Any] = dict(
             model_id=model_id, request_id=request_id, base_model=base_model,
             num_gpus=num_gpus, lora_config=lora_config, parallelism=parallelism,
             rl_config=rl_config, rollout_config=rollout_config,
             debug_train_only=debug_train_only, resume_from=resume_from,
-            max_batch_size=max_batch_size, max_seq_len=max_seq_len,
-            rlve_config=rlve_config, wandb_config=wandb_config,
-            objective=objective, num_labels=num_labels, head_config=head_config,
+            max_batch_size=self.config.global_batch_size, max_seq_len=self.config.max_seq_len,
             native_root=native_root,
         )
         # Mirror the builder's pool gate (configured slots + LoRA rank).
@@ -322,9 +316,8 @@ class MilesBackend(TrainingBackend[MilesHandle]):
                     pool=self._pool, model_id=model_id, request_id=request_id,
                     base_model=base_model, lora_config=lora_config,
                     debug_train_only=debug_train_only,
-                    resume_from=resume_from, rlve_config=rlve_config,
+                    resume_from=resume_from,
                     native_root=native_root,
-                    objective=objective,
                 )
             return await self._boot_model(**boot_kwargs)
 
@@ -337,28 +330,20 @@ class MilesBackend(TrainingBackend[MilesHandle]):
         lora_config: Dict[str, Any],
         debug_train_only: bool,
         resume_from: Optional[Path],
-        rlve_config: Optional[Dict[str, Any]],
-        objective: str,
         native_root: Optional[Path] = None,
     ) -> MilesHandle:
         """Register a new tenant adapter into the live pool (caller holds
         _pool_admin). The pool's boot args govern parallelism/batch shape;
         only the tenant's LoRA rank/alpha are per-adapter."""
-        if objective != "language_modeling":
-            raise BackendError(
-                f"Miles is a language-modeling backend; objective {objective!r} "
-                f"requires a classification backend (automodel / megatron_bridge)",
-                backend="miles", operation="create_model",
-            )
         if base_model != pool.base_model:
             raise BackendError(
                 f"Multi-LoRA pool serves base model {pool.base_model!r}; "
                 f"cannot create {base_model!r} on it (one base per pool)",
                 backend="miles", operation="create_model",
             )
-        if debug_train_only or rlve_config:
+        if debug_train_only:
             raise BackendError(
-                "Multi-LoRA pool mode supports neither debug_train_only nor RLVE",
+                "Multi-LoRA pool mode does not support debug_train_only",
                 backend="miles", operation="create_model",
             )
         if resume_from:
@@ -453,19 +438,10 @@ class MilesBackend(TrainingBackend[MilesHandle]):
         resume_from: Optional[Path] = None,
         max_batch_size: int = 4096,
         max_seq_len: int = 2048,
-        rlve_config: Optional[Dict[str, Any]] = None,
-        wandb_config: Optional[Dict[str, Any]] = None,
-        objective: str = "language_modeling",
-        num_labels: Optional[int] = None,
-        head_config: Optional[Dict[str, Any]] = None,
         native_root: Optional[Path] = None,
     ) -> MilesHandle:
-        if objective != "language_modeling":
-            raise BackendError(
-                f"Miles is a language-modeling backend; objective {objective!r} "
-                f"requires a classification backend (automodel / megatron_bridge)",
-                backend="miles", operation="create_model",
-            )
+        rlve_config: Optional[Dict[str, Any]] = None   # server-side RLVE left with the SDK field (specs/025)
+        wandb_config: Optional[Dict[str, Any]] = None
         _cleanup: Dict[str, Any] = {}
         try:
             logger.info("[%s] Creating Miles model %s", request_id, model_id)
