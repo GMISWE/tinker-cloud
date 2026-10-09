@@ -4,20 +4,30 @@ Checkpoints Router - HTTP Layer for Checkpoint Management
 Endpoints:
 - POST /api/v1/save_weights - Save model weights to disk
 - POST /api/v1/save_weights_for_sampler - Save weights for SGLang sampler
-- POST /api/v1/load_weights - Deprecated endpoint (returns error message)
+- POST /api/v1/save_weights_external - Export weights in HF format (external_weights kind)
+- POST /api/v1/load_weights - Load a training checkpoint as a model's first request
+- GET  /api/v1/training_runs/{model_id}/checkpoints - List
+- DELETE .../checkpoints/{kind}/{name} - Delete one checkpoint of any kind
+- GET  .../checkpoints/external_weights/{name}/external_weights_urls - Signed per-file URLs
+- GET  /api/v1/external_weights/{model_id}/{name}/{relpath} - Serve one signed file
 - POST /api/v1/weights_info - Get weights/checkpoint info from tinker path
 """
 import logging
+import time
+from datetime import datetime, timezone
 from typing import Dict
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import FileResponse
 
 from ..services.checkpoint_service import CheckpointService
 from ..services.session_service import SessionService
 from ..core.task_manager import TaskManager
+from ..config import TrainingConfig
 from ..core.dependencies import (
     verify_api_key_dep, 
     get_checkpoint_store,
+    get_config,
     get_checkpoint_service, 
     get_metadata_storage, 
     get_futures_storage, 
@@ -29,6 +39,7 @@ from ..storage import MetadataStorage, FuturesStorage
 from ..models.requests import (
     SERVED_OPTIMIZER,
     LoadWeightsRequest,
+    SaveWeightsExternalRequest,
     SaveWeightsRequest,
     SaveWeightsForSamplerRequest,
     WeightsInfoRequest,
@@ -39,7 +50,9 @@ from ..models.responses import (
     WeightsInfoResponse,
 )
 from fastapi import Response
+from ..services.checkpoint_service import CHECKPOINT_TYPES
 from ..utils import generate_request_id
+from ..utils import signed_urls
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +177,42 @@ async def save_weights_for_sampler(
     )
 
 
+@router.post("/api/v1/save_weights_external", response_model=AsyncOperationResponse)
+async def save_weights_external(
+    request: SaveWeightsExternalRequest,
+    _: None = Depends(verify_api_key_dep),
+    service: CheckpointService = Depends(get_checkpoint_service),
+    task_manager: TaskManager = Depends(get_task_manager),
+    training_clients: Dict = Depends(get_training_clients),
+):
+    """Export the model's weights in HF format as an external_weights checkpoint.
+
+    Async like save_weights; the future's result is the SDK's
+    SaveWeightsExternalResponse (path, size_bytes). Encryption is not offered
+    on this server, so a non-empty age_encryption_recipients is refused here.
+    ttl_seconds is recorded as the checkpoint's expires_at (listing shows it;
+    reads refuse an expired checkpoint; nothing reaps the bytes yet).
+    """
+    if request.age_encryption_recipients:
+        raise HTTPException(status_code=400, detail="encryption not supported on this server: "
+                            "age_encryption_recipients must be empty")
+    if request.model_id not in training_clients:
+        raise HTTPException(status_code=404, detail=f"Model {request.model_id} not found")
+    request_id = generate_request_id()
+
+    async def execute():
+        return await service.save_weights_external(
+            model_id=request.model_id, request_id=request_id, name=request.path,
+            ttl_seconds=request.ttl_seconds, training_clients=training_clients,
+        )
+
+    request_id = task_manager.create_task(
+        request_id=request_id, operation="save_weights_external", model_id=request.model_id,
+        payload=request.dict(), seq_id=request.seq_id, task_func=execute,
+    )
+    return AsyncOperationResponse(request_id=request_id, model_id=request.model_id)
+
+
 @router.post("/api/v1/load_weights", response_model=AsyncOperationResponse)
 async def load_weights(
     request: LoadWeightsRequest,
@@ -229,11 +278,17 @@ async def list_checkpoints(
     return {"checkpoints": service.list_checkpoints(model_id), "cursor": None}
 
 
+# SDK CheckpointType -> store kind (the inverse of CHECKPOINT_TYPES)
+_KIND_OF_TYPE = {t: k for k, t in CHECKPOINT_TYPES.items()}
+_TYPES_HELP = "|".join(_KIND_OF_TYPE)
+_KIND_VALUES = {k.value for k in CHECKPOINT_TYPES}
+_KINDS_HELP = "|".join(sorted(_KIND_VALUES))
+
+
 def _delete(service, model_id, checkpoint_type, checkpoint_id):
-    kinds = {"training": CheckpointKind.WEIGHTS, "sampler": CheckpointKind.SAMPLER_WEIGHTS}
-    if checkpoint_type not in kinds:
-        raise HTTPException(status_code=400, detail="checkpoint_type must be 'training' or 'sampler'")
-    ref = CheckpointRef.make(model_id, kinds[checkpoint_type], checkpoint_id)
+    if checkpoint_type not in _KIND_OF_TYPE:
+        raise HTTPException(status_code=400, detail=f"checkpoint_type must be one of {_TYPES_HELP}")
+    ref = CheckpointRef.make(model_id, _KIND_OF_TYPE[checkpoint_type], checkpoint_id)
     if not service.delete_checkpoint(ref):
         raise HTTPException(status_code=404, detail=f"Checkpoint not found: {checkpoint_type} {checkpoint_id} of {model_id}")
     return Response(status_code=204)
@@ -246,11 +301,10 @@ async def delete_checkpoint_typed(
     service: CheckpointService = Depends(get_checkpoint_service),
     metadata_storage: MetadataStorage = Depends(get_metadata_storage),
 ):
-    """DELETE .../checkpoints/weights/<id> or .../checkpoints/sampler_weights/<id>."""
-    kinds = {"weights": "training", "sampler_weights": "sampler"}
-    if kind not in kinds:
-        raise HTTPException(status_code=400, detail="checkpoint path must be weights/<id> or sampler_weights/<id>")
-    return _delete(service, model_id, kinds[kind], checkpoint_id)
+    """DELETE .../checkpoints/<kind>/<id>, kind in weights|sampler_weights|external_weights."""
+    if kind not in _KIND_VALUES:
+        raise HTTPException(status_code=400, detail=f"checkpoint path must be <{_KINDS_HELP}>/<id>")
+    return _delete(service, model_id, CHECKPOINT_TYPES[CheckpointKind(kind)], checkpoint_id)
 
 
 @router.delete("/api/v1/training_runs/{model_id}/checkpoints/{checkpoint_id}")
@@ -260,11 +314,60 @@ async def delete_checkpoint_bare(
     service: CheckpointService = Depends(get_checkpoint_service),
     metadata_storage: MetadataStorage = Depends(get_metadata_storage),
 ):
-    """A bare id needs ?checkpoint_type=training|sampler: the two kinds can share an id."""
+    """A bare id needs ?checkpoint_type=<type>: the kinds can share an id."""
     if not checkpoint_type:
-        raise HTTPException(status_code=400, detail="specify the kind: .../checkpoints/weights/<id>, "
-                            ".../checkpoints/sampler_weights/<id>, or ?checkpoint_type=training|sampler")
+        raise HTTPException(status_code=400, detail=f"specify the kind: .../checkpoints/<{_KINDS_HELP}>/<id> "
+                            f"or ?checkpoint_type=<{_TYPES_HELP}>")
     return _delete(service, model_id, checkpoint_type, checkpoint_id)
+
+
+# ============================================================================
+# External weights: signed per-file download URLs, served by this server
+# ============================================================================
+
+def _public_base(request: Request, config: TrainingConfig) -> str:
+    return config.external_weights.public_base_url or str(request.base_url).rstrip("/")
+
+
+@router.get("/api/v1/training_runs/{model_id}/checkpoints/external_weights/{name}/external_weights_urls")
+async def external_weights_urls(
+    model_id: str, name: str, request: Request,
+    _: None = Depends(verify_api_key_dep),
+    store: CheckpointStore = Depends(get_checkpoint_store),
+    config: TrainingConfig = Depends(get_config),
+):
+    """One signed URL per file of a completed external_weights checkpoint
+    (SDK ExternalWeightsUrlsResponse). The SDK sends the checkpoint id
+    `external_weights/<name>` unencoded, hence the literal segment above."""
+    ref = CheckpointRef.make(model_id, CheckpointKind.EXTERNAL_WEIGHTS, name)
+    files = store.files(ref, kind=CheckpointKind.EXTERNAL_WEIGHTS)  # 404 / 425 / 500 via CheckpointError
+    exp = int(time.time()) + config.external_weights.url_ttl_s
+    key = config.external_weights.url_signing_key
+    base = _public_base(request, config)
+    urls = {
+        relpath: f"{base}/api/v1/external_weights/{model_id}/{name}/{relpath}"
+                 f"?exp={exp}&sig={signed_urls.sign(key, model_id, name, relpath, exp)}"
+        for relpath in files
+    }
+    return {"urls": urls, "expires": datetime.fromtimestamp(exp, tz=timezone.utc).isoformat()}
+
+
+@router.get("/api/v1/external_weights/{model_id}/{name}/{relpath:path}")
+async def download_external_weights_file(
+    model_id: str, name: str, relpath: str, exp: int, sig: str,
+    store: CheckpointStore = Depends(get_checkpoint_store),
+    config: TrainingConfig = Depends(get_config),
+):
+    """Serve one file of an external_weights checkpoint. The signed URL is the
+    credential (no API key); a bad or expired signature is 404, like an
+    object store's presigned GET."""
+    if not signed_urls.verify(config.external_weights.url_signing_key, model_id, name, relpath, exp, sig):
+        raise HTTPException(status_code=404, detail="invalid or expired download URL")
+    ref = CheckpointRef.make(model_id, CheckpointKind.EXTERNAL_WEIGHTS, name)
+    files = store.files(ref, kind=CheckpointKind.EXTERNAL_WEIGHTS)
+    if relpath not in files:
+        raise HTTPException(status_code=404, detail=f"no file {relpath!r} in {ref.uri}")
+    return FileResponse(files[relpath], filename=files[relpath].name, media_type="application/octet-stream")
 
 
 @router.post("/api/v1/weights_info", response_model=WeightsInfoResponse)

@@ -7,6 +7,7 @@ reads directories it is handed. Every save is pending from begin_save until
 the backend returns, then completed or failed.
 """
 import logging
+import os
 import time
 import uuid
 from datetime import datetime
@@ -17,6 +18,13 @@ from ..checkpoints import CheckpointKind, CheckpointRef, CheckpointStore
 from ..storage import MetadataStorage
 
 logger = logging.getLogger(__name__)
+
+# store kind -> the SDK's CheckpointType
+CHECKPOINT_TYPES = {
+    CheckpointKind.WEIGHTS: "training",
+    CheckpointKind.SAMPLER_WEIGHTS: "sampler",
+    CheckpointKind.EXTERNAL_WEIGHTS: "external",
+}
 
 
 class CheckpointService:
@@ -63,6 +71,33 @@ class CheckpointService:
         logger.info("[%s] Weights saved: %s", request_id, ticket.ref.uri)
         return {"path": ticket.ref.uri, "step": ticket.step, "name": name, "type": "save_weights"}
 
+    async def save_weights_external(
+        self,
+        model_id: str,
+        request_id: str,
+        name: str,
+        ttl_seconds: Optional[int],
+        training_clients: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Export the weights in HF format under an external_weights checkpoint;
+        the files are then served one by one through signed URLs."""
+        client_info = self._client(training_clients, model_id)
+        handle = client_info["backend_handle"]
+        ticket = self.store.begin_save(
+            model_id, CheckpointKind.EXTERNAL_WEIGHTS, name,
+            weight_version=handle.weight_version, ttl_seconds=ttl_seconds,
+        )
+        logger.info("[%s] Exporting external weights for %s to %s (step %s)", request_id, model_id, ticket.ref.uri, ticket.step)
+        try:
+            await self.backend.export_external_weights(handle, ticket.root, ticket.step)
+        except Exception as e:
+            self.store.fail(ticket.ref, str(e))
+            raise
+        self.store.complete(ticket.ref)
+        size_bytes = sum(os.path.getsize(p) for p in self.store.files(ticket.ref).values())
+        logger.info("[%s] External weights exported: %s (%d bytes)", request_id, ticket.ref.uri, size_bytes)
+        return {"path": ticket.ref.uri, "size_bytes": size_bytes, "type": "save_weights_external"}
+
     async def load_weights(
         self,
         model_id: str,
@@ -96,11 +131,12 @@ class CheckpointService:
             kind = CheckpointKind(rec["kind"])
             out.append({
                 "checkpoint_id": f"{kind.value}/{rec['name']}",
-                "checkpoint_type": "sampler" if kind is CheckpointKind.SAMPLER_WEIGHTS else "training",
+                "checkpoint_type": CHECKPOINT_TYPES[kind],
                 "time": rec.get("created_at"),
                 "tinker_path": rec["uri"],
                 "size_bytes": rec.get("size_bytes"),
                 "status": rec.get("status"),
+                "expires_at": rec.get("expires_at"),  # absent on records older than ttl support
             })
         return out
 

@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..base import BackendError, BackendHandle, TrainingBackend
+from ...checkpoints.interchange import ADAPTER_CONFIG_FILE, ADAPTER_WEIGHTS_FILE, hf_adapter_dir
 from ...utils.model_config import model_context_length, read_raw_hf_config
 from ..objectives import classification_spec
 from ...models.requests import Datum, ModelInput
@@ -234,6 +235,18 @@ class FakeBackend(TrainingBackend[FakeHandle]):
                 json.dump({"w": h.w, "weight_version": h.weight_version, "base_model": h.base_model,
                            "lora_config": h.lora_config, "step": step,
                            "optimizer": {"step_count": h.step_count}}, f)
+            rank = int(h.lora_config["rank"]) if h.lora_config else 0
+            if rank > 0:
+                # The interchange adapter every backend publishes for a LoRA save
+                # (deterministic bytes: w and the version), so the base class's
+                # export_external_weights has something to move.
+                adapter = hf_adapter_dir(str(root))
+                os.makedirs(adapter)
+                with open(os.path.join(adapter, ADAPTER_CONFIG_FILE), "w") as f:
+                    json.dump({"peft_type": "LORA", "r": rank, "lora_alpha": h.lora_config.get("alpha") or rank,
+                               "target_modules": ["fake_proj"]}, f, sort_keys=True)
+                with open(os.path.join(adapter, ADAPTER_WEIGHTS_FILE), "wb") as f:
+                    f.write(f"fake-adapter w={h.w} v={h.weight_version}\n".encode())
         self._trace("save_checkpoint", h.model_id, root=str(root), step=step, persist=persist)
 
     def _load_into(self, h: FakeHandle, root: Path, optimizer: bool = False) -> None:

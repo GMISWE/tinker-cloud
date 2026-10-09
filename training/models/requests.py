@@ -99,6 +99,27 @@ class SaveWeightsRequest(BaseModel):
     seq_id: Optional[int] = Field(default=None, description="Per-model sequence number (idempotent retries)")
 
 
+# ttl bounds the SDK documents for save_weights_external: 1 hour to 10 years.
+EXTERNAL_TTL_MIN_S = 3600
+EXTERNAL_TTL_MAX_S = 10 * 365 * 24 * 3600
+
+
+class SaveWeightsExternalRequest(BaseModel):
+    """Request to export model weights in HF format (SDK SaveWeightsExternalRequest)."""
+
+    model_id: str = Field(..., description="Model ID")
+    path: str = Field(..., min_length=1, description="Name of the external weights checkpoint")
+    seq_id: Optional[int] = Field(default=None, description="Per-model sequence number (idempotent retries)")
+    ttl_seconds: Optional[int] = Field(
+        default=None, ge=EXTERNAL_TTL_MIN_S, le=EXTERNAL_TTL_MAX_S,
+        description="Checkpoint lifetime in seconds (None = never expires)",
+    )
+    age_encryption_recipients: Optional[List[str]] = Field(
+        default=None, description="age recipients; this server does not encrypt and rejects a non-empty list",
+    )
+    type: Literal["save_weights_external"] = "save_weights_external"
+
+
 class LoadWeightsRequest(BaseModel):
     """Request to load model weights (permitted only as a model's first request)."""
 

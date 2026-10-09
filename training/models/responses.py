@@ -153,6 +153,14 @@ class SaveWeightsResult(_Result):
     type: Literal["save_weights"] = "save_weights"
 
 
+class SaveWeightsExternalResult(_Result):
+    """Result from save_weights_external (SDK SaveWeightsExternalResponseInternal)."""
+
+    path: str = Field(..., description="tinker://<model_id>/external_weights/<name>")
+    size_bytes: int = Field(..., description="Bytes under the checkpoint root")
+    type: Literal["save_weights_external"] = "save_weights_external"
+
+
 class LoadWeightsResult(_Result):
     """Result from load_weights (SDK LoadWeightsResponse)."""
 
@@ -438,6 +446,7 @@ RESULT_MODELS: Dict[str, type] = {
     "optim_step": OptimStepResult,
     "save_weights": SaveWeightsResult,
     "save_weights_for_sampler": SaveWeightsForSamplerResult,
+    "save_weights_external": SaveWeightsExternalResult,
     "load_weights": LoadWeightsResult,
     "sample": SampleResult,
     "asample": SampleResult,
