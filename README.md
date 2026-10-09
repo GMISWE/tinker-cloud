@@ -95,9 +95,17 @@ Server-wide settings (`training/config.py`):
 | `HF_HOME` | HuggingFace model cache | `/data/models` |
 
 Per-backend knobs are declared fields with typed defaults in
-`training/backends/miles/config.py` (`SLIME_*`, `TINKERCLOUD_MILES_*`) and
-`training/backends/nemo_rl/config.py` (`NEMORL_*`, `NRL_*`); the server logs the
-effective values and their sources at startup.
+`training/backends/miles/config.py` (`SLIME_*`, `TINKERCLOUD_MILES_*`),
+`training/backends/nemo_rl/config.py` (`NEMORL_*`, `NRL_*`),
+`training/backends/verl/config.py` (`TINKERCLOUD_VERL_*`) and
+`training/backends/megatron_bridge/config.py` (`MEGATRON_BRIDGE_*`); the server
+logs the effective values and their sources at startup. What the SDK used to
+declare per model now lives here: debug mode (`NEMORL_DEBUG_TRAIN_ONLY`),
+the refit-elision bound (`NEMORL_STALENESS_K`), the sequence length
+(`NEMORL_MAX_SEQ_LEN`, default = the model's context capped by
+`TINKERCLOUD_MAX_SEQ_LEN_CAP`) and the Evo2 recipe paths. The classification
+head comes from the model's own `config.json` (`architectures` plus an explicit
+`num_labels` or `id2label`).
 
 ## Tests
 
