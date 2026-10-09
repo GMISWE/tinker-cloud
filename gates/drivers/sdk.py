@@ -39,18 +39,12 @@ class SDKDriver:
         base_model: str,
         rank: int,
         seed: int | None = None,
-        max_seq_len: int | None = None,
-        debug_train_only: bool = False,
     ):
+        # Context length and debug mode are server configuration
+        # (NEMORL_MAX_SEQ_LEN, NEMORL_DEBUG_TRAIN_ONLY); the client declares neither.
         kwargs = {"base_model": base_model, "rank": rank}
         if seed is not None:
             kwargs["seed"] = seed
-        if max_seq_len is not None:
-            kwargs["max_seq_len"] = max_seq_len
-        if debug_train_only:
-            # no inference engine: weight-sync is guarded on it, and training
-            # observables (grad_norm) are unaffected
-            kwargs["debug_train_only"] = True
         t0 = time.time()
         tc = self.service_client.create_lora_training_client(**kwargs)
         print(f"model_id: {tc.model_id} (boot {time.time() - t0:.1f}s)", flush=True)

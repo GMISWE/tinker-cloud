@@ -225,9 +225,9 @@ def run_import(args) -> dict:
         ref = json.load(f)
 
     sc = tinker.ServiceClient()
-    tc = sc.create_lora_training_client(
-        base_model=ref["base_model"], rank=ref["rank"], checkpoint_path=args.resume,
-    )
+    # create + load_state: the only resume path (D9); nothing loads at create.
+    tc = sc.create_lora_training_client(base_model=ref["base_model"], rank=ref["rank"])
+    tc.load_state(args.resume).result()
     lp_dest = _probe_logprobs(tc, probe)
 
     g9b = _compare(ref["logprobs_backend"], lp_dest, "source_backend", "dest_backend")

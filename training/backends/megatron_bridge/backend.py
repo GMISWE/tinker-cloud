@@ -161,7 +161,8 @@ class MegatronBridgeBackend(TrainingBackend[MegatronBridgeHandle]):
     async def sample(self, handle: MegatronBridgeHandle, request_id: str, prompt_tokens: List[int],
                      num_samples: int, sampling_params: Optional[Dict[str, Any]] = None,
                      prompt_logprobs: bool = False,
-                     pinned_version: Optional[int] = None) -> Dict[str, Any]:
+                     pinned_version: Optional[int] = None,
+                     topk_sample_logprobs: int = 0, topk_prompt_logprobs: int = 0) -> Dict[str, Any]:
         raise _no_generation("sample")
 
     async def get_logprobs(self, handle: MegatronBridgeHandle, data: List[Datum]) -> List[Any]:

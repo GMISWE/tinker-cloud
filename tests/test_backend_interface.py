@@ -196,7 +196,8 @@ class TestCheckpointRootContract:
         asyncio.run(b.save_checkpoint(h, root, step=3, persist=True))
         written = {p.relative_to(tmp_path) for p in tmp_path.rglob("*") if p.is_file()}
         assert written == {root.relative_to(tmp_path) / "fake_state.json"}
-        h2 = asyncio.run(b.create_model("m2", "r", "fake/tiny", 0, resume_from=root, native_root=tmp_path / "n2"))
+        h2 = asyncio.run(b.create_model("m2", "r", "fake/tiny", 0, native_root=tmp_path / "n2"))
+        asyncio.run(b.load_checkpoint(h2, root))
         assert h2.w == 0.75
 
     def test_persist_false_writes_nothing(self, tmp_path):

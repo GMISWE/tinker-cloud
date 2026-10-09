@@ -22,6 +22,8 @@ def test_well_formed_results_round_trip_unchanged():
         "save_weights": {"path": "tinker://m/weights/s1", "checkpoint_path": "/data/x", "step_id": 1,
                          "name": "s1", "type": "save_weights"},
         "save_weights_for_sampler": {"path": None, "sampling_session_id": "ss1", "type": "save_weights_for_sampler"},
+        "save_weights_external": {"path": "tinker://m/external_weights/e1", "size_bytes": 12,
+                                  "type": "save_weights_external"},
         "load_weights": {"type": "load_weights", "path": "tinker://m/weights/s1", "model_id": "m"},
         "sample": {"sequences": [{"stop_reason": "stop", "tokens": [1, 2], "logprobs": [-0.1, -0.2], "text": None}],
                    "prompt_logprobs": None, "weight_version": None, "latest_weight_version": None},

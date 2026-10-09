@@ -4,8 +4,8 @@ ad hoc verdict/result formats.
 
   from gates import invariants, runner
   from gates.traces import SegSweep
-  runner.run(invariants.get("SPLIT_INV"), SegSweep(model="Qwen/Qwen3-8B-Base",
-             max_seq_len=8192, debug_train_only=True), tag="nemo_rl_tp2")
+  runner.run(invariants.get("SPLIT_INV"), SegSweep(model="Qwen/Qwen3-8B-Base"),
+             tag="nemo_rl_tp2")
 
 CLI: python -m gates.runner seg_sweep --tag nemo_rl [--model ...] --out results
 
@@ -126,8 +126,6 @@ def _build_seg_sweep(args) -> tuple[Invariant, object]:
         rank=args.rank,
         seq=args.seq,
         seed=args.seed,
-        max_seq_len=args.max_seq_len,
-        debug_train_only=args.debug_train_only,
     )
     if args.segmentations:
         trace.arms = parse_segmentations(args.segmentations, trace.n)
@@ -143,8 +141,6 @@ def _build_order_perm(args) -> tuple[Invariant, object]:
         seq=args.seq,
         n=args.n,
         seed=args.seed,
-        max_seq_len=args.max_seq_len,
-        debug_train_only=args.debug_train_only,
     )
     trace.arms = default_arms(trace.n)
     return invariants.get("PARTITION_INV"), trace
@@ -160,8 +156,6 @@ def _build_seed_repro(args) -> tuple[Invariant, object]:
         n=args.n,
         seed=args.seed if args.seed is not None else DEFAULT_SEED,
         contrast_seed=args.contrast_seed,
-        max_seq_len=args.max_seq_len,
-        debug_train_only=args.debug_train_only,
     )
 
 
@@ -187,9 +181,6 @@ def main():
                     help="fix LoRA init so runs at different dp are comparable")
     ap.add_argument("--contrast-seed", type=int, default=99,
                     help="seed_repro: the different-seed arm")
-    ap.add_argument("--max-seq-len", type=int, default=None)
-    ap.add_argument("--debug-train-only", action="store_true",
-                    help="no inference engine (8B sweeps run this way)")
     ap.add_argument("--segmentations", default=None,
                     help="override arms, e.g. '8;4,4;2,6;6,2;2,6;8' "
                          "(first=reference, last=determinism control)")

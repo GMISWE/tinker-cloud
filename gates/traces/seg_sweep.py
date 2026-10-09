@@ -86,8 +86,6 @@ class SegSweep:
     seq: int = 64
     n: int = 8
     seed: int | None = None
-    max_seq_len: int | None = None
-    debug_train_only: bool = False
     lr: float = 0.0
     arms: list[tuple[str, list[int]]] = field(
         default_factory=lambda: list(DEFAULT_ARMS)
@@ -103,8 +101,6 @@ class SegSweep:
             "seq": self.seq,
             "n_datums": self.n,
             "seed": self.seed,
-            "max_seq_len": self.max_seq_len,
-            "debug_train_only": self.debug_train_only,
             "lr": self.lr,
             "arms": [{"arm": a, "segmentation": s} for a, s in self.arms],
         }
@@ -118,8 +114,6 @@ class SegSweep:
             base_model=self.model,
             rank=self.rank,
             seed=self.seed,
-            max_seq_len=self.max_seq_len,
-            debug_train_only=self.debug_train_only,
         )
         self.created_models.append(tc.model_id)
         rows = []

@@ -46,4 +46,5 @@ kx exec "$POD" -- bash -c "rm -rf '$REMOTE/app' && mkdir -p '$REMOTE/app' && tar
 echo "==> $POD:$REMOTE/app (sha $SHA)"
 # only the fake backend and CPU suites run here; keep the pod's real backend env out
 # not retried: a non-zero exit here is pytest's verdict, not a dropped connection
-timeout "${KX_TIMEOUT:-600}" kubectl -n "$NS" exec "$POD" -- bash -c "cd '$REMOTE/app' && env -u TINKERCLOUD_BACKEND -u RAY_ADDRESS PYTHONPATH='$REMOTE' python -m pytest $(printf '%q ' "$@")"
+# SDK_PYTHONPATH: a candidate tinker SDK (src dir, plus its deps) to shadow the pod's installed one
+timeout "${KX_TIMEOUT:-600}" kubectl -n "$NS" exec "$POD" -- bash -c "cd '$REMOTE/app' && env -u TINKERCLOUD_BACKEND -u RAY_ADDRESS PYTHONPATH='${SDK_PYTHONPATH:+$SDK_PYTHONPATH:}$REMOTE' python -m pytest $(printf '%q ' "$@")"
