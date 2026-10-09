@@ -78,7 +78,11 @@ async def client_config(request: Request):
     """Feature flags for the connecting SDK (>= 0.25 fetches this once at
     construction and fails without it). The body carries the SDK version;
     every client gets the same flags."""
-    return ClientConfigResponse(proto_compress_fwdbwd=zstd_available(), sample_use_retrieve_futures=True)
+    return ClientConfigResponse(
+        proto_compress_fwdbwd=zstd_available(),
+        sample_use_retrieve_futures=True,
+        sample_join_sampling_session=True,
+    )
     
 @router.post("/api/v1/client/dynamic_config", response_model=ClientDynamicConfigResponse)
 async def client_dynamic_config(request: Request):

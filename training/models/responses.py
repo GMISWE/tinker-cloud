@@ -69,6 +69,7 @@ class ClientConfigResponse(BaseModel):
     proto_compress_fwdbwd: bool = Field(default=False, description="True only when the server can zstd-decompress bodies")
     create_model_via_load_weights: bool = Field(default=False, description="False: create_model then load_weights")
     sample_use_retrieve_futures: bool = Field(default=True, description="True: sample completions are delivered by per-session /retrieve_futures poller")
+    sample_join_sampling_session: bool = Field(default=True, description="True: an unpickled SamplingClient gets its clone id from /join_sampling_session")
     use_pyqwest_transport: bool = Field(default=False, description="False: the SDK uses its httpx default transport")
 
 class ClientDynamicConfigResponse(BaseModel):
@@ -363,10 +364,26 @@ class CreateSamplingSessionResponse(BaseModel):
     sampling_session_id: str = Field(..., description="Generated sampling session ID")
 
 
+class JoinSamplingSessionResponse(BaseModel):
+    """Response from joining a sampling session."""
+    type: str = Field(default="join_sampling_session", description="Response type")
+    client_counter: int = Field(..., description="Client id unique within the sampling session; the creator is 0")
+
+
+class FinishSessionResponse(BaseModel):
+    """Response from finishing a session: the recorded (first-wins) reason."""
+    type: str = Field(default="finish_session", description="Response type")
+    session_id: str = Field(..., description="Finished session")
+    reason: str = Field(..., description="Recorded terminal outcome")
+    detail: Optional[str] = Field(default=None, description="Recorded explanation")
+    finished_at: str = Field(..., description="ISO 8601 time the session was first finished")
+
+
 class GetSessionResponse(BaseModel):
     """Response for getting session details."""
     training_run_ids: List[str] = Field(..., description="List of model IDs associated with this session")
     sampler_ids: List[str] = Field(..., description="List of sampler IDs associated with this session")
+    user_metadata: Optional[Dict[str, str]] = Field(default=None, description="Metadata the client attached at create_session; values as strings")
 
 
 class ListSessionsResponse(BaseModel):
@@ -379,6 +396,26 @@ class GetSamplerResponse(BaseModel):
     sampler_id: str = Field(..., description="The sampler ID (sampling_session_id)")
     base_model: str = Field(..., description="The base model name")
     model_path: Optional[str] = Field(default=None, description="Optional model path")
+
+
+# ============= Billing Responses =============
+
+class CheckpointStorageUsageItem(BaseModel):
+    """One row of current checkpoint storage; this server reports a single aggregate row."""
+    project_id: Optional[str] = Field(default=None, description="Echo of the project_id filter")
+    org_user_urn: Optional[str] = Field(default=None, description="Not tracked by this server")
+    user_email: Optional[str] = Field(default=None, description="Not tracked by this server")
+    user_name: Optional[str] = Field(default=None, description="Not tracked by this server")
+    checkpoint_count: int = Field(..., description="Completed, non-ephemeral checkpoints")
+    size_bytes: int = Field(..., description="Bytes under those checkpoints' roots")
+    size_gigabytes: float = Field(..., description="size_bytes / 2**30")
+    estimated_monthly_cost_usd: Optional[float] = Field(default=None, description="No rate is configured")
+
+
+class CurrentCheckpointStorageUsageResponse(BaseModel):
+    """GET /api/v1/billing/usage/checkpoints/current."""
+    effective_rate_usd_per_gigabyte_month: Optional[float] = Field(default=None, description="No rate is configured")
+    data: List[CheckpointStorageUsageItem] = Field(..., description="Usage rows")
 
 
 # ============= Weights Info Responses =============

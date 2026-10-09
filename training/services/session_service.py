@@ -33,6 +33,9 @@ class SamplerInfo:
     # Owning model: sampling requests carrying this sampler resolve their
     # target model from here (multi-tenant pools break find-first routing).
     model_id: Optional[str] = None
+    # Last client id handed out by join_sampling_session; the creator is 0,
+    # so joiners get 1, 2, ... (seq_id block = 1e9 * client id).
+    client_counter: int = 0
 
 
 @dataclass
@@ -47,6 +50,10 @@ class SessionInfo:
     model_ids: List[str] = field(default_factory=list)
     sampling_session_ids: List[str] = field(default_factory=list)
     model_seq_ids: Optional[Dict[str, int]] = field(default=None)  # model_id -> seq_id mapping
+    # Terminal state set by /sessions/{id}/finish; first-wins, never cleared.
+    finished_at: Optional[datetime] = None
+    finish_reason: Optional[str] = None
+    finish_detail: Optional[str] = None
 
 
 class SessionService:
@@ -109,6 +116,8 @@ class SessionService:
             # Parse datetime strings
             created_at = datetime.fromisoformat(session_data["created_at"])
             last_heartbeat = datetime.fromisoformat(session_data["last_heartbeat"])
+            finished_at_raw = session_data["finished_at"]
+            finished_at = None if finished_at_raw is None else datetime.fromisoformat(finished_at_raw)
 
             # Load sampling session IDs for this session
             samplers = self._storage.list_samplers_by_session(session_id)
@@ -124,6 +133,9 @@ class SessionService:
                 model_ids=model_ids,
                 sampling_session_ids=sampling_session_ids,
                 model_seq_ids=model_seq_ids if model_seq_ids else None,
+                finished_at=finished_at,
+                finish_reason=session_data["finish_reason"],
+                finish_detail=session_data["finish_detail"],
             )
 
             # Load samplers for this session
@@ -134,6 +146,7 @@ class SessionService:
                     base_model=sampler_data.get("base_model"),
                     model_path=sampler_data.get("model_path"),
                     model_id=sampler_data.get("model_id"),
+                    client_counter=sampler_data["client_counter"],
                 )
 
         logger.info(
@@ -220,6 +233,45 @@ class SessionService:
             self._storage.update_heartbeat(session_id)
 
         return True
+
+    def finish_session(
+        self, session_id: str, reason: str, detail: Optional[str]
+    ) -> Optional[SessionInfo]:
+        """Mark a session terminal. First-wins: a later finish is accepted and
+        leaves the recorded reason untouched. Models and samplers are not
+        affected; the reaper frees them once heartbeats stop.
+
+        Returns the session, or None when it is unknown.
+        """
+        session = self._sessions.get(session_id)
+        if session is None:
+            return None
+        if session.finished_at is not None:
+            logger.info(
+                f"Session {session_id} already finished ({session.finish_reason}); "
+                f"ignoring later reason {reason}"
+            )
+            return session
+
+        now = datetime.now()
+        session.finished_at = now
+        session.finish_reason = reason
+        session.finish_detail = detail
+        if self._storage:
+            self._storage.finish_session(session_id, now, reason, detail)
+        logger.info(f"Session finished: {session_id} ({reason}{': ' + detail if detail else ''})")
+        return session
+
+    def join_sampling_session(self, sampling_session_id: str) -> Optional[int]:
+        """Allocate the next client id for a sampler (creator is 0; joiners
+        get 1, 2, ...). Returns None when the sampler is unknown."""
+        sampler = self._samplers.get(sampling_session_id)
+        if sampler is None:
+            return None
+        sampler.client_counter += 1
+        if self._storage:
+            self._storage.set_sampler_client_counter(sampling_session_id, sampler.client_counter)
+        return sampler.client_counter
 
     def add_model(
         self,
