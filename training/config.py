@@ -7,6 +7,7 @@ patterns for environment-based configuration with validation and defaults.
 import json
 import logging
 import os
+import secrets
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -181,6 +182,46 @@ class AuthConfig(BaseModel):
         return v
 
 
+class ExternalWeightsConfig(BaseModel):
+    """Signed download URLs for external (HF-format) weights.
+
+    The server serves the files itself (no object store); each URL carries an
+    HMAC token bound to one file and an expiry (training/utils/signed_urls.py).
+    """
+
+    # Unset: a per-process random key, so URLs die with the process (fine for
+    # one dev server; a restart or a second replica invalidates them). Set it
+    # wherever URLs must outlive a process. Production refuses to start without it.
+    url_signing_key: str = Field(
+        default_factory=lambda: os.getenv("TINKERCLOUD_URL_SIGNING_KEY") or "",
+        description="HMAC key for signed download URLs (TINKERCLOUD_URL_SIGNING_KEY)",
+    )
+    url_ttl_s: int = Field(
+        default_factory=lambda: int(os.getenv("TINKERCLOUD_EXTERNAL_URL_TTL_S", "3600")),
+        ge=60,
+        description="Lifetime of a signed download URL in seconds (TINKERCLOUD_EXTERNAL_URL_TTL_S)",
+    )
+    # The origin clients reach the server at. Unset: the request's own base URL,
+    # which is wrong behind a proxy that rewrites Host.
+    public_base_url: Optional[str] = Field(
+        default_factory=lambda: os.getenv("TINKERCLOUD_PUBLIC_BASE_URL") or None,
+        description="Origin to put in signed URLs, e.g. https://tinker.example.com (TINKERCLOUD_PUBLIC_BASE_URL)",
+    )
+
+    @validator("url_signing_key", always=True)
+    def key_or_random(cls, v):
+        if v:
+            return v
+        if os.getenv("ENV", "development") == "production":
+            raise ValueError("Production requires TINKERCLOUD_URL_SIGNING_KEY")
+        logger.warning("TINKERCLOUD_URL_SIGNING_KEY unset: signed download URLs are valid for this process only")
+        return secrets.token_hex(32)
+
+    @validator("public_base_url")
+    def no_trailing_slash(cls, v):
+        return v.rstrip("/") if v else v
+
+
 class BackendConfig(BaseModel):
     """Backend selection and configuration."""
 
@@ -239,6 +280,10 @@ class TrainingConfig(BaseModel):
     backend: BackendConfig = Field(
         default_factory=BackendConfig,
         description="Backend selection and configuration"
+    )
+    external_weights: ExternalWeightsConfig = Field(
+        default_factory=ExternalWeightsConfig,
+        description="Signed download URLs for external weights"
     )
     supported_models: List[ModelInfo] = Field(
         default_factory=lambda: TrainingConfig._get_default_models(),

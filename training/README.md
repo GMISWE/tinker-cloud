@@ -41,7 +41,7 @@ against its response model before it is stored.
 | Sessions | `POST create_session`, `POST session_heartbeat`, `GET sessions`, `GET sessions/{id}`, `POST create_sampling_session`, `GET samplers/{id}` |
 | Models | `POST create_model` (async), `POST get_info`, `GET get_tokenizer`, `POST unload_model` (async), `POST delete_model`, `GET training_runs/{model_id}` |
 | Training | `POST forward` / `forward_backward` / `optim_step` (async; per-model program order, `seq_id` retries idempotent) |
-| Checkpoints | `POST save_weights`, `POST save_weights_for_sampler`, `POST load_weights` (first request only), `POST weights_info`, `GET training_runs/{id}/checkpoints`, `DELETE training_runs/{id}/checkpoints/{weights\|sampler_weights}/{ckpt}` |
+| Checkpoints | `POST save_weights`, `POST save_weights_for_sampler`, `POST load_weights` (first request only), `POST weights_info`, `GET training_runs/{id}/checkpoints`, `DELETE training_runs/{id}/checkpoints/{weights\|sampler_weights\|external_weights}/{ckpt}`, `POST save_weights_external`, `GET training_runs/{id}/checkpoints/external_weights/{name}/external_weights_urls`, `GET external_weights/{id}/{name}/{file}?exp&sig` (signed, no API key) |
 | Sampling | `POST create_sampling_client`, `POST sample`, `POST asample` (async) — a request resolves strictly to its sampler's model; bare `base_model` sampling is 400 |
 | Ops | `GET /health`, `GET get_server_capabilities`, `POST cleanup_futures`, `POST telemetry` |
 

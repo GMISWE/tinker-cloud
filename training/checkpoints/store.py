@@ -6,6 +6,9 @@ the per-model save counter, and records what happened to each save:
 
     <checkpoint_base>/<model_id>/weights/<name>/           kind=weights
     <checkpoint_base>/<model_id>/sampler_weights/<name>/   kind=sampler_weights
+    <checkpoint_base>/<model_id>/external_weights/<name>/  kind=external_weights
+                                                           (HF-format export,
+                                                           served file by file)
     <checkpoint_base>/<model_id>/native/                   the backend's private
                                                            per-model area
                                                            (Megatron --save, ...)
@@ -17,8 +20,10 @@ the bytes can never disagree about where the bytes are.
 
 Records live under MetadataStorage as ``<kind>--<name>.json`` per model. A
 save is ``pending`` between ``begin_save`` and ``complete``/``fail``; a read
-through ``require`` refuses anything but ``completed``. Pending rows left
-behind by a crash are marked failed at boot (``sweep_pending``).
+through ``require`` refuses anything but ``completed``, and a completed record
+past its ``expires_at`` (the client's ttl_seconds) reads as not found. Nothing
+reaps expired bytes yet. Pending rows left behind by a crash are marked failed
+at boot (``sweep_pending``).
 """
 from __future__ import annotations
 
@@ -26,7 +31,7 @@ import logging
 import os
 import shutil
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -42,6 +47,10 @@ NATIVE_DIRNAME = "native"
 class CheckpointKind(str, Enum):
     WEIGHTS = "weights"
     SAMPLER_WEIGHTS = "sampler_weights"
+    EXTERNAL_WEIGHTS = "external_weights"
+
+
+KINDS_HELP = "|".join(k.value for k in CheckpointKind)
 
 
 class CheckpointStatus(str, Enum):
@@ -94,23 +103,23 @@ class CheckpointRef:
 
     @classmethod
     def parse(cls, uri: str) -> "CheckpointRef":
-        """``tinker://<model_id>/<weights|sampler_weights>/<name>`` -> ref.
+        """``tinker://<model_id>/<kind>/<name>`` -> ref (kind: KINDS_HELP).
 
         Anything else -- a filesystem path, a bare ``tinker://<model>``, an
         unknown kind, extra segments -- is InvalidCheckpointPath."""
         if not isinstance(uri, str) or not uri.startswith(SCHEME):
             raise InvalidCheckpointPath(
-                f"checkpoint path must be {SCHEME}<model_id>/<weights|sampler_weights>/<name>, got {uri!r}")
+                f"checkpoint path must be {SCHEME}<model_id>/<{KINDS_HELP}>/<name>, got {uri!r}")
         parts = uri[len(SCHEME):].split("/")
         if len(parts) != 3:
             raise InvalidCheckpointPath(
-                f"checkpoint path must be {SCHEME}<model_id>/<weights|sampler_weights>/<name>, got {uri!r}")
+                f"checkpoint path must be {SCHEME}<model_id>/<{KINDS_HELP}>/<name>, got {uri!r}")
         model_id, kind, name = parts
         try:
             kind_v = CheckpointKind(kind)
         except ValueError:
             raise InvalidCheckpointPath(
-                f"checkpoint kind must be weights or sampler_weights, got {kind!r} in {uri!r}") from None
+                f"checkpoint kind must be one of {KINDS_HELP}, got {kind!r} in {uri!r}") from None
         return cls(_segment(model_id, "model_id"), kind_v, _segment(name, "checkpoint name"))
 
     @classmethod
@@ -137,6 +146,15 @@ class SaveTicket:
     ref: CheckpointRef
     root: Path
     step: Optional[int]
+
+
+def is_expired(record: Dict[str, Any], now: Optional[datetime] = None) -> bool:
+    """Records written before ttl support carry no expires_at: never expire.
+    expires_at is an aware UTC ISO string; `now` must be aware too."""
+    expires_at = record.get("expires_at")
+    if expires_at is None:
+        return False
+    return (now or datetime.now(timezone.utc)) >= datetime.fromisoformat(expires_at)
 
 
 # --- store -------------------------------------------------------------------
@@ -192,11 +210,12 @@ class CheckpointStore:
         *,
         persist: bool = True,
         weight_version: Optional[int] = None,
+        ttl_seconds: Optional[int] = None,
     ) -> SaveTicket:
         """Record a pending save and hand back where to write. A name already
         recorded for this model and kind is overwritten by the new save (the
         API lets a client save twice under one name); its old counter value is
-        not reused."""
+        not reused. ``ttl_seconds`` sets ``expires_at``; None never expires."""
         ref = CheckpointRef.make(model_id, kind, name)
         root = self.root(ref)
         step = self.next_step(model_id) if persist else None
@@ -204,10 +223,14 @@ class CheckpointStore:
             if root.exists():
                 shutil.rmtree(root)
             root.mkdir(parents=True, exist_ok=True)
+        expires_at = (
+            (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat() if ttl_seconds is not None else None
+        )
         self._write(ref, {
             "model_id": ref.model_id, "kind": ref.kind.value, "name": ref.name,
             "status": CheckpointStatus.PENDING.value, "step": step, "ephemeral": not persist,
             "weight_version": weight_version, "error": None, "completed_at": None,
+            "expires_at": expires_at,
         })
         return SaveTicket(ref=ref, root=root, step=step)
 
@@ -253,7 +276,18 @@ class CheckpointStore:
             raise CheckpointPending(f"Checkpoint is still being created: {ref.uri}")
         if status == CheckpointStatus.FAILED.value:
             raise CheckpointFailed(f"Checkpoint creation failed: {ref.uri}: {rec.get('error')}")
+        if is_expired(rec):
+            raise CheckpointNotFound(f"Checkpoint expired at {rec['expires_at']}: {ref.uri}")
         return self.root(ref)
+
+    def files(self, ref: CheckpointRef, kind: Optional[CheckpointKind] = None) -> Dict[str, Path]:
+        """Regular files of a completed checkpoint, keyed by path relative to
+        its root (what a per-file download serves)."""
+        root = self.require(ref, kind=kind)
+        return {
+            str(p.relative_to(root)): p
+            for p in sorted(root.rglob("*")) if p.is_file()
+        }
 
     def resolve_resume(self, uri: str) -> Path:
         """The root a training resume (create_model / load_weights) may load."""

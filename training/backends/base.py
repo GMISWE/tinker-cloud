@@ -5,6 +5,7 @@ Defines TrainingBackend, ArgumentBuilder, DataConverter, BackendHandle,
 and BackendError — the contracts that Miles and NeMo RL implementations
 must satisfy.
 """
+import shutil
 from abc import ABC, abstractmethod
 from pathlib import Path
 from dataclasses import dataclass
@@ -314,6 +315,36 @@ class TrainingBackend(ABC, Generic[H]):
                 requested and is unavailable.
         """
         ...
+
+    async def export_external_weights(self, handle: H, root: Path, step: Optional[int]) -> None:
+        """Write the model's weights under `root` in HuggingFace format, one
+        file per download (save_weights_external). Default: a native save into
+        a scratch dir under `root`, then the interchange adapter it published
+        is moved to the top of `root` and the scratch dir removed. That covers
+        LoRA on every backend that writes the interchange adapter; a full
+        fine-tune, or a save before the first optimizer step, publishes no
+        adapter and raises BackendError (never an empty export). A backend
+        with a real HF export for full weights overrides this.
+
+        Raises:
+            BackendError: nothing exportable, or the native save failed.
+        """
+        from ..checkpoints.interchange import find_hf_adapter
+
+        scratch = root / ".native"
+        scratch.mkdir()
+        await self.save_checkpoint(handle, scratch, step=step, persist=True)
+        adapter = find_hf_adapter(str(scratch))
+        if adapter is None:
+            shutil.rmtree(scratch, ignore_errors=True)
+            raise BackendError(
+                "no HF export: the backend publishes HF weights for LoRA adapters only, and this "
+                "save produced none (full fine-tune, or no optimizer step taken yet)",
+                backend=handle.backend_type, operation="export_external_weights",
+            )
+        for entry in Path(adapter).iterdir():
+            shutil.move(str(entry), str(root / entry.name))
+        shutil.rmtree(scratch)
 
     async def close(self) -> None:
         """Release process-level resources the backend holds (HTTP connection

@@ -15,6 +15,7 @@ import requests
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 API_KEY = "tml-protocol-test-key"
+SIGNING_KEY = "protocol-test-url-signing-key"  # tests forge expired download tokens with it
 
 
 def _free_port() -> int:
@@ -41,6 +42,7 @@ class Server:
             "TINKERCLOUD_BACKEND": "fake",
             "TINKER_API_KEY": API_KEY,
             "FAKE_BACKEND_TRACE": str(self.trace_path),
+            "TINKERCLOUD_URL_SIGNING_KEY": SIGNING_KEY,
             "TRAINING_HOST": "127.0.0.1",
             "TRAINING_PORT": str(self.port),
             "SESSION_TIMEOUT_S": "-1",

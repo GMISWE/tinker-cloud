@@ -85,7 +85,10 @@ Server-wide settings (`training/config.py`):
 | `TINKER_API_KEY` | API auth key | `tml-dev-key` |
 | `RAY_ADDRESS` / `RAY_NAMESPACE` | Ray cluster endpoint / namespace | auto (local head) / `default` |
 | `METADATA_DIR` | Futures DB, sessions DB, checkpoint metadata | `/data/metadata` |
-| `TINKERCLOUD_CHECKPOINT_BASE` | Root of every model's checkpoints (`<model>/{weights,sampler_weights}/<name>/`) and native area (`<model>/native/`) | `/data/checkpoints` |
+| `TINKERCLOUD_CHECKPOINT_BASE` | Root of every model's checkpoints (`<model>/{weights,sampler_weights,external_weights}/<name>/`) and native area (`<model>/native/`) | `/data/checkpoints` |
+| `TINKERCLOUD_URL_SIGNING_KEY` | HMAC key for the signed per-file download URLs of `save_weights_external` exports; unset = random per process (URLs die with it); required when `ENV=production` | unset |
+| `TINKERCLOUD_EXTERNAL_URL_TTL_S` | Lifetime of a signed download URL, seconds | `3600` |
+| `TINKERCLOUD_PUBLIC_BASE_URL` | Origin written into signed URLs; unset = the request's own base URL | unset |
 | `SESSION_TIMEOUT_S` / `SESSION_REAP_INTERVAL_S` | Expire silent sessions and free their models (`-1` disables) | `600` / `60` |
 | `ALLOW_PARTIAL_BATCHES` | Pad batches smaller than the DP size | `false` |
 | `KGATEWAY_LOG_LEVEL` / `KGATEWAY_ACCESS_LOG` | Log level / HTTP access log | `INFO` / `false` |

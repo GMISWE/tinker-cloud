@@ -34,6 +34,7 @@ KINDS = {
     "optim_step": BARRIER,
     "save_weights": BARRIER,
     "save_weights_for_sampler": BARRIER,
+    "save_weights_external": BARRIER,
     "load_weights": BARRIER,
     "unload_model": BARRIER,
 }
