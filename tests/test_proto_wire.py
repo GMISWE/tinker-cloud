@@ -179,7 +179,7 @@ def test_sample_result_sequences_prompt_logprobs_and_topk():
     plp = np.frombuffer(out.prompt_logprobs, dtype=np.float32)
     assert math.isnan(plp[0]) and plp[1] == np.float32(-0.25)
     topk = out.topk_prompt_logprobs
-    assert (topk.prompt_length, topk.k) == (3, 2)
+    assert (topk.length, topk.k) == (3, 2)
     ids = np.frombuffer(topk.token_ids, dtype=np.int32).reshape(3, 2)
     lps = np.frombuffer(topk.logprobs, dtype=np.float32).reshape(3, 2)
     assert ids.tolist() == [[0, 0], [11, 12], [13, 0]]

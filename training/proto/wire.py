@@ -173,7 +173,7 @@ def _serialize_sample(result: Dict[str, Any]) -> bytes:
     rows = result.get("topk_prompt_logprobs")
     if rows is not None:
         # k is not recorded in the result; recover it from the widest row and
-        # keep k=1 when every row is undefined so prompt_length still encodes.
+        # keep k=1 when every row is undefined so length still encodes.
         k = max((len(row) for row in rows if row), default=1)
         token_ids = np.full((len(rows), k), _TOPK_MASK_TOKEN_ID, dtype=np.int32)
         logprobs = np.full((len(rows), k), _TOPK_MASK_LOGPROB, dtype=np.float32)
@@ -181,8 +181,8 @@ def _serialize_sample(result: Dict[str, Any]) -> bytes:
             for j, (token_id, logprob) in enumerate(row or ()):
                 token_ids[i, j] = token_id
                 logprobs[i, j] = logprob
-        proto.topk_prompt_logprobs.CopyFrom(pb.TopkPromptLogprobs(
-            prompt_length=len(rows), k=k, token_ids=token_ids.tobytes(), logprobs=logprobs.tobytes(),
+        proto.topk_prompt_logprobs.CopyFrom(pb.TopkLogprobs(
+            length=len(rows), k=k, token_ids=token_ids.tobytes(), logprobs=logprobs.tobytes(),
         ))
     return proto.SerializeToString()
 
