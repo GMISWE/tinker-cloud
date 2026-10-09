@@ -46,6 +46,8 @@ async def _get(ref) -> Any:
 
 
 class MegatronBridgeBackend(TrainingBackend[MegatronBridgeHandle]):
+    config: MegatronBridgeConfig
+
     SUPPORTED_LOSS_FNS = frozenset({"cross_entropy", "classification_ce"})
     """Megatron-native classification backend (Ray-actor delegation, no gen plane)."""
 

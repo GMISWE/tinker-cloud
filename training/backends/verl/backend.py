@@ -72,6 +72,8 @@ class VerlHandle(BackendHandle):
 
 
 class VerlBackend(TrainingBackend[VerlHandle]):
+    config: VerlConfig
+
     SUPPORTED_LOSS_FNS = frozenset({"cross_entropy", "importance_sampling", "ppo"})  # losses.LOSS_FNS
     """veRL backend using upstream TinkerTrainingWorker split primitives."""
 
