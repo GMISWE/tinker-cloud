@@ -224,6 +224,21 @@ def test_deferred_refit_under_staleness_k_bumps_only_the_trainer(monkeypatch):
     assert (h.weight_version, h.generation_synced_version) == (3, 2) and "wake" not in log
 
 
+def test_deferred_refit_colocated_offloads_the_policy_for_the_next_step(monkeypatch):
+    """Colocated, the stale wake offloads the trainer like a refit would, so the
+    next optim_step must run prepare_for_training again."""
+    async def no_refit(handle):
+        pytest.fail("refit must be deferred")
+
+    monkeypatch.setattr(nb, "_refit", no_refit)
+    log = []
+    h = make_handle(log, colocated_inference=True, staleness_k=1, weight_version=2,
+                    generation_synced_version=2, training_resident=True)
+    asyncio.run(nb._advance_weights(h))
+    assert (h.weight_version, h.generation_synced_version) == (3, 2)
+    assert h.training_resident is False
+
+
 def test_create_time_split_sync_tolerates_a_busy_prefix_cache(monkeypatch):
     """The Ray-driven NCCL sync is used once, at create_model, before any HTTP
     traffic exists; later refits go over the workers' app (test_nemorl_http_sampling)."""
