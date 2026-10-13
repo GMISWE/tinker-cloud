@@ -139,3 +139,31 @@ def test_clip_is_required_for_ppo_and_refused_elsewhere():
     b = batch_of([ce([1], [2], [1.0])], "cross_entropy")
     with pytest.raises(ValueError, match="not taken by cross_entropy"):
         compute_loss(Toy()(b.input_ids), b, clip=(0.8, 1.2))
+
+
+@pytest.mark.parametrize("loss_fn,clip", [("importance_sampling", None), ("ppo", (0.8, 1.2))])
+def test_extreme_ratio_is_clamped_counted_and_finite(loss_fn, clip):
+    """q = -inf where A != 0: clamped to exp(20), counted, no gradient through it.
+    q = -inf where A == 0: the term is 0 by the formula and is not counted."""
+    m = Toy(seed=5)
+    tokens, targets = [1, 2, 3], [2, 3, 4]
+    with torch.no_grad():
+        lp_true = reference_lp(m(torch.tensor([tokens])), torch.tensor([targets]))[0]
+    q = [float("-inf"), float("-inf"), float(lp_true[2]) - 0.1]
+    adv = [-1.0, 0.0, 1.0]
+    b = batch_of([rl(tokens, targets, q, adv)], loss_fn)
+    out = compute_loss(m(b.input_ids), b, clip=clip)
+    out.loss.backward()
+    assert torch.isfinite(out.loss) and torch.isfinite(m.E.grad).all()
+    assert out.clamped.tolist() == [1.0]
+    assert out.elementwise[0, 1] == 0                          # A == 0
+    # position 0: A = -1, ratio clamped to e^20 (ppo: min picks the unclipped r*A)
+    assert math.isclose(float(out.elementwise[0, 0]), math.exp(20.0), rel_tol=1e-5)
+    r2 = math.exp(0.1)
+    want2 = -r2 if clip is None else -min(r2, min(max(r2, clip[0]), clip[1]))
+    assert math.isclose(float(out.elementwise[0, 2]), want2, rel_tol=1e-5)
+
+
+def test_cross_entropy_reports_no_clamping():
+    b = batch_of([ce([1, 2], [2, 3], [1.0, 1.0])], "cross_entropy")
+    assert compute_loss(Toy()(b.input_ids), b).clamped.tolist() == [0.0]
