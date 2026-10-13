@@ -10,6 +10,8 @@
 #            installs (the bionemo image's deps are tightly pinned — don't perturb).
 #   megatron_bridge  build the bionemo-recipes evo2_megatron recipe env
 #            (megatron-bridge) so the megatron_bridge backend can import it.
+#   automodel  deploy code + scripts/automodel only; check both vendor envs.
+#            NO installs: /opt/venv and /opt/vllm-env stay as the image ships them.
 set -euo pipefail
 PROFILE="${PROFILE:-nemo_rl}"
 
@@ -22,6 +24,14 @@ mv /tmp/tinker-cloud/training /app/training
 mv /tmp/tinker-cloud/tests /app/tests
 [ -d /tmp/tinker-cloud/gates ] && mv /tmp/tinker-cloud/gates /app/gates
 [ -d /tmp/tinker-cloud/scripts/evo2 ] && { mkdir -p /app/scripts; mv /tmp/tinker-cloud/scripts/evo2 /app/scripts/evo2; }
+[ -d /tmp/tinker-cloud/scripts/automodel ] && { mkdir -p /app/scripts; mv /tmp/tinker-cloud/scripts/automodel /app/scripts/automodel; }
+
+if [ "$PROFILE" = automodel ]; then
+  /opt/venv/bin/python -c 'import nemo_automodel, torch, ray; print("training env OK: torch", torch.__version__, "ray", ray.__version__)'
+  /opt/vllm-env/bin/vllm-api-server --check
+  echo SETUP_DONE
+  exit 0
+fi
 
 if [ "$PROFILE" = bionemo ]; then
   # Faithful Evo2 env: code + evo2 helpers in place; bionemo.evo2 provides the
