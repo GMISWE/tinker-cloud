@@ -10,7 +10,13 @@ lp_t is the model's logprob of target_tokens[t] from the logits at position t
 
 Positions past a row's length (and padding rows) are selected out with
 torch.where before exp, so they add exactly 0 to the loss and the gradient and
-cannot turn into NaN. Real positions follow the formula exactly: no ratio clamp.
+cannot turn into NaN. So are RL positions with A_t = 0: their term is 0 by the
+formula, and selecting it keeps an extreme q_t (e.g. -inf) from becoming inf * 0.
+Where A_t != 0, the log-ratio lp_t - q_t is clamped to +-RATIO_LOG_CLAMP before
+exp (as SkyRL's and verl's PPO do): beyond it the ratio is > 4.8e8, the term is
+meaningless, and an overflow would put inf/NaN into the gradients and from there
+into the optimizer state. A clamped position gets no gradient, and every row
+reports how many it had (`clamped`), so the deviation is visible in the metrics.
 
 compute_loss returns this shard's sum. Ranks average gradients (FSDP2), so the
 worker scales the loss by the rank count before backward; the average of the
@@ -25,6 +31,8 @@ from .converter import Batch
 
 # Rows of [S, V] logits upcast to fp32 at a time in token_logprobs.
 DEFAULT_CHUNK_TOKENS = 1024
+# |lp - q| beyond which an RL ratio is clamped (exp(20) ~ 4.8e8).
+RATIO_LOG_CLAMP = 20.0
 
 
 class _TokenLogprob(torch.autograd.Function):
@@ -74,6 +82,7 @@ class LossOutput:
     row_loss: torch.Tensor       # [R] detached: each row's sum (padding rows 0)
     logprobs: torch.Tensor       # [R, S] detached: lp_t (0 past each length)
     elementwise: torch.Tensor    # [R, S] detached: each position's term of the sum
+    clamped: torch.Tensor        # [R] detached: positions whose log-ratio was clamped (0 for CE)
 
 
 def compute_loss(logits: torch.Tensor, shard: Batch,
@@ -92,22 +101,29 @@ def compute_loss(logits: torch.Tensor, shard: Batch,
     zero = torch.zeros((), dtype=torch.float32, device=device)
 
     if shard.loss_fn == "cross_entropy":
+        active = valid
         terms = -inputs["weights"] * lp
+        clamped = torch.zeros(lp.shape[0], dtype=torch.float32, device=device)
     elif shard.loss_fn in ("importance_sampling", "ppo"):
-        ratio = torch.exp(torch.where(valid, lp - inputs["logprobs"], zero))
         adv = inputs["advantages"]
-        terms = -(ratio * adv)
+        active = valid & (adv != 0)
+        log_ratio = torch.where(active, lp - inputs["logprobs"], zero)
+        clamped = (log_ratio.abs() > RATIO_LOG_CLAMP).sum(dim=1).float()
+        ratio = torch.exp(log_ratio.clamp(-RATIO_LOG_CLAMP, RATIO_LOG_CLAMP))
         if shard.loss_fn == "ppo":
             low, high = clip
             terms = -torch.minimum(ratio * adv, ratio.clamp(low, high) * adv)
+        else:
+            terms = -(ratio * adv)
     else:
         raise ValueError(f"loss_fn {shard.loss_fn!r} has no automodel implementation")
 
-    terms = torch.where(valid, terms, zero)
+    terms = torch.where(active, terms, zero)
     row = terms.sum(dim=1)
     return LossOutput(
         loss=row.sum(),
         row_loss=row.detach(),
         logprobs=torch.where(valid, lp, zero).detach(),
         elementwise=terms.detach(),
+        clamped=clamped.detach(),
     )
