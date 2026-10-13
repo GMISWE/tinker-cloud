@@ -1,7 +1,9 @@
 #!/bin/bash
 # Automodel image smoke: the training env writes a LoRA adapter, the vLLM env
 # serves the base model, hot-loads the adapter under a versioned name, and
-# generates with both. PASS needs the adapter output to differ from the base.
+# generates with both through /v1/completions and through the tinkercloud
+# endpoint plugin. PASS needs the adapter output to differ from the base and
+# the plugin route to sample the same tokens.
 #   bash smoke_vllm_lora.sh [model] [gpu]   (output dir: $OUT, default /data/smoke_automodel)
 set -euo pipefail
 M=${1:-Qwen/Qwen2.5-0.5B-Instruct}
@@ -43,9 +45,11 @@ echo SERVER_OK
 curl -sf -X POST "$URL/v1/load_lora_adapter" -H 'Content-Type: application/json' \
   -d "{\"lora_name\": \"m1@v1\", \"lora_path\": \"$OUT/adapter_v1\"}"
 echo
+# repetition_penalty 1.0 overrides the model's generation_config default, which
+# /v1/completions applies and the plugin route does not
 gen() {
   curl -sf "$URL/v1/completions" -H 'Content-Type: application/json' \
-    -d "{\"model\": \"$1\", \"prompt\": \"The capital of France is\", \"max_tokens\": 12, \"temperature\": 0}" \
+    -d "{\"model\": \"$1\", \"prompt\": \"The capital of France is\", \"max_tokens\": 12, \"temperature\": 0, \"repetition_penalty\": 1.0}" \
     | /opt/vllm-env/bin/python -c 'import json,sys; print(json.load(sys.stdin)["choices"][0]["text"])'
 }
 BASE=$(gen "$M")
@@ -53,4 +57,30 @@ LORA=$(gen m1@v1)
 echo "GEN base $(printf %q "$BASE")"
 echo "GEN m1@v1 $(printf %q "$LORA")"
 [ "$BASE" != "$LORA" ] || { echo "FAIL: adapter output equals base output"; exit 1; }
+
+# 4. the tinkercloud endpoint plugin's generate route samples what /v1/completions
+#    sampled for the same model name, and refuses a name that is not loaded
+/opt/vllm-env/bin/python - "$URL" "$M" "$BASE" "$LORA" <<'PY'
+import json, sys, urllib.error, urllib.request
+url, base, want_base, want_lora = sys.argv[1:]
+def post(path, body):
+    req = urllib.request.Request(url + path, json.dumps(body).encode(), {"Content-Type": "application/json"})
+    with urllib.request.urlopen(req) as r:
+        return json.load(r)
+ids = post("/tokenize", {"model": base, "prompt": "The capital of France is"})["tokens"]
+sp = {"max_tokens": 12, "temperature": 0, "logprobs": 0}
+for name, want in ((base, want_base), ("m1@v1", want_lora)):
+    choice = post("/tinkercloud/v1/generate", {"model": name, "token_ids": ids, "sampling_params": sp})["choices"][0]
+    text = post("/detokenize", {"model": base, "tokens": choice["token_ids"]})["prompt"]
+    if text.rstrip("\n") != want or len(choice["logprobs"]["content"]) != len(choice["token_ids"]):
+        sys.exit(f"FAIL: plugin route for {name}: {text!r} vs completions {want!r}")
+    print("PLUGIN", name, repr(text))
+try:
+    post("/tinkercloud/v1/generate", {"model": "m1@v0", "token_ids": ids, "sampling_params": sp})
+    sys.exit("FAIL: plugin route sampled an adapter that is not loaded")
+except urllib.error.HTTPError as e:
+    if e.code != 404:
+        sys.exit(f"FAIL: plugin route answered {e.code} for an adapter that is not loaded")
+print("PLUGIN_OK")
+PY
 echo PASS

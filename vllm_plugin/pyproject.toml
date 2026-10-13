@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# Installed into the vLLM env only. Its dependencies (vllm, fastapi, msgspec)
+# come with that env, so install with --no-deps.
+name = "tinkercloud-vllm-plugin"
+version = "0.1.0"
+description = "TinkerCloud's generate route as a vLLM endpoint plugin"
+requires-python = ">=3.12"
+
+[project.entry-points."vllm.endpoint_plugins"]
+# loaded only when VLLM_PLUGINS names it
+tinkercloud = "tinkercloud_vllm_plugin:TinkerCloudEndpoints"
+
+[tool.setuptools]
+packages = ["tinkercloud_vllm_plugin"]
