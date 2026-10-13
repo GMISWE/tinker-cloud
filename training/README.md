@@ -19,7 +19,7 @@ tinker SDK ──HTTP──▶ routers/ ──▶ services/ ──▶ backends/<
 | `config.py` | `TrainingConfig` (server, storage, Ray, auth, backend selection) from the environment or a JSON/YAML file. |
 | `routers/` | Thin HTTP handlers, one module per area: `training`, `models`, `sampling`, `checkpoints`, `session`, `futures`, `health`. |
 | `services/` | Backend-agnostic orchestration: `model_service`, `training_service`, `sampling_service`, `checkpoint_service`, `session_service`, `ordering` (per-model program order and barriers). |
-| `backends/` | `base.py` ABCs (`TrainingBackend`, `ArgumentBuilder`, `DataConverter`), `factory.py` (`SUPPORTED_BACKENDS`), `env_config.py` (typed per-backend config base), one package per backend: `miles/`, `nemo_rl/`, `verl/`, `automodel/`, `megatron_bridge/`, `fake/` (deterministic CPU backend for the protocol suite). |
+| `backends/` | `base.py` ABCs (`TrainingBackend`, `ArgumentBuilder`, `DataConverter`), `factory.py` (`SUPPORTED_BACKENDS`), `env_config.py` (typed per-backend config base), one package per backend: `miles/`, `nemo_rl/`, `verl/`, `megatron_bridge/`, `fake/` (deterministic CPU backend for the protocol suite). |
 | `core/` | Backend-agnostic: `task_manager` (async futures + result validation), `loss_registry` (`loss_fn` / `loss_fn_config`), `validators`, `dependencies`. |
 | `models/` | Pydantic request and response models; `responses.RESULT_MODELS` is what every async result is validated against. |
 | `storage/` | `FuturesStorage` (SQLite, seq_id idempotency), `SessionStorage`, `MetadataStorage` (checkpoints). |

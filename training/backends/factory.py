@@ -17,7 +17,6 @@ _BACKEND_CLASSES = {
     "miles": (".miles.backend", "MilesBackend"),
     "nemo_rl": (".nemo_rl.backend", "NemoRLBackend"),
     "verl": (".verl.backend", "VerlBackend"),
-    "automodel": (".automodel.backend", "AutomodelBackend"),
     "megatron_bridge": (".megatron_bridge.backend", "MegatronBridgeBackend"),
     "fake": (".fake.backend", "FakeBackend"),  # deterministic CPU backend for protocol tests
 }
