@@ -207,12 +207,18 @@ spec:
     emptyDir: {}
 EOF
     kubectl apply -f "$TMP/pod.yaml"
-    echo "==> waiting for Ready (image pull can take ~5-10 min on a cold node)"
+    echo "==> waiting for Ready on $IMAGE (image pull can take ~5-10 min on a cold node)"
     # NB: GPUS must be <= the node's UNALLOCATED nvidia.com/gpu (idle pods still
     # hold their allocation); otherwise kubelet rejects with UnexpectedAdmissionError.
+    # On an existing pod, apply changes only the image: kubelet restarts the
+    # container in place (/data survives) while the old one still reports
+    # Ready, so Ready counts only once the running container has the image.
     for _ in $(seq 1 240); do
       PHASE=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.phase}')
       READY=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+      RUNNING_IMAGE=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.containerStatuses[0].image}')
+      # the runtime may report a short name registry-qualified
+      case "$RUNNING_IMAGE" in "$IMAGE"|*/"$IMAGE") ;; *) READY=False ;; esac
       [ "$READY" = True ] && break
       if [ "$PHASE" = Failed ]; then
         echo "ERROR: pod admission failed:"; kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.message}'; echo
@@ -220,7 +226,7 @@ EOF
       fi
       sleep 5
     done
-    [ "$READY" = True ] || { echo "ERROR: pod not Ready after 20 min"; exit 1; }
+    [ "$READY" = True ] || { echo "ERROR: pod not Ready on $IMAGE after 20 min (running: $RUNNING_IMAGE)"; exit 1; }
   else
     echo "==> [1/6] starting container $CONTAINER (data: $DATA_DIR)"
     $DOCKER run -d --name "$CONTAINER" --init --gpus all --network host \
