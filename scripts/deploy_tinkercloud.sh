@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-key deploy of a TinkerCloud dev environment (k8s pod or docker container).
 #
-#   deploy_tinkercloud.sh [--profile nemo_rl|bionemo|megatron_bridge|miles] \
+#   deploy_tinkercloud.sh [--profile nemo_rl|bionemo|megatron_bridge|miles|automodel] \
 #                         [--source dev|git] [--target k8s|docker] [--code-only]
 #
 # Profiles (cased by BASE IMAGE — the images ship incompatible stacks)
@@ -22,6 +22,11 @@
 #            (TINKERCLOUD_BACKEND=miles), health-checks :8000. GPUS=4, master-02.
 #            Needs a pull secret for the private image: IMAGE_PULL_SECRET (default
 #            gcp-secret) must exist in namespace $NS.
+#   automodel  Automodel backend env (specs/027). Image built from
+#            docker/automodel: nemo-automodel training env in /opt/venv plus the
+#            NGC vLLM env in /opt/vllm-env (start it via vllm-api-server).
+#            Private registry image (pull secret gar-secret). Env only until the
+#            automodel backend lands; scripts/automodel/smoke_vllm_lora.sh checks it.
 #   Per-profile defaults (IMAGE, GPUS, NODE, BACKEND) are overridable by env vars.
 #   See specs/004-bionemo-classification/P5-TINKER-BACKEND.md.
 #
@@ -103,7 +108,18 @@ case "$PROFILE" in
     CONTAINER="${CONTAINER:-tinkercloud-miles}"
     IMAGE_PULL_SECRET="${IMAGE_PULL_SECRET:-gcp-secret}"
     RUN_SERVER=1 ;;   # Ray head + `python3 -m training` (TINKERCLOUD_BACKEND=miles)
-  *) echo "unknown --profile $PROFILE (want: nemo_rl | bionemo | megatron_bridge | miles)"; exit 1 ;;
+  automodel)
+    # Built from docker/automodel. Training and vLLM run from two separate
+    # vendor envs; the deploy must not install into either of them.
+    IMAGE="${IMAGE:-us-west1-docker.pkg.dev/devv-404803/gmi-test-repo/tinkercloud-automodel:26.08.00-vllm26.06}"
+    IMAGE_PULL_SECRET="${IMAGE_PULL_SECRET:-gar-secret}"
+    BACKEND="${BACKEND:-automodel}"
+    GPUS="${GPUS:-4}"
+    NODE="${NODE:-master-03}"
+    POD="${POD:-tinkercloud-automodel-m03}"
+    CONTAINER="${CONTAINER:-tinkercloud-automodel}"
+    RUN_SERVER=0 ;;   # env only until the automodel backend lands
+  *) echo "unknown --profile $PROFILE (want: nemo_rl | bionemo | megatron_bridge | miles | automodel)"; exit 1 ;;
 esac
 
 # --- shared config (IMAGE/GPUS/NODE/POD/CONTAINER/BACKEND set per-profile) --
@@ -253,7 +269,7 @@ tar -C "$SRC" -czf "$TMP/code.tar.gz" \
   --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
   --exclude='.venv' --exclude='tinker-cookbook/attic' \
   tinker-cloud/training tinker-cloud/tests tinker-cloud/gates tinker-cloud/pyproject.toml \
-  tinker-cloud/scripts/evo2 \
+  tinker-cloud/scripts/evo2 tinker-cloud/scripts/automodel \
   RL/nemo_rl \
   tinker_gmi/src tinker_gmi/pyproject.toml tinker_gmi/README.md \
   tinker-cookbook/tinker_cookbook tinker-cookbook/pyproject.toml tinker-cookbook/README.md \
@@ -272,12 +288,19 @@ if [ "$RUN_SERVER" = 1 ]; then
     echo "ERROR: no HF token in target; pass HF_TOKEN_FILE=<path>"; exit 1; }
 else
   # bionemo: the Evo2 checkpoint (arcinstitute) is public; token optional.
-  EX "test -s /tmp/hf_token.txt" || echo "    note: no HF token (fine for public Evo2 weights)"
+  EX "test -s /tmp/hf_token.txt" || echo "    note: no HF token (fine for public weights)"
 fi
 
 # --- 4. in-container setup ---------------------------------------------------
 echo "==> [4/6] running in-container setup (profile=$PROFILE)"
 EX "PROFILE=$PROFILE MILES_REPO='${MILES_REPO:-}' MILES_REF='${MILES_REF:-}' bash /tmp/setup_container.sh"
+
+if [ "$PROFILE" = automodel ]; then
+  echo "==> DONE: automodel env ready (target=$TARGET, image=$IMAGE)"
+  echo "    training env /opt/venv; vLLM via /opt/vllm-env/bin/vllm-api-server"
+  echo "    smoke (inside the target): bash /app/scripts/automodel/smoke_vllm_lora.sh"
+  exit 0
+fi
 
 if [ "$RUN_SERVER" = 0 ]; then
   # bionemo profile: env only — no Ray, no server (no working evo2 server yet).

@@ -1,0 +1,23 @@
+#!/bin/bash
+# Start the vLLM OpenAI server from /opt/vllm-env with the NGC vLLM image's
+# environment. Arguments go to vllm.entrypoints.openai.api_server unchanged.
+# --check imports vllm with that environment, then exits.
+set -euo pipefail
+VE=/opt/vllm-env
+SP=$VE/lib/python3.12/site-packages
+export LD_LIBRARY_PATH=/opt/ffmpeg-safe/lib:$SP/torch/lib:/opt/ffmpeg-safe-cv2-shim-v5/lib:/opt/ffmpeg-safe-cv2-shim-v8/lib:/opt/vllm-syslib:/usr/local/cuda/compat/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+export PATH=$VE/bin:/opt/ffmpeg-safe/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export CUDA_HOME=/usr/local/cuda
+export TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
+export TRITON_CUOBJDUMP_PATH=/usr/local/cuda/bin/cuobjdump
+export TRITON_NVDISASM_PATH=/usr/local/cuda/bin/nvdisasm
+export TRITON_CUPTI_PATH=/usr/local/cuda/include
+export TRITON_CUDACRT_PATH=/usr/local/cuda/include
+export TRITON_CUDART_PATH=/usr/local/cuda/include
+export VLLM_ALLOW_RUNTIME_LORA_UPDATING=1
+# the training env's variables must not reach this interpreter
+unset VIRTUAL_ENV PYTHONPATH PYTHONHOME
+if [ "${1:-}" = --check ]; then
+  exec "$VE/bin/python" -c 'import torch, vllm, vllm.entrypoints.openai.api_server; print("vllm", vllm.__version__, "torch", torch.__version__)'
+fi
+exec "$VE/bin/python" -m vllm.entrypoints.openai.api_server "$@"
