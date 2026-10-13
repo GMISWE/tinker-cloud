@@ -1,0 +1,5 @@
+# The automodel image builds from the repo root; it needs only these.
+*
+!docker/automodel
+!vllm_plugin
+vllm_plugin/**/__pycache__
