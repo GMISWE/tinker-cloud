@@ -6,7 +6,8 @@ One request per sample(): the token-id prompt plus the full SamplingParams
 logprobs, detokenize) and the top-k counts the route should emit
 (topk_sample_logprobs / topk_prompt_logprobs). A cancelled request closes the
 connection, which is how the worker aborts the generation. NeMo RL's async
-vLLM worker serves the route when expose_http_server is set.
+vLLM worker serves the route when expose_http_server is set. Errors carry the
+calling backend's name.
 
 Wire (the route's msgspec structs): a choice is {index, finish_reason,
 token_ids, logprobs: {content: [{logprob, top_logprobs?}]}} where top_logprobs
@@ -20,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 import orjson
 
-from ..base import BackendError
+from ...base import BackendError
 
 # The worker floors a non-finite logprob to this (JSON has no infinity, SkyRL's
 # convention); at or below it the value goes back to -inf on our wire.
@@ -35,12 +36,13 @@ def _topk_row(entries: List[Dict[str, Any]]) -> List[Tuple[int, float]]:
     return [(int(e["token"]), _unclamp(e["logprob"])) for e in entries]
 
 class VllmGenerateClient:
-    """The generate codec for one worker URL."""
+    """The generate codec for one worker URL; `backend` names the caller in errors."""
 
-    def __init__(self, base_url: str, http: httpx.AsyncClient):
+    def __init__(self, base_url: str, http: httpx.AsyncClient, backend: str):
         self.base_url = base_url.rstrip("/")
         self.generate_url = f"{self.base_url}/tinkercloud/v1/generate"
         self._http = http
+        self.backend = backend
 
     @staticmethod
     def build_request(
@@ -108,7 +110,7 @@ class VllmGenerateClient:
         if len(choices) != num_samples:
             raise BackendError(
                 f"vLLM worker {self.base_url} returned {len(choices)} of {num_samples} sequences",
-                backend="nemo_rl", operation="sample",
+                backend=self.backend, operation="sample",
             )
         rows = []
         for choice in sorted(choices, key=lambda c: c["index"]):
@@ -117,7 +119,7 @@ class VllmGenerateClient:
             if finish == "abort":
                 raise BackendError(
                     f"vLLM worker {self.base_url} aborted the request (engine pause or shutdown)",
-                    backend="nemo_rl", operation="sample",
+                    backend=self.backend, operation="sample",
                 )
             content = choice["logprobs"]["content"]
             logprobs = [_unclamp(e["logprob"]) for e in content]
@@ -125,7 +127,7 @@ class VllmGenerateClient:
                 raise BackendError(
                     f"vLLM worker {self.base_url} returned {len(tokens)} tokens but "
                     f"{len(logprobs)} logprobs",
-                    backend="nemo_rl", operation="sample",
+                    backend=self.backend, operation="sample",
                 )
             row: Dict[str, Any] = {"tokens": tokens, "logprobs": logprobs, "finish_reason": finish}
             if topk_sample_logprobs:
@@ -133,7 +135,7 @@ class VllmGenerateClient:
                     raise BackendError(
                         f"vLLM worker {self.base_url} returned no top_logprobs for "
                         f"topk_sample_logprobs={topk_sample_logprobs} (route predates top-k)",
-                        backend="nemo_rl", operation="sample",
+                        backend=self.backend, operation="sample",
                     )
                 row["topk_logprobs"] = [_topk_row(e["top_logprobs"]) for e in content]
             rows.append(row)
@@ -144,7 +146,7 @@ class VllmGenerateClient:
                 raise BackendError(
                     f"vLLM worker {self.base_url} returned prompt logprobs for "
                     f"{None if entries is None else len(entries)} of {len(token_ids)} prompt tokens",
-                    backend="nemo_rl", operation="compute_logprobs",
+                    backend=self.backend, operation="compute_logprobs",
                 )
             prompt_lp = [None] + [_unclamp(v) for v in entries[1:]]
         prompt_topk: Optional[List[Optional[List[Tuple[int, float]]]]] = None
@@ -155,7 +157,7 @@ class VllmGenerateClient:
                     f"vLLM worker {self.base_url} returned prompt top-k for "
                     f"{None if top_entries is None else len(top_entries)} of {len(token_ids)} prompt tokens "
                     f"(topk_prompt_logprobs={topk_prompt_logprobs}; a missing key means the route predates top-k)",
-                    backend="nemo_rl", operation="compute_logprobs",
+                    backend=self.backend, operation="compute_logprobs",
                 )
             prompt_topk = [None] + [_topk_row(e) for e in top_entries[1:]]
         return {"rows": rows, "prompt_logprobs": prompt_lp, "topk_prompt_logprobs": prompt_topk}
@@ -181,12 +183,12 @@ class VllmGenerateClient:
             # leader breaks its refit too, so no retry and no other leader.
             raise BackendError(
                 f"vLLM worker {self.base_url} unreachable: {e}",
-                backend="nemo_rl", operation="sample", original_error=e,
+                backend=self.backend, operation="sample", original_error=e,
             ) from e
         if response.status_code != 200:
             raise BackendError(
                 f"vLLM worker {self.base_url} returned {response.status_code}: {response.text[:300]}",
-                backend="nemo_rl", operation="sample",
+                backend=self.backend, operation="sample",
             )
         # orjson: the body is ~160 bytes per sampled token (vLLM's per-token logprob
         # objects); stdlib json cost 0.8 s per 2048x256-token step on the event loop.
@@ -200,9 +202,10 @@ class VllmControlClient:
     """The refit routes of one worker URL (specs/021, D16): the worker serves
     them on the same loop as generate, so the engine core sees one sender."""
 
-    def __init__(self, base_url: str, http: httpx.AsyncClient):
+    def __init__(self, base_url: str, http: httpx.AsyncClient, backend: str):
         self.base_url = base_url.rstrip("/")
         self._http = http
+        self.backend = backend
 
     async def _post(self, route: str) -> bool:
         url = f"{self.base_url}/tinkercloud/v1/{route}"
@@ -211,12 +214,12 @@ class VllmControlClient:
         except httpx.TransportError as e:
             raise BackendError(
                 f"vLLM worker {self.base_url} unreachable during {route}: {e}",
-                backend="nemo_rl", operation="refit", original_error=e,
+                backend=self.backend, operation="refit", original_error=e,
             ) from e
         if response.status_code != 200:
             raise BackendError(
                 f"vLLM worker {self.base_url} returned {response.status_code} on {route}: {response.text[:300]}",
-                backend="nemo_rl", operation="refit",
+                backend=self.backend, operation="refit",
             )
         return bool(orjson.loads(response.content)["ok"])
 

@@ -843,7 +843,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         from it once versions diverge. v0-pinned samplers (DPO's frozen
         reference) are served from NeMo RL's built-in frozen reference model.
         """
-        from .generation import sample_over_http
+        from ..common.sampling.generation import sample_over_http
 
         # BUG-015 routing: version-pinned logprob reads
         if prompt_logprobs and pinned_version is not None and pinned_version != handle.weight_version:
@@ -1139,7 +1139,7 @@ async def _refit(handle: NemoRLHandle) -> None:
         )
         return
     import ray
-    from .generation import reset_prefix_cache_over_http, update_weights_over_http
+    from ..common.sampling.generation import reset_prefix_cache_over_http, update_weights_over_http
 
     # One collective: the trainer broadcasts while every leader receives.
     futures_train = handle.policy.broadcast_weights_for_collective()

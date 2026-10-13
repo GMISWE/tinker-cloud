@@ -1,5 +1,5 @@
 """
-NeMo RL per-request sampling over the workers' HTTP servers (specs/019, D15).
+Per-request sampling over the vLLM workers' HTTP servers (specs/019, D15, D21).
 
 Every sample() is one /tinkercloud/v1/generate request (the fork's flat-logprob
 route beside vLLM's /inference/v1/generate) to the next data-parallel leader of the model, taken from the routing table with a
@@ -7,15 +7,16 @@ pooled client, the same shape as Miles over its SGLang router. The request
 carries the full SamplingParams (n = num_samples, vLLM seeds child i with
 seed + i) and a cache salt keyed on the weight version the engine holds, so
 a block computed by earlier weights is never reused. Cancelling the sample
-task closes the request; the worker aborts the generation.
+task closes the request; the worker aborts the generation. The handle's
+backend_type names the caller in errors.
 """
 import asyncio
 import logging
 from typing import Any, Dict, List
 
-from ...core import routing
-from ..base import BackendError
-from ..http_pool import HttpClientPool
+from ....core import routing
+from ...base import BackendError
+from ...http_pool import HttpClientPool
 from .vllm_client import VllmControlClient
 from .vllm_client import VllmGenerateClient
 
@@ -33,7 +34,7 @@ def next_leader_url(handle: Any) -> str:
         endpoint = routing.table.endpoint_for(handle.model_id)
     except routing.RoutingError as e:
         raise BackendError(
-            "vLLM workers not available", backend="nemo_rl", operation="sample",
+            "vLLM workers not available", backend=handle.backend_type, operation="sample",
         ) from e
     url = endpoint.base_urls[handle.next_leader % len(endpoint.base_urls)]
     handle.next_leader += 1
@@ -52,7 +53,7 @@ async def sample_over_http(
     topk_prompt_logprobs: int = 0,
 ) -> Dict[str, Any]:
     url = next_leader_url(handle)
-    client = VllmGenerateClient(url, pool.for_url(url))
+    client = VllmGenerateClient(url, pool.for_url(url), handle.backend_type)
     out = await client.generate(
         token_ids=prompt_tokens,
         sampling_params=sampling_params,
@@ -95,10 +96,10 @@ def _leader_urls(handle: Any) -> tuple:
 async def update_weights_over_http(handle: Any, pool: HttpClientPool) -> list:
     """Every leader receives the trainer's broadcast at once (one NCCL
     collective); returns each leader's ok flag in leader order."""
-    clients = [VllmControlClient(u, pool.for_url(u)) for u in _leader_urls(handle)]
+    clients = [VllmControlClient(u, pool.for_url(u), handle.backend_type) for u in _leader_urls(handle)]
     return list(await asyncio.gather(*(c.update_weights_from_collective() for c in clients)))
 
 
 async def reset_prefix_cache_over_http(handle: Any, pool: HttpClientPool) -> None:
-    clients = [VllmControlClient(u, pool.for_url(u)) for u in _leader_urls(handle)]
+    clients = [VllmControlClient(u, pool.for_url(u), handle.backend_type) for u in _leader_urls(handle)]
     await asyncio.gather(*(c.reset_prefix_cache() for c in clients))

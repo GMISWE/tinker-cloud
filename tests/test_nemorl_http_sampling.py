@@ -15,8 +15,8 @@ import pytest
 from tinkercloud.training.backends.base import BackendError
 from tinkercloud.training.backends.http_pool import HttpClientPool
 from tinkercloud.training.backends.nemo_rl.backend import NemoRLHandle, _worker_server_roots
-from tinkercloud.training.backends.nemo_rl.generation import sample_over_http
-from tinkercloud.training.backends.nemo_rl.vllm_client import VllmGenerateClient
+from tinkercloud.training.backends.common.sampling.generation import sample_over_http
+from tinkercloud.training.backends.common.sampling.vllm_client import VllmGenerateClient
 from tinkercloud.training.core import routing
 
 
@@ -147,6 +147,18 @@ def test_unpublished_model_is_a_backend_error():
         run(HttpClientPool(transport=vllm_transport([])), handle())
 
 
+def test_errors_name_the_calling_backend(leaders):
+    """D21: the shared client tags its errors with the handle's backend."""
+    h = NemoRLHandle(model_id="m", backend_type="automodel", tokenizer=FakeTokenizer(),
+                     generation_synced_version=3)
+    with pytest.raises(BackendError, match="n1:8001 returned 500") as e:
+        run(HttpClientPool(transport=vllm_transport([], status=500)), h)
+    assert e.value.backend == "automodel"
+    with pytest.raises(BackendError, match="n1:8001 returned 500") as e:
+        run(HttpClientPool(transport=vllm_transport([], status=500)), handle())
+    assert e.value.backend == "nemo_rl"
+
+
 def test_worker_server_roots_strip_the_v1_suffix():
     class Gen:
         dp_openai_server_base_urls = ["http://10.0.0.1:41000/v1", "http://10.0.0.2:41002/v1"]
@@ -163,7 +175,8 @@ def test_stamp_is_the_submission_version_and_the_span_is_not_certified_on_the_sp
     """D16: a refit landing mid-sequence leaves weight_version = the version
     at submission (a lower bound) and latest_weight_version = the version at
     completion; colocated, the ver(S) certificate still raises on the gap."""
-    from tinkercloud.training.backends.nemo_rl import backend as nb, generation as gen
+    from tinkercloud.training.backends.common.sampling import generation as gen
+    from tinkercloud.training.backends.nemo_rl import backend as nb
 
     async def refit_mid_serve(h, pool, request_id, prompt_tokens, num_samples, sp, pl, **topk):
         h.generation_synced_version = h.weight_version = h.weight_version + 1
@@ -241,7 +254,7 @@ def _topk_body(k_sample, k_prompt, prompt_len, n=1):
 
 
 def test_topk_request_carries_the_counts_and_the_vllm_logprob_budget():
-    client = VllmGenerateClient("http://n1:8001", None)
+    client = VllmGenerateClient("http://n1:8001", None, "nemo_rl")
     body = client.build_request([5, 6, 7], {"temperature": 1.0, "top_p": 1.0, "max_tokens": 2, "stop": ["x"]},
                                 2, False, "m@3", topk_sample_logprobs=2, topk_prompt_logprobs=3)
     assert body["topk_sample_logprobs"] == 2 and body["topk_prompt_logprobs"] == 3
@@ -254,7 +267,7 @@ def test_topk_request_carries_the_counts_and_the_vllm_logprob_budget():
 
 
 def test_topk_response_parses_rows_best_first_with_the_floor_unclamped():
-    client = VllmGenerateClient("http://n1:8001", None)
+    client = VllmGenerateClient("http://n1:8001", None, "nemo_rl")
     body = _topk_body(2, 3, prompt_len=3)
     body["choices"][0]["logprobs"]["content"][1]["top_logprobs"][1]["logprob"] = -9999.0
     out = client.parse_response(body, [5, 6, 7], 1, True, topk_sample_logprobs=2, topk_prompt_logprobs=3)
@@ -269,7 +282,7 @@ def test_topk_response_parses_rows_best_first_with_the_floor_unclamped():
 
 
 def test_topk_from_a_route_that_predates_it_names_the_worker():
-    client = VllmGenerateClient("http://n1:8001", None)
+    client = VllmGenerateClient("http://n1:8001", None, "nemo_rl")
     old = {"request_id": "r", "prompt_logprobs": [None, -1.0, -2.0],
            "choices": [{"index": 0, "finish_reason": "length", "token_ids": [10, 11],
                         "logprobs": {"content": [{"logprob": -0.5}, {"logprob": -0.6}]}}]}
