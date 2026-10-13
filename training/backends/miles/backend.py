@@ -299,8 +299,8 @@ class MilesBackend(TrainingBackend[MilesHandle]):
         if classification is not None:
             raise BackendError(
                 f"Miles is a language-modeling backend; {base_model!r} declares a "
-                f"{classification.objective.value} head, which needs the automodel or "
-                f"megatron_bridge backend",
+                f"{classification.objective.value} head, which needs the megatron_bridge "
+                f"backend",
                 backend="miles", operation="create_model",
             )
         # Shape and debug knobs are operator configuration (specs/025, D17);

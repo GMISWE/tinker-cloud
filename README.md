@@ -79,7 +79,7 @@ Server-wide settings (`training/config.py`):
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `TINKERCLOUD_BACKEND` | `miles`, `nemo_rl`, `verl`, `automodel`, `megatron_bridge`, `fake` (also `python -m training --backend B`) | `miles` |
+| `TINKERCLOUD_BACKEND` | `miles`, `nemo_rl`, `verl`, `megatron_bridge`, `fake` (also `python -m training --backend B`) | `miles` |
 | `TINKERCLOUD_BACKEND_OVERRIDES` | JSON object of backend config fields, applied over the environment | unset |
 | `TRAINING_HOST` / `TRAINING_PORT` | Bind address | `0.0.0.0` / `8000` |
 | `TINKER_API_KEY` | API auth key | `tml-dev-key` |

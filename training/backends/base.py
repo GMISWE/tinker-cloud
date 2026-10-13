@@ -120,8 +120,8 @@ class TrainingBackend(ABC, Generic[H]):
         (utils.model_config.read_raw_hf_config): context length for its own
         sizing, and the classification head via objectives.classification_spec.
         Language-modeling backends (Miles, NeMo RL, verl) must reject a model
-        that declares a head with BackendError; classification backends
-        (Automodel, Megatron-Bridge) require one. The fake backend reads
+        that declares a head with BackendError; the classification backend
+        (Megatron-Bridge) requires one. The fake backend reads
         nothing: it is a test double.
 
         Returns:

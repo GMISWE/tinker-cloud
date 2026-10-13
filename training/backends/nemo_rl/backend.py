@@ -143,8 +143,8 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         if classification is not None:
             raise BackendError(
                 f"NeMo RL is a language-modeling backend; {base_model!r} declares a "
-                f"{classification.objective.value} head, which needs the automodel or "
-                f"megatron_bridge backend",
+                f"{classification.objective.value} head, which needs the megatron_bridge "
+                f"backend",
                 backend="nemo_rl", operation="create_model",
             )
         debug_train_only = self.config.debug_train_only
