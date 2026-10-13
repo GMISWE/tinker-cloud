@@ -20,12 +20,15 @@ class AutomodelConfig(EnvConfig):
     max_loras: int = Field(ge=1, description="vLLM --max-loras: adapters resident on the GPU at once")
     max_lora_rank: int = Field(description="vLLM --max-lora-rank; create_model refuses a larger LoRA rank")
     max_cpu_loras: int = Field(ge=1, description="vLLM --max-cpu-loras: adapters cached in host memory")
+    micro_batch_rows: int = Field(ge=1, description="rows per forward/backward on a rank; a row count, not a "
+                                                    "token budget, so every rank runs the same number of steps")
 
     ENV = {
         "train_gpus": "AUTOMODEL_TRAIN_GPUS",
         "max_loras": "AUTOMODEL_MAX_LORAS",
         "max_lora_rank": "AUTOMODEL_MAX_LORA_RANK",
         "max_cpu_loras": "AUTOMODEL_MAX_CPU_LORAS",
+        "micro_batch_rows": "AUTOMODEL_MICRO_BATCH_ROWS",
     }
 
     @model_validator(mode="after")

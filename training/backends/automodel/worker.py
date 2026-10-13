@@ -1,0 +1,199 @@
+"""
+One FSDP2 rank of an Automodel training group (R1): a Ray actor on one GPU that
+holds its shard of the base model, the LoRA shard, the LoRA grads and AdamW
+state, across requests.
+
+The driver calls every rank with the same method at once and gathers the
+results in rank order. Each call is one Tinker primitive; there is no training
+loop here (Automodel's recipe owns its loop, Tinker's client owns this one):
+  forward_backward  runs now and returns the real loss; grads accumulate (R9)
+  optim_step        writes the request's AdamParams, clips, steps (R11)
+
+Lockstep: FSDP2 runs collectives in every forward and backward, so every rank
+must run the same number of them. shard() gives each rank the same row count
+and micro-batches are a fixed row count, so the step count is equal; a
+micro-batch of padding rows still runs its forward and backward.
+
+Rendezvous takes two calls: rank 0's rendezvous_address() picks a port on its
+node, then every rank's setup() joins it and builds the model.
+"""
+import hashlib
+import math
+import socket
+from typing import Dict, Optional, Tuple
+
+import ray
+import torch
+import torch.distributed as dist
+from nemo_automodel import NeMoAutoModelForCausalLM
+from nemo_automodel.components._peft.lora import PeftConfig
+from nemo_automodel.components.distributed.config import DistributedSetup
+from nemo_automodel.components.distributed.mesh import ParallelismSizes
+from nemo_automodel.components.training.utils import clip_grad_norm
+from torch.distributed.fsdp import FSDPModule
+from torch.distributed.tensor import DTensor, distribute_tensor
+
+from ...models.requests import AdamParams
+from .converter import Batch
+from .losses import compute_loss
+from .lora import LoraSpec
+
+
+class NonFiniteGradNorm(RuntimeError):
+    """optim_step refused: the grad norm is inf/NaN; the grads were zeroed (R10)."""
+
+
+class AutomodelWorker:
+    """Wrap with ray.remote(num_gpus=1, num_cpus=1) and place in the group's PG."""
+
+    def __init__(self, rank: int, world_size: int, base_model: str, lora: LoraSpec,
+                 seed: int, micro_batch_rows: int):
+        self.rank = rank
+        self.world_size = world_size
+        self.base_model = base_model
+        self.lora = lora
+        self.seed = seed
+        self.micro_batch_rows = micro_batch_rows
+
+    def rendezvous_address(self) -> str:
+        assert self.rank == 0, "rank 0 hosts the rendezvous"
+        host = ray.util.get_node_ip_address()
+        with socket.socket() as s:
+            s.bind((host, 0))
+            port = s.getsockname()[1]
+        return f"tcp://{host}:{port}"
+
+    def setup(self, init_method: str) -> int:
+        """Join the group, build the model with LoRA and the optimizer.
+        Returns the number of trainable (LoRA) elements in the full model."""
+        # Ray exposes the bundle's one GPU as device 0
+        device = torch.device("cuda", 0)
+        torch.cuda.set_device(device)
+        dist.init_process_group("nccl", init_method=init_method, rank=self.rank,
+                                world_size=self.world_size, device_id=device)
+        distributed_setup = DistributedSetup.build(
+            "fsdp2", ParallelismSizes(dp_size=self.world_size), world_size=self.world_size)
+        peft = PeftConfig(
+            target_modules=[f"*.{m}" for m in self.lora.target_modules],
+            dim=self.lora.rank,
+            alpha=self.lora.alpha,
+            dropout=self.lora.dropout,
+            # bf16 LoRA weights would round away small AdamW updates
+            lora_dtype=torch.float32,
+        )
+        self.model = NeMoAutoModelForCausalLM.from_pretrained(
+            self.base_model, distributed_setup=distributed_setup, peft_config=peft,
+            torch_dtype=torch.bfloat16, use_liger_kernel=False)
+        self.lora_params = [(n, p) for n, p in self.model.named_parameters() if p.requires_grad]
+        _check_targets(self.lora_params, self.lora.target_modules)
+        _init_lora(self.lora_params, self.seed)
+        # lr, betas, eps and weight_decay are rewritten from each request's AdamParams
+        # before every step (R11); the constructor's values are never used
+        self.optimizer = torch.optim.AdamW([p for _, p in self.lora_params])
+        return sum(p.numel() for _, p in self.lora_params)
+
+    def forward_backward(self, shard: Batch, clip: Optional[Tuple[float, float]]) -> Dict[str, torch.Tensor]:
+        self.model.train()
+        if isinstance(self.model, FSDPModule):  # Automodel leaves a 1-rank model unwrapped
+            # optim_step is a later call, so no micro-batch is known to be the
+            # last: every backward reduce-scatters into the sharded grads
+            self.model.set_requires_gradient_sync(True)
+        return self._run(shard, clip, backward=True)
+
+    def forward(self, shard: Batch, clip: Optional[Tuple[float, float]]) -> Dict[str, torch.Tensor]:
+        self.model.eval()
+        with torch.no_grad():
+            return self._run(shard, clip, backward=False)
+
+    def optim_step(self, adam: AdamParams) -> Dict[str, float]:
+        """Raises NonFiniteGradNorm. The norm is all-reduced, so every rank
+        takes the same branch: all step or all refuse."""
+        for group in self.optimizer.param_groups:
+            group["lr"] = adam.learning_rate
+            group["betas"] = (adam.beta1, adam.beta2)
+            group["eps"] = adam.eps
+            group["weight_decay"] = adam.weight_decay
+        # max_norm inf computes the norm and scales by 1: grad_clip_norm 0 means no clipping
+        max_norm = adam.grad_clip_norm if adam.grad_clip_norm > 0 else math.inf
+        norm = float(clip_grad_norm(max_norm, [self.model]))
+        if not math.isfinite(norm):
+            self.optimizer.zero_grad(set_to_none=True)
+            raise NonFiniteGradNorm(f"grad norm is {norm}; the optimizer step was not taken and the grads were zeroed")
+        self.optimizer.step()
+        self.optimizer.zero_grad(set_to_none=True)
+        return {"grad_norm": norm}
+
+    def lora_state(self) -> Dict[str, torch.Tensor]:
+        """The full fp32 LoRA weights on CPU, on every rank. Gathers the
+        shards: call it on all ranks at once."""
+        return {n: (p.full_tensor() if isinstance(p, DTensor) else p).detach().float().cpu()
+                for n, p in self.lora_params}
+
+    def _run(self, shard: Batch, clip: Optional[Tuple[float, float]], backward: bool) -> Dict[str, torch.Tensor]:
+        rows, width = shard.input_ids.shape
+        out = {
+            "row_loss": torch.zeros(rows),
+            "logprobs": torch.zeros(rows, width),
+            "elementwise": torch.zeros(rows, width),
+            "clamped": torch.zeros(rows),
+        }
+        for start in range(0, rows, self.micro_batch_rows):
+            end = min(start + self.micro_batch_rows, rows)
+            mb = _micro_batch(shard, start, end)
+            # right padding under a causal mask: a real position never attends
+            # to padding, so no attention mask is passed
+            logits = self.model(input_ids=mb.input_ids.cuda()).logits
+            res = compute_loss(logits, mb, clip)
+            if backward:
+                # FSDP2 averages grads over ranks; this restores the sum (losses.py)
+                (res.loss * self.world_size).backward()
+            w = mb.input_ids.shape[1]
+            out["row_loss"][start:end] = res.row_loss.cpu()
+            out["logprobs"][start:end, :w] = res.logprobs.cpu()
+            out["elementwise"][start:end, :w] = res.elementwise.cpu()
+            out["clamped"][start:end] = res.clamped.cpu()
+        return out
+
+
+def _micro_batch(shard: Batch, start: int, end: int) -> Batch:
+    """Rows [start, end), cut to their longest row (at least 1 column, so an
+    all-padding micro-batch still runs)."""
+    width = max(1, int(shard.lengths[start:end].max()))
+    return Batch(
+        loss_fn=shard.loss_fn,
+        input_ids=shard.input_ids[start:end, :width],
+        lengths=shard.lengths[start:end],
+        inputs={k: v[start:end, :width] for k, v in shard.inputs.items()},
+        request_rows=(),
+    )
+
+
+def _check_targets(params, targets: Tuple[str, ...]) -> None:
+    for name, _ in params:
+        if ".lora_A." not in name and ".lora_B." not in name:
+            raise RuntimeError(f"trainable parameter {name} is not a LoRA weight")
+    missing = [m for m in targets if not any(f".{m}.lora_A." in n for n, _ in params)]
+    if missing:
+        raise ValueError(f"LoRA targets {', '.join(missing)} match no module of this model")
+
+
+def _init_lora(params, seed: int) -> None:
+    """A = kaiming_uniform(a=sqrt(5)) (PEFT's init), B = 0. Each full matrix
+    comes from a generator seeded by (seed, parameter name), and each rank
+    keeps its slice, so the adapter does not depend on the rank count (R2.6).
+    Every rank walks the parameters in the same order (distribute_tensor may
+    communicate)."""
+    for name, p in params:
+        full = torch.empty(p.shape, dtype=torch.float32)
+        if ".lora_A." in name:
+            digest = hashlib.sha256(f"{seed}:{name}".encode()).digest()
+            gen = torch.Generator().manual_seed(int.from_bytes(digest[:8], "little") >> 1)
+            torch.nn.init.kaiming_uniform_(full, a=math.sqrt(5), generator=gen)
+        else:
+            full.zero_()
+        with torch.no_grad():
+            if isinstance(p, DTensor):
+                local = distribute_tensor(full.to(p.to_local().device), p.device_mesh, p.placements).to_local()
+                p.to_local().copy_(local)
+            else:
+                p.copy_(full)
