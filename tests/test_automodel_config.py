@@ -9,12 +9,13 @@ ENV = {
     "AUTOMODEL_MAX_LORAS": "4",
     "AUTOMODEL_MAX_LORA_RANK": "32",
     "AUTOMODEL_MAX_CPU_LORAS": "8",
+    "AUTOMODEL_MICRO_BATCH_ROWS": "2",
 }
 
 
 def test_from_env_parses_strings():
     cfg = AutomodelConfig.from_env(environ=ENV)
-    assert (cfg.train_gpus, cfg.max_loras, cfg.max_lora_rank, cfg.max_cpu_loras) == (2, 4, 32, 8)
+    assert (cfg.train_gpus, cfg.max_loras, cfg.max_lora_rank, cfg.max_cpu_loras, cfg.micro_batch_rows) == (2, 4, 32, 8, 2)
     assert cfg.source_of("max_lora_rank") == "env AUTOMODEL_MAX_LORA_RANK"
 
 
