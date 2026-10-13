@@ -1,7 +1,8 @@
 #!/bin/bash
 # Start the vLLM OpenAI server (`vllm serve`) from /opt/vllm-env with the NGC
 # vLLM image's environment. Arguments go to `vllm serve` unchanged.
-# --check imports vllm with that environment, then exits.
+# --check imports vllm with that environment, then exits; --python runs the
+# env's python with that environment and the remaining arguments.
 set -euo pipefail
 VE=/opt/vllm-env
 SP=$VE/lib/python3.12/site-packages
@@ -17,10 +18,18 @@ export TRITON_CUPTI_PATH=$CUDA/include
 export TRITON_CUDACRT_PATH=$CUDA/include
 export TRITON_CUDART_PATH=$CUDA/include
 export VLLM_ALLOW_RUNTIME_LORA_UPDATING=1
+# Loads the tinkercloud endpoint plugin. VLLM_PLUGINS is also the allowlist of
+# general plugins, so the image's LoRA resolvers (filesystem, HF hub) stay off:
+# an adapter name the server has not loaded must not resolve to anything.
+export VLLM_PLUGINS=tinkercloud
 # the training env's variables must not reach this interpreter
 unset VIRTUAL_ENV PYTHONPATH PYTHONHOME
 if [ "${1:-}" = --check ]; then
   exec "$VE/bin/python" -c 'import torch, vllm, vllm.entrypoints.cli.main; print("vllm", vllm.__version__, "torch", torch.__version__)'
+fi
+if [ "${1:-}" = --python ]; then
+  shift
+  exec "$VE/bin/python" "$@"
 fi
 # CUDA forward compat, as the NGC images' /etc/shinit_v2 does for their own
 # toolkit: use the 13.4 compat driver only when it initialises on this host's
