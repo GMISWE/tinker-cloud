@@ -111,7 +111,7 @@ case "$PROFILE" in
   automodel)
     # Built from docker/automodel. Training and vLLM run from two separate
     # vendor envs; the deploy must not install into either of them.
-    IMAGE="${IMAGE:-us-west1-docker.pkg.dev/devv-404803/gmi-test-repo/tinkercloud-automodel:26.08.00-vllm26.06}"
+    IMAGE="${IMAGE:-us-west1-docker.pkg.dev/devv-404803/gmi-test-repo/tinkercloud-automodel:26.08.00-vllm26.09}"
     IMAGE_PULL_SECRET="${IMAGE_PULL_SECRET:-gar-secret}"
     BACKEND="${BACKEND:-automodel}"
     GPUS="${GPUS:-4}"
