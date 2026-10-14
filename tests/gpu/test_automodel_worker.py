@@ -1,18 +1,23 @@
 """AutomodelWorker on real GPUs (Qwen2.5-0.5B-Instruct, LoRA rank 8).
 
 Needs >= 4 GPUs, the Automodel training env and the model in the HF cache;
-starts its own Ray instance. Not part of the CPU suites.
+starts its own Ray instance. Skipped elsewhere.
 """
 import os
 
 import pytest
-import ray
-import torch
 
-from tinkercloud.training.backends.automodel.converter import coalesce, convert_request, row_sums, shard
-from tinkercloud.training.backends.automodel.lora import LoraSpec, lora_spec
-from tinkercloud.training.backends.automodel.worker import AutomodelWorker, NonFiniteGradNorm
-from tinkercloud.training.models.requests import AdamParams, Datum, LoraConfig
+pytest.importorskip("nemo_automodel", reason="needs the Automodel training env")
+import ray  # noqa: E402
+import torch  # noqa: E402
+
+if torch.cuda.device_count() < 4:
+    pytest.skip("needs >= 4 GPUs", allow_module_level=True)
+
+from tinkercloud.training.backends.automodel.converter import coalesce, convert_request, row_sums, shard  # noqa: E402
+from tinkercloud.training.backends.automodel.lora import LoraSpec, lora_spec  # noqa: E402
+from tinkercloud.training.backends.automodel.worker import AutomodelWorker, NonFiniteGradNorm  # noqa: E402
+from tinkercloud.training.models.requests import AdamParams, Datum, LoraConfig  # noqa: E402
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 LORA: LoraSpec = lora_spec(LoraConfig(rank=8, alpha=16))
