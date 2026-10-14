@@ -111,6 +111,7 @@ def compute_loss(logits: torch.Tensor, shard: Batch,
         clamped = (log_ratio.abs() > RATIO_LOG_CLAMP).sum(dim=1).float()
         ratio = torch.exp(log_ratio.clamp(-RATIO_LOG_CLAMP, RATIO_LOG_CLAMP))
         if shard.loss_fn == "ppo":
+            assert clip is not None  # checked on entry
             low, high = clip
             terms = -torch.minimum(ratio * adv, ratio.clamp(low, high) * adv)
         else:
