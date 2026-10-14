@@ -154,9 +154,12 @@ def _tokens(datum: Datum, index: int) -> torch.Tensor:
     if mi.chunks:
         if any(c.type == "image" for c in mi.chunks):
             raise ValueError(f"datum {index}: image input is not served by the automodel backend")
-        if any(c.tokens is None for c in mi.chunks):
-            raise ValueError(f"datum {index}: a text chunk carries no tokens")
-        return torch.tensor([t for c in mi.chunks for t in c.tokens], dtype=torch.long)
+        tokens: List[int] = []
+        for c in mi.chunks:
+            if c.tokens is None:
+                raise ValueError(f"datum {index}: a text chunk carries no tokens")
+            tokens.extend(c.tokens)
+        return torch.tensor(tokens, dtype=torch.long)
     if mi.tokens is not None:
         return torch.tensor(mi.tokens, dtype=torch.long)
     if mi.input_ids is not None:
