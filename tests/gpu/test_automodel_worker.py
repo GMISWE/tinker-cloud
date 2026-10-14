@@ -2,6 +2,14 @@
 
 Needs >= 4 GPUs, the Automodel training env and the model in the HF cache;
 starts its own Ray instance. Skipped elsewhere.
+
+Run on a GPU pod (about 4.5 minutes for the 5 tests):
+  KX_TIMEOUT=1700 scripts/pod_pytest.sh <pod> tests/gpu/test_automodel_worker.py -v
+
+When extending: a worker subclass defined at this module's top level fails to
+import inside the Ray actor process; define it inside a function so it is
+pickled by value. An fp32-compute variant needs attn_implementation="sdpa";
+FlashAttention takes only fp16/bf16.
 """
 import os
 
