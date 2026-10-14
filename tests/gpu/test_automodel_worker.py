@@ -73,7 +73,7 @@ def requests():
 
 ADAM = AdamParams(learning_rate=1e-3, beta1=0.9, beta2=0.95, eps=1e-8, weight_decay=0.0, grad_clip_norm=0.0)
 # beta1 = beta2 = 0 and eps >> |g| make AdamW's update lr * g / eps: linear in
-# the (clipped) grad. lr / eps = 1e-7 keeps the state nearly still between steps.
+# the (clipped) grad.
 LINEAR_KW = dict(beta1=0.0, beta2=0.0, eps=1e8, weight_decay=0.0, learning_rate=1e1)
 LINEAR = AdamParams(**LINEAR_KW, grad_clip_norm=0.0)
 
@@ -138,37 +138,52 @@ def test_loss_matches_unsharded_hf_reference_at_init():
     del ref_model
 
 
-def test_clip_and_nonfinite_refusal():
+def test_nonfinite_grad_norm_is_refused():
+    """Refused on every rank, grads zeroed, LoRA unchanged; the group then
+    trains on."""
     x, _ = requests()
     batch = coalesce([x], 2)
     grp = Group(2, 2)
     try:
-        # a non-finite grad: refused on every rank, grads zeroed, LoRA unchanged
         before = grp.lora()
-        poisoned = with_weight(batch, 3e38)
-        grp.fwd_bwd(poisoned)
+        grp.fwd_bwd(with_weight(batch, 3e38))
         with pytest.raises(NonFiniteGradNorm):
             grp.optim(ADAM)
         after = grp.lora()
         for k in before:
             assert torch.equal(before[k], after[k])
         assert grp.optim(ADAM) == 0.0  # the grads were zeroed: nothing left to step on
-
-        # clipping: under LINEAR, B's change is proportional to the clipped grad
-        b_names = [k for k in before if ".lora_B." in k]
-        s0 = grp.lora()
         grp.fwd_bwd(batch)
-        norm = grp.optim(LINEAR)
-        s1 = grp.lora()
-        grp.fwd_bwd(batch)
-        clipped_norm = grp.optim(AdamParams(**LINEAR_KW, grad_clip_norm=norm / 10))
-        s2 = grp.lora()
-        assert clipped_norm == pytest.approx(norm, rel=2e-2)  # the reported norm is before clipping
-        d1 = torch.cat([(s1[k] - s0[k]).flatten() for k in b_names]).norm()
-        d2 = torch.cat([(s2[k] - s1[k]).flatten() for k in b_names]).norm()
-        assert (d2 / d1).item() == pytest.approx(0.1, rel=2e-2)
+        assert grp.optim(ADAM) > 0  # the group still trains after a refusal
     finally:
         grp.kill()
+
+
+def test_clip_scales_the_update():
+    """Two fresh groups from the same init, one step each on the same batch:
+    unclipped vs clipped at a tenth of the norm. A group's computation is
+    deterministic, so both see the same grad, and under LINEAR the clipped
+    B update is exactly a tenth. One group taking both steps would not do:
+    the first step moves the state, and the second grad differs from it by
+    up to ~1% under bf16 compute, at any step size."""
+    x, _ = requests()
+    batch = coalesce([x], 2)
+    deltas, norms = [], []
+    for clip_of in (None, 0.1):
+        grp = Group(2, 2)
+        try:
+            s0 = grp.lora()
+            grp.fwd_bwd(batch)
+            clip = 0.0 if clip_of is None else norms[0] * clip_of
+            norms.append(grp.optim(AdamParams(**LINEAR_KW, grad_clip_norm=clip)))
+            s1 = grp.lora()
+        finally:
+            grp.kill()
+        b_names = [k for k in s0 if ".lora_B." in k]
+        deltas.append(torch.cat([(s1[k] - s0[k]).flatten() for k in b_names]))
+    assert norms[0] > 0
+    assert norms[1] == norms[0]  # the reported norm is before clipping
+    torch.testing.assert_close(deltas[1], deltas[0] * 0.1, rtol=1e-4, atol=0)
 
 
 def test_one_rank_group_runs():
