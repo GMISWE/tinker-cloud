@@ -79,7 +79,7 @@ def test_miles_direct_advantages():
     returns = get_grpo_returns(rewards, kl)
     advantages = torch.cat(returns)
 
-    print(f"\nMiles direct advantages:")
+    print("\nMiles direct advantages:")
     print(f"  Shape: {advantages.shape}")
     print(f"  First 4 values: {advantages[:4].tolist()}")
     print(f"  Mean: {advantages.mean():.6f}")
@@ -108,7 +108,7 @@ def test_tinker_advantages_with_fix():
     grpo_reward_center = False  # THE FIX
     grpo_std_normalization = False  # THE FIX
 
-    print(f"\nConfiguration:")
+    print("\nConfiguration:")
     print(f"  grpo_reward_center: {grpo_reward_center}")
     print(f"  grpo_std_normalization: {grpo_std_normalization}")
 
@@ -123,7 +123,7 @@ def test_tinker_advantages_with_fix():
     # Simulate trajectory_to_data: broadcast scalar advantage to all tokens
     advantages = rewards.repeat_interleave(TOKENS_PER_SAMPLE)
 
-    print(f"\nTinker advantages (with fix):")
+    print("\nTinker advantages (with fix):")
     print(f"  Shape: {advantages.shape}")
     print(f"  First 4 values: {advantages[:4].tolist()}")
     print(f"  Mean: {advantages.mean():.6f}")
@@ -152,7 +152,7 @@ def test_tinker_advantages_without_fix():
     grpo_reward_center = True  # OLD DEFAULT
     grpo_std_normalization = True  # OLD DEFAULT
 
-    print(f"\nConfiguration (OLD):")
+    print("\nConfiguration (OLD):")
     print(f"  grpo_reward_center: {grpo_reward_center}")
     print(f"  grpo_std_normalization: {grpo_std_normalization}")
 
@@ -167,7 +167,7 @@ def test_tinker_advantages_without_fix():
     # Broadcast to tokens
     advantages = rewards.repeat_interleave(TOKENS_PER_SAMPLE)
 
-    print(f"\nTinker advantages (WITHOUT fix):")
+    print("\nTinker advantages (WITHOUT fix):")
     print(f"  Shape: {advantages.shape}")
     print(f"  First 4 values: {advantages[:4].tolist()}")
     print(f"  Mean: {advantages.mean():.6f}")

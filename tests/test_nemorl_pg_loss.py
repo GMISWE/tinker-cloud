@@ -16,8 +16,8 @@ from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 
 DEV = "cuda"
 
-from tinkercloud.training.backends.nemo_rl.loss_config import NO_CLIP, NO_GRAD_CLIP, TINKER_PG_LOSS_DEFAULTS
-from tinkercloud.training.backends.nemo_rl.losses import TinkerSumPGLoss
+from tinkercloud.training.backends.nemo_rl.loss_config import NO_CLIP, NO_GRAD_CLIP, TINKER_PG_LOSS_DEFAULTS  # noqa: E402
+from tinkercloud.training.backends.nemo_rl.losses import TinkerSumPGLoss  # noqa: E402
 
 B, S, V = 2, 6, 16
 

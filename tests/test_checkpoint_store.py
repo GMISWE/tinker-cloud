@@ -3,7 +3,6 @@ pending/completed/failed record and what a reader is allowed to see.
 
 Pure filesystem tests; no backend, no server."""
 import json
-import os
 
 import pytest
 
