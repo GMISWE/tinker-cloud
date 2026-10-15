@@ -53,8 +53,9 @@ class TrainingGroup:
         from .worker import AutomodelWorker
 
         try:
-            self.pg = placement_group([{"GPU": 1, "CPU": 1}] * self.num_ranks, strategy="PACK", name=self.name)
-            ready, _ = await asyncio.to_thread(ray.wait, [self.pg.ready()], timeout=PG_READY_TIMEOUT_S)
+            pg = placement_group([{"GPU": 1, "CPU": 1}] * self.num_ranks, strategy="PACK", name=self.name)
+            self.pg = pg
+            ready, _ = await asyncio.to_thread(ray.wait, [pg.ready()], timeout=PG_READY_TIMEOUT_S)
             if not ready:
                 raise BackendError(
                     f"{self.num_ranks} free GPUs for training group {self.key} were not placed within "
@@ -103,7 +104,9 @@ class TrainingGroup:
         caller reports); the RayTaskError that carried it, with the remote
         traceback, stays attached as the cause. An actor death is not a task
         error and is raised as Ray reports it."""
-        results = await asyncio.gather(*refs, return_exceptions=True)
+        # Any: ray is not installed where the type check runs, so RayTaskError
+        # is Unknown there and isinstance cannot narrow to it
+        results: List[Any] = await asyncio.gather(*refs, return_exceptions=True)
         for r in results:
             if isinstance(r, RayTaskError):
                 raise r.cause from r
