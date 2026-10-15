@@ -35,12 +35,9 @@ from torch.distributed.tensor import DTensor, distribute_tensor
 
 from ...models.requests import AdamParams
 from .converter import Batch
+from .errors import NonFiniteGradNorm
 from .losses import compute_loss
 from .lora import LoraSpec
-
-
-class NonFiniteGradNorm(RuntimeError):
-    """optim_step refused: the grad norm is inf/NaN; the grads were zeroed (R10)."""
 
 
 class AutomodelWorker:
