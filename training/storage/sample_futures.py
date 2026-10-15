@@ -205,6 +205,10 @@ class SampleFutureStore:
         for rid in [r for r, f in self._futures.items() if f.status == "pending" and now - f.created_at > PENDING_TTL_S]:
             logger.error("[%s] sample pending for %.0fs; failing it", rid, PENDING_TTL_S)
             self.cancel(rid, f"sample pending longer than {PENDING_TTL_S:.0f}s")
+            # the sweep's clock, not the wall clock cancel() stamped: with an
+            # injected `now` the failure must age out from this sweep, not from
+            # wherever the process's monotonic clock happens to be
+            self._futures[rid].completed_at = now
         expired: List[str] = []
         for rid, fut in self._futures.items():
             if fut.status == "pending":
