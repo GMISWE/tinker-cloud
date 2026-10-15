@@ -130,6 +130,10 @@ HF_TOKEN_FILE="${HF_TOKEN_FILE:-}"
 # /data/.cache/huggingface, so weights outlive the pod and are shared by
 # every pod on the node. Blank keeps the cache in the pod's emptyDir.
 HF_CACHE_HOSTPATH="${HF_CACHE_HOSTPATH:-}"
+# k8s: size of a PersistentVolumeClaim "<pod>-data" for /data (the cluster's
+# default StorageClass), so checkpoints, metadata and logs outlive the pod.
+# Blank keeps /data an emptyDir. The claim is left in place when the pod goes.
+DATA_PVC_SIZE="${DATA_PVC_SIZE:-}"
 # k8s
 export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/ns.config}"
 NS="${NS:-tinkercloud-nemorl}"
@@ -175,6 +179,24 @@ if [ "$CODE_ONLY" = 0 ]; then
       HF_MOUNT_YAML="- {mountPath: /data/.cache/huggingface, name: hfcache}"
       HF_VOLUME_YAML="- {name: hfcache, hostPath: {path: $HF_CACHE_HOSTPATH, type: Directory}}"
     fi
+    DATA_VOLUME_YAML="emptyDir: {}"
+    if [ -n "$DATA_PVC_SIZE" ]; then
+      DATA_VOLUME_YAML="persistentVolumeClaim: {claimName: $POD-data}"
+      # The pod sets nodeName, so the scheduler never picks a node for the
+      # claim; a WaitForFirstConsumer class (local-path) then never provisions
+      # it. The annotation is what the scheduler would have written.
+      cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: $POD-data
+  namespace: $NS
+  annotations: {volume.kubernetes.io/selected-node: $NODE}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: $DATA_PVC_SIZE}}
+EOF
+    fi
     cat > "$TMP/pod.yaml" <<EOF
 apiVersion: v1
 kind: Pod
@@ -214,7 +236,7 @@ spec:
   - name: shm
     emptyDir: {medium: Memory, sizeLimit: 32Gi}
   - name: data
-    emptyDir: {}
+    $DATA_VOLUME_YAML
   $HF_VOLUME_YAML
 EOF
     kubectl apply -f "$TMP/pod.yaml"
