@@ -10,6 +10,10 @@
 # sha256 verified on both sides, unpacked under /tmp/pytest-<user>/app and
 # aliased as the `tinkercloud` package the tests import. Default args run
 # the suites that need no GPU.
+#
+# GPU suites (tests/gpu/...) take minutes per test and pytest prints the
+# tracebacks only at the end, so a tests/gpu path adds -x unless -x or
+# --maxfail is given; rerun one test with -k <name>.
 set -euo pipefail
 export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/ns.config}"
 NS="${NS:-tinkercloud-nemorl}"
@@ -22,6 +26,9 @@ if [ $# -eq 0 ]; then
          tests/test_miles_padding.py tests/test_futures_storage.py tests/test_result_validation.py tests/test_backend_config.py tests/test_miles_pack_length.py tests/test_miles_dp_reduction.py \
          tests/test_routing.py tests/test_sglang_client_pool.py tests/test_sample_futures.py -q -p no:cacheprovider
 fi
+case " $* " in
+  *" tests/gpu"*) case " $* " in *" -x "*|*" --maxfail"*) ;; *) set -- "$@" -x ;; esac ;;
+esac
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REMOTE="/tmp/pytest-${USER:-u}"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
