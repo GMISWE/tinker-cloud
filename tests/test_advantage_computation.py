@@ -92,7 +92,7 @@ def test_advantage_computation():
     # Step 3: Create sampling client
     print("\n[3/6] Creating sampling client...")
     sampling_client = training_client.save_weights_and_get_sampling_client(name="advantage_test")
-    print(f"✓ Sampling client created")
+    print("✓ Sampling client created")
 
     # Step 4: Sample multiple trajectories for same prompt (group)
     print("\n[4/6] Sampling trajectory group...")
@@ -144,14 +144,14 @@ def test_advantage_computation():
     # Verify advantage properties
     advantage_sum = sum(advantages)
     assert abs(advantage_sum) < 1e-6, f"Advantages should sum to 0, got {advantage_sum}"
-    print(f"  ✓ Advantages sum to 0 (within numerical precision)")
+    print("  ✓ Advantages sum to 0 (within numerical precision)")
 
     # Verify advantages are correctly ordered
     assert advantages[0] > 0, "High reward (0.8) should have positive advantage"
     assert advantages[1] > 0, "High reward (0.9) should have positive advantage"
     assert advantages[2] < 0, "Low reward (0.2) should have negative advantage"
     assert advantages[3] < 0, "Low reward (0.3) should have negative advantage"
-    print(f"  ✓ Advantages correctly reflect relative performance")
+    print("  ✓ Advantages correctly reflect relative performance")
 
     # Step 6: Use advantages in training (importance_sampling loss)
     print("\n[6/6] Training with importance_sampling loss using advantages...")
@@ -196,7 +196,7 @@ def test_advantage_computation():
     metrics = fwd_bwd_result.metrics
     pg_loss = metrics.get("pg_loss:sum", 0.0)
     print(f"  Policy Gradient Loss: {pg_loss:.6f}")
-    print(f"  ✓ Training step completed with group-normalized advantages")
+    print("  ✓ Training step completed with group-normalized advantages")
 
     # Optimizer step
     adam_params = tinker.AdamParams(
@@ -206,8 +206,8 @@ def test_advantage_computation():
         eps=1e-8
     )
     optim_future = training_client.optim_step(adam_params)
-    optim_result = optim_future.result()
-    print(f"  ✓ Optimizer step completed")
+    optim_future.result()
+    print("  ✓ Optimizer step completed")
 
     # Cleanup (skipped - cleanup_test_env.py handles this)
     # training_client.delete_model()
