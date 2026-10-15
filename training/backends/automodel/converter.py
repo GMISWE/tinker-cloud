@@ -16,18 +16,29 @@ shard() cuts one equal chunk per rank, so every rank runs the same number of
 micro-steps and FSDP2's collectives line up.
 """
 from dataclasses import dataclass
+from enum import Enum
 from typing import Dict, List, Sequence, Tuple
 
 import torch
 
 from ...models.requests import Datum
 
+
+class LossFn(str, Enum):
+    """The losses this backend serves. The API's loss_fn string becomes a member
+    once, in convert_request; render a member with .value (str() of a str-mixin
+    Enum changed between Python 3.10 and 3.12)."""
+    CROSS_ENTROPY = "cross_entropy"
+    IMPORTANCE_SAMPLING = "importance_sampling"
+    PPO = "ppo"
+
+
 # loss_fn -> the loss_fn_inputs it reads; every one is required and no other
 # key is accepted, so a key the loss would ignore fails instead of being dropped.
-LOSS_INPUTS: Dict[str, Tuple[str, ...]] = {
-    "cross_entropy": ("target_tokens", "weights"),
-    "importance_sampling": ("target_tokens", "logprobs", "advantages"),
-    "ppo": ("target_tokens", "logprobs", "advantages"),
+LOSS_INPUTS: Dict[LossFn, Tuple[str, ...]] = {
+    LossFn.CROSS_ENTROPY: ("target_tokens", "weights"),
+    LossFn.IMPORTANCE_SAMPLING: ("target_tokens", "logprobs", "advantages"),
+    LossFn.PPO: ("target_tokens", "logprobs", "advantages"),
 }
 
 _FLOAT_INPUTS = ("weights", "logprobs", "advantages")
@@ -36,7 +47,7 @@ _FLOAT_INPUTS = ("weights", "logprobs", "advantages")
 @dataclass(frozen=True)
 class RequestRows:
     """One request's datums as 1-D tensors, validated for `loss_fn`."""
-    loss_fn: str
+    loss_fn: LossFn
     tokens: List[torch.Tensor]                 # long [T_i] per datum
     inputs: Dict[str, List[torch.Tensor]]      # loss input -> [T_i] per datum
 
@@ -44,7 +55,7 @@ class RequestRows:
 @dataclass(frozen=True)
 class Batch:
     """Rows of one pass, every tensor [R, S] (R a multiple of the rank count)."""
-    loss_fn: str
+    loss_fn: LossFn
     input_ids: torch.Tensor                    # long, right-padded with 0
     lengths: torch.Tensor                      # long [R]; 0 for padding rows
     inputs: Dict[str, torch.Tensor]            # LOSS_INPUTS[loss_fn], 0 past each length
@@ -62,12 +73,14 @@ def convert_request(data: Sequence[Datum], loss_fn: str) -> RequestRows:
         ValueError: unknown loss, empty request, image input, a missing or
             unexpected loss input, or an input whose length is not the token count.
     """
-    if loss_fn not in LOSS_INPUTS:
+    try:
+        fn = LossFn(loss_fn)
+    except ValueError:
         raise ValueError(f"loss_fn {loss_fn!r} is not served by the automodel backend; "
-                         f"supported: {', '.join(sorted(LOSS_INPUTS))}")
+                         f"supported: {', '.join(m.value for m in LossFn)}") from None
     if not data:
         raise ValueError("the request carries no datums")
-    wanted = LOSS_INPUTS[loss_fn]
+    wanted = LOSS_INPUTS[fn]
     tokens: List[torch.Tensor] = []
     inputs: Dict[str, List[torch.Tensor]] = {k: [] for k in wanted}
     for i, datum in enumerate(data):
@@ -77,7 +90,7 @@ def convert_request(data: Sequence[Datum], loss_fn: str) -> RequestRows:
             missing = sorted(set(wanted) - given)
             extra = sorted(given - set(wanted))
             raise ValueError(
-                f"datum {i}: {loss_fn} reads exactly {', '.join(wanted)}"
+                f"datum {i}: {fn.value} reads exactly {', '.join(wanted)}"
                 + (f"; missing {', '.join(missing)}" if missing else "")
                 + (f"; not read: {', '.join(extra)}" if extra else "")
             )
@@ -88,7 +101,7 @@ def convert_request(data: Sequence[Datum], loss_fn: str) -> RequestRows:
                 raise ValueError(f"datum {i}: {key} has {values.numel()} entries for {ids.numel()} tokens")
             inputs[key].append(values)
         tokens.append(ids)
-    return RequestRows(loss_fn=loss_fn, tokens=tokens, inputs=inputs)
+    return RequestRows(loss_fn=fn, tokens=tokens, inputs=inputs)
 
 
 def coalesce(requests: Sequence[RequestRows], num_ranks: int) -> Batch:
