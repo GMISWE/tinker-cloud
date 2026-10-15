@@ -18,6 +18,7 @@ _BACKEND_CLASSES = {
     "nemo_rl": (".nemo_rl.backend", "NemoRLBackend"),
     "verl": (".verl.backend", "VerlBackend"),
     "megatron_bridge": (".megatron_bridge.backend", "MegatronBridgeBackend"),
+    "automodel": (".automodel.backend", "AutomodelBackend"),
     "fake": (".fake.backend", "FakeBackend"),  # deterministic CPU backend for protocol tests
 }
 SUPPORTED_BACKENDS = tuple(_BACKEND_CLASSES)

@@ -24,7 +24,8 @@ if torch.cuda.device_count() < 4:
 
 from tinkercloud.training.backends.automodel.converter import coalesce, convert_request, row_sums, shard  # noqa: E402
 from tinkercloud.training.backends.automodel.lora import LoraSpec, lora_spec  # noqa: E402
-from tinkercloud.training.backends.automodel.worker import AutomodelWorker, NonFiniteGradNorm  # noqa: E402
+from tinkercloud.training.backends.automodel.worker import AutomodelWorker  # noqa: E402
+from tinkercloud.training.backends.automodel.errors import NonFiniteGradNorm  # noqa: E402
 from tinkercloud.training.models.requests import AdamParams, Datum, LoraConfig  # noqa: E402
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
