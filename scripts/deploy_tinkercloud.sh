@@ -126,6 +126,10 @@ esac
 IMAGE_PULL_SECRET="${IMAGE_PULL_SECRET:-}"   # non-empty only for private-registry profiles (miles)
 SERVER_LOG="${SERVER_LOG:-/data/server1.log}"
 HF_TOKEN_FILE="${HF_TOKEN_FILE:-}"
+# k8s: a host directory in HF_HOME layout (hub/models--...) mounted at
+# /data/.cache/huggingface, so weights outlive the pod and are shared by
+# every pod on the node. Blank keeps the cache in the pod's emptyDir.
+HF_CACHE_HOSTPATH="${HF_CACHE_HOSTPATH:-}"
 # k8s
 export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/ns.config}"
 NS="${NS:-tinkercloud-nemorl}"
@@ -166,6 +170,11 @@ if [ "$CODE_ONLY" = 0 ]; then
     # private-registry profiles (miles GAR image) need a pull secret; blank otherwise
     PULL_SECRET_YAML=""
     [ -n "$IMAGE_PULL_SECRET" ] && PULL_SECRET_YAML="imagePullSecrets: [{name: $IMAGE_PULL_SECRET}]"
+    HF_MOUNT_YAML="" HF_VOLUME_YAML=""
+    if [ -n "$HF_CACHE_HOSTPATH" ]; then
+      HF_MOUNT_YAML="- {mountPath: /data/.cache/huggingface, name: hfcache}"
+      HF_VOLUME_YAML="- {name: hfcache, hostPath: {path: $HF_CACHE_HOSTPATH, type: Directory}}"
+    fi
     cat > "$TMP/pod.yaml" <<EOF
 apiVersion: v1
 kind: Pod
@@ -200,11 +209,13 @@ spec:
     volumeMounts:
     - {mountPath: /dev/shm, name: shm}
     - {mountPath: /data, name: data}
+    $HF_MOUNT_YAML
   volumes:
   - name: shm
     emptyDir: {medium: Memory, sizeLimit: 32Gi}
   - name: data
     emptyDir: {}
+  $HF_VOLUME_YAML
 EOF
     kubectl apply -f "$TMP/pod.yaml"
     echo "==> waiting for Ready on $IMAGE (image pull can take ~5-10 min on a cold node)"
