@@ -26,8 +26,9 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import torch
+from typing_extensions import assert_never
 
-from .converter import Batch
+from .converter import Batch, LossFn
 
 # Rows of [S, V] logits upcast to fp32 at a time in token_logprobs.
 DEFAULT_CHUNK_TOKENS = 1024
@@ -90,9 +91,9 @@ def compute_loss(logits: torch.Tensor, shard: Batch,
                  chunk_tokens: int = DEFAULT_CHUNK_TOKENS) -> LossOutput:
     """The shard's loss for shard.loss_fn. `clip` = (low, high) ratio bounds,
     required for ppo and refused for the others."""
-    if (shard.loss_fn == "ppo") != (clip is not None):
-        raise ValueError(f"clip bounds are {'required' if shard.loss_fn == 'ppo' else 'not taken'} "
-                         f"by {shard.loss_fn}")
+    is_ppo = shard.loss_fn is LossFn.PPO
+    if is_ppo != (clip is not None):
+        raise ValueError(f"clip bounds are {'required' if is_ppo else 'not taken'} by {shard.loss_fn.value}")
     width = shard.input_ids.shape[1]
     device = logits.device
     valid = torch.arange(width, device=device)[None, :] < shard.lengths.to(device)[:, None]
@@ -100,24 +101,24 @@ def compute_loss(logits: torch.Tensor, shard: Batch,
     lp = token_logprobs(logits, inputs["target_tokens"], chunk_tokens)
     zero = torch.zeros((), dtype=torch.float32, device=device)
 
-    if shard.loss_fn == "cross_entropy":
+    if shard.loss_fn is LossFn.CROSS_ENTROPY:
         active = valid
         terms = -inputs["weights"] * lp
         clamped = torch.zeros(lp.shape[0], dtype=torch.float32, device=device)
-    elif shard.loss_fn in ("importance_sampling", "ppo"):
+    elif shard.loss_fn in (LossFn.IMPORTANCE_SAMPLING, LossFn.PPO):
         adv = inputs["advantages"]
         active = valid & (adv != 0)
         log_ratio = torch.where(active, lp - inputs["logprobs"], zero)
         clamped = (log_ratio.abs() > RATIO_LOG_CLAMP).sum(dim=1).float()
         ratio = torch.exp(log_ratio.clamp(-RATIO_LOG_CLAMP, RATIO_LOG_CLAMP))
-        if shard.loss_fn == "ppo":
+        if is_ppo:
             assert clip is not None  # checked on entry
             low, high = clip
             terms = -torch.minimum(ratio * adv, ratio.clamp(low, high) * adv)
         else:
             terms = -(ratio * adv)
     else:
-        raise ValueError(f"loss_fn {shard.loss_fn!r} has no automodel implementation")
+        assert_never(shard.loss_fn)  # a new LossFn member needs a branch here; pyright enforces it
 
     terms = torch.where(active, terms, zero)
     row = terms.sum(dim=1)
