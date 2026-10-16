@@ -10,10 +10,15 @@
 #            installs (the bionemo image's deps are tightly pinned — don't perturb).
 #   megatron_bridge  build the bionemo-recipes evo2_megatron recipe env
 #            (megatron-bridge) so the megatron_bridge backend can import it.
-#   automodel  deploy code + scripts/automodel only; check both vendor envs.
-#            NO installs: /opt/venv and /opt/vllm-env stay as the image ships them.
+#   automodel  check both vendor envs; editable-install server+SDK+cookbook and
+#            the pure-Python deps into the training env /opt/venv. /opt/vllm-env
+#            (the vLLM env) stays as the image ships it.
 set -euo pipefail
 PROFILE="${PROFILE:-nemo_rl}"
+# The automodel image puts /opt/venv/bin/python3 on PATH but its `pip` is the
+# system interpreter's, so installs go through the interpreter.
+PIP=pip
+[ "$PROFILE" = automodel ] && PIP="python3 -m pip"
 
 cd /tmp && tar xzf code.tar.gz
 mkdir -p /app /work /data/metadata /data/trajectories /data/.cache/huggingface
@@ -29,8 +34,6 @@ mv /tmp/tinker-cloud/tests /app/tests
 if [ "$PROFILE" = automodel ]; then
   /opt/venv/bin/python -c 'import nemo_automodel, torch, ray; print("training env OK: torch", torch.__version__, "ray", ray.__version__)'
   /opt/vllm-env/bin/vllm-api-server --check
-  echo SETUP_DONE
-  exit 0
 fi
 
 if [ "$PROFILE" = bionemo ]; then
@@ -98,21 +101,23 @@ fi
 # server editable install: Ray workers import training.* by module path
 # (e.g. nemo_rl losses), and PYTHONPATH=/app does not reach them (BUG-015)
 [ -f /tmp/tinker-cloud/pyproject.toml ] && cp /tmp/tinker-cloud/pyproject.toml /app/pyproject.toml
-[ -f /app/pyproject.toml ] && pip install -e /app --no-deps -q
+[ -f /app/pyproject.toml ] && $PIP install -e /app --no-deps -q
 
 # SDK + cookbook editable installs
 mv /tmp/tinker_gmi /work/tinker_gmi
 mv /tmp/tinker-cookbook /work/tinker-cookbook
-pip install -e /work/tinker_gmi --no-deps -q
+$PIP install -e /work/tinker_gmi --no-deps -q
 # dev-mode bundles may lack .git -> setuptools-scm needs a pretend version
 SETUPTOOLS_SCM_PRETEND_VERSION=${SETUPTOOLS_SCM_PRETEND_VERSION:-0.1.0} \
-  pip install -e /work/tinker-cookbook --no-deps -q
+  $PIP install -e /work/tinker-cookbook --no-deps -q
 
 # deps missing from the base image that --no-deps skips
 # (distro/pyqwest/orjson/zstandard/protobuf/click: SDK >= 0.25 — proto wire,
-#  zstd request bodies, pyqwest transport; chz/termcolor/blobfile/tiktoken:
-#  cookbook; sympy/pylatexenc/math-verify: math_rl recipe extras)
-pip install -q distro pyqwest orjson 'zstandard>=0.24' 'protobuf>=4.21' click \
+#  zstd request bodies, pyqwest transport; orjson also the server's response
+#  encoder; chz/termcolor/blobfile/tiktoken: cookbook; sympy/pylatexenc/
+#  math-verify: math_rl recipe extras). All pure Python or self-contained
+#  wheels: none pulls torch, transformers or numpy along.
+$PIP install -q distro pyqwest orjson 'zstandard>=0.24' 'protobuf>=4.21' click \
   chz termcolor blobfile tiktoken cloudpickle rich anyio \
   'httpx[http2]' sympy pylatexenc math-verify
 
@@ -120,7 +125,7 @@ pip install -q distro pyqwest orjson 'zstandard>=0.24' 'protobuf>=4.21' click \
 # through nccl4py inside the vLLM and policy worker venvs; the base image
 # predates that dependency (RL fork pyproject pins it). With TP > 1 vLLM's
 # Ray executor spawns the TP ranks from the sync worker's venv.
-if [ "$PROFILE" != miles ]; then
+if [ "$PROFILE" = nemo_rl ]; then
   UV=$(command -v uv || echo /root/.local/bin/uv)
   for w in nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker \
            nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker \
@@ -130,7 +135,7 @@ if [ "$PROFILE" != miles ]; then
   done
 fi
 
-RUNTIME=$([ "$PROFILE" = miles ] && echo miles || echo nemo_rl)
+case "$PROFILE" in miles) RUNTIME=miles ;; automodel) RUNTIME=nemo_automodel ;; *) RUNTIME=nemo_rl ;; esac
 python3 -c "import tinker, tinker_cookbook, $RUNTIME; print('imports OK')"
 PYTHONPATH=/app python3 -c 'import training; print("training OK")'
 echo SETUP_DONE

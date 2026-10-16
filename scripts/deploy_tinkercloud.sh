@@ -24,9 +24,13 @@
 #            gcp-secret) must exist in namespace $NS.
 #   automodel  Automodel backend env (specs/027). Image built from
 #            docker/automodel: nemo-automodel training env in /opt/venv plus the
-#            NGC vLLM env in /opt/vllm-env (start it via vllm-api-server).
-#            Private registry image (pull secret gar-secret). Env only until the
-#            automodel backend lands; scripts/automodel/smoke_vllm_lora.sh checks it.
+#            NGC vLLM env in /opt/vllm-env (the backend starts it per base model).
+#            Private registry image (pull secret gar-secret). Installs the server,
+#            SDK and cookbook into /opt/venv, starts Ray head + `python3 -m training`
+#            (TINKERCLOUD_BACKEND=automodel), health-checks :8000. GPUS=4.
+#            The backend's required knobs default here and are overridable:
+#            AUTOMODEL_TRAIN_GPUS=2 AUTOMODEL_MAX_LORAS=4 AUTOMODEL_MAX_LORA_RANK=64
+#            AUTOMODEL_MAX_CPU_LORAS=8 AUTOMODEL_MICRO_BATCH_ROWS=4.
 #   Per-profile defaults (IMAGE, GPUS, NODE, BACKEND) are overridable by env vars.
 #   See specs/004-bionemo-classification/P5-TINKER-BACKEND.md.
 #
@@ -68,6 +72,7 @@ done
 
 # --- profile: case by base image (the two images' stacks are incompatible) --
 # Sets per-profile DEFAULTS; every one is overridable by the same-named env var.
+BACKEND_ENV=""   # backend knobs exported to the server process (step 6)
 case "$PROFILE" in
   nemo_rl)
     IMAGE="${IMAGE:-nvcr.io/nvidia/nemo-rl:v0.5.0}"
@@ -109,8 +114,9 @@ case "$PROFILE" in
     IMAGE_PULL_SECRET="${IMAGE_PULL_SECRET:-gcp-secret}"
     RUN_SERVER=1 ;;   # Ray head + `python3 -m training` (TINKERCLOUD_BACKEND=miles)
   automodel)
-    # Built from docker/automodel. Training and vLLM run from two separate
-    # vendor envs; the deploy must not install into either of them.
+    # Built from docker/automodel. Training runs from /opt/venv, vLLM from
+    # /opt/vllm-env; the deploy installs pure-Python packages into the first
+    # only (setup_container.sh) and never touches the second.
     IMAGE="${IMAGE:-us-west1-docker.pkg.dev/devv-404803/gmi-test-repo/tinkercloud-automodel:26.08.00-vllm26.09-plugin}"
     IMAGE_PULL_SECRET="${IMAGE_PULL_SECRET:-gar-secret}"
     BACKEND="${BACKEND:-automodel}"
@@ -118,7 +124,15 @@ case "$PROFILE" in
     NODE="${NODE:-master-03}"
     POD="${POD:-tinkercloud-automodel-m03}"
     CONTAINER="${CONTAINER:-tinkercloud-automodel}"
-    RUN_SERVER=0 ;;   # env only until the automodel backend lands
+    # AutomodelConfig has no defaults (a server without them fails at startup);
+    # these are the deploy's. TRAIN_GPUS ranks per training group, the rest of
+    # GPUS serve one vLLM per base model. MAX_LORAS: adapters resident on a
+    # vLLM's GPU; a tenant holds two across an optimizer step (D20), so 4 is
+    # two tenants. MAX_LORA_RANK: the largest LoRA rank create_model accepts.
+    BACKEND_ENV="AUTOMODEL_TRAIN_GPUS=${AUTOMODEL_TRAIN_GPUS:-2} AUTOMODEL_MAX_LORAS=${AUTOMODEL_MAX_LORAS:-4} \
+AUTOMODEL_MAX_LORA_RANK=${AUTOMODEL_MAX_LORA_RANK:-64} AUTOMODEL_MAX_CPU_LORAS=${AUTOMODEL_MAX_CPU_LORAS:-8} \
+AUTOMODEL_MICRO_BATCH_ROWS=${AUTOMODEL_MICRO_BATCH_ROWS:-4}"
+    RUN_SERVER=1 ;;   # Ray head + `python3 -m training` (TINKERCLOUD_BACKEND=automodel)
   *) echo "unknown --profile $PROFILE (want: nemo_rl | bionemo | megatron_bridge | miles | automodel)"; exit 1 ;;
 esac
 
@@ -334,13 +348,6 @@ fi
 echo "==> [4/6] running in-container setup (profile=$PROFILE)"
 EX "PROFILE=$PROFILE MILES_REPO='${MILES_REPO:-}' MILES_REF='${MILES_REF:-}' bash /tmp/setup_container.sh"
 
-if [ "$PROFILE" = automodel ]; then
-  echo "==> DONE: automodel env ready (target=$TARGET, image=$IMAGE)"
-  echo "    training env /opt/venv; vLLM via /opt/vllm-env/bin/vllm-api-server"
-  echo "    smoke (inside the target): bash /app/scripts/automodel/smoke_vllm_lora.sh"
-  exit 0
-fi
-
 if [ "$RUN_SERVER" = 0 ]; then
   # bionemo profile: env only — no Ray, no server (no working evo2 server yet).
   echo "==> DONE: faithful Evo2 env ready (profile=$PROFILE, target=$TARGET, image=$IMAGE)"
@@ -367,7 +374,7 @@ echo "==> [6/6] starting API server (log: $SERVER_LOG)"
 EX_TIMEOUT "
 export PYTHONPATH=/app NUM_GPUS=$GPUS RAY_ADDRESS=ray://localhost:10001
 export HF_TOKEN=\$(cat /tmp/hf_token.txt) HF_HOME=/data/.cache/huggingface \
-       TINKER_API_KEY=tml-dev-key TINKERCLOUD_BACKEND=$BACKEND ALLOW_PARTIAL_BATCHES=true
+       TINKER_API_KEY=tml-dev-key TINKERCLOUD_BACKEND=$BACKEND ALLOW_PARTIAL_BATCHES=true $BACKEND_ENV
 cd /app && setsid nohup python3 -m training > $SERVER_LOG 2>&1 < /dev/null &
 sleep 2; echo LAUNCHED"
 
