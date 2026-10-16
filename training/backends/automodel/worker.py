@@ -20,6 +20,7 @@ node, then every rank's setup() joins it and builds the model.
 import hashlib
 import math
 import socket
+from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import ray
@@ -34,6 +35,7 @@ from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor, distribute_tensor
 
 from ...models.requests import AdamParams
+from .adapter import write_peft_adapter
 from .converter import Batch
 from .errors import NonFiniteGradNorm
 from .losses import compute_loss
@@ -125,6 +127,13 @@ class AutomodelWorker:
         shards: call it on all ranks at once."""
         return {n: (p.full_tensor() if isinstance(p, DTensor) else p).detach().float().cpu()
                 for n, p in self.lora_params}
+
+    def export_adapter(self, dest: str) -> None:
+        """Write the HF PEFT adapter at `dest` (adapter.py). The gather is
+        collective: call it on all ranks at once; rank 0 writes."""
+        state = self.lora_state()
+        if self.rank == 0:
+            write_peft_adapter(state, self.lora, self.base_model, Path(dest))
 
     def _run(self, shard: Batch, clip: Optional[Tuple[float, float]], backward: bool) -> Dict[str, torch.Tensor]:
         rows, width = shard.input_ids.shape

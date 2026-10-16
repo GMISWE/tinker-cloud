@@ -2,7 +2,7 @@
 One training group's Ray side (R1): a placement group of {GPU:1, CPU:1}
 bundles, one AutomodelWorker per bundle, and the calls that reach every rank
 at once. The backend sees the ranks only through this class, so a CPU test
-can stand in a fake with the same four coroutines.
+can stand in a fake with the same five coroutines.
 
 Names: the placement group is `am-<key>`, rank r's actor `am-<key>-r<r>`.
 Neither is detached (they die with the server's Ray job); the names exist so
@@ -16,6 +16,7 @@ so the backend catches NonFiniteGradNorm by name and reports its message.
 """
 import asyncio
 import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import ray
@@ -86,6 +87,10 @@ class TrainingGroup:
 
     async def optim_step(self, adam: AdamParams) -> List[Dict[str, float]]:
         return await self._all([w.optim_step.remote(adam) for w in self.ranks])
+
+    async def export_adapter(self, dest: Path) -> None:
+        """Rank 0 writes the HF PEFT adapter at `dest`; every rank joins the gather."""
+        await self._all([w.export_adapter.remote(str(dest)) for w in self.ranks])
 
     async def stop(self) -> None:
         """Kill the ranks and free the bundles. Safe to call twice."""

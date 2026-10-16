@@ -12,7 +12,7 @@ backend_type names the caller in errors.
 """
 import asyncio
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ....core import routing
 from ...base import BackendError
@@ -51,7 +51,9 @@ async def sample_over_http(
     prompt_logprobs: bool,
     topk_sample_logprobs: int = 0,
     topk_prompt_logprobs: int = 0,
+    model: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """`model`: the name the server knows the weights by, when it holds several (R14)."""
     url = next_leader_url(handle)
     client = VllmGenerateClient(url, pool.for_url(url), handle.backend_type)
     out = await client.generate(
@@ -62,6 +64,7 @@ async def sample_over_http(
         cache_salt=cache_salt_for(handle),
         topk_sample_logprobs=topk_sample_logprobs,
         topk_prompt_logprobs=topk_prompt_logprobs,
+        model=model,
     )
     tokenizer = handle.tokenizer
     sequences = []
