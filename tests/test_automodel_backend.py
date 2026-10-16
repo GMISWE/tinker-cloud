@@ -168,7 +168,7 @@ def test_pass_results_are_split_per_request():
         )
         assert a["loss"] == 8.0 and b["loss"] == 2.0
         assert a["loss_fn_output_type"] == LossFn.CROSS_ENTROPY.value
-        assert a["metrics"] == {"loss:sum": 8.0, "clamped_positions": 0}
+        assert a["metrics"] == {"loss:sum": 8.0, "clamped_positions:sum": 0}
         assert [o["logprobs"]["shape"] for o in a["loss_fn_outputs"]] == [[3], [5]]
         assert a["loss_fn_outputs"][1]["logprobs"]["data"] == [-1.0] * 5
         assert a["loss_fn_outputs"][0]["elementwise_loss"]["data"] == [1.0] * 3

@@ -478,7 +478,7 @@ def _per_request(batch: Batch, outs: List[Dict[str, torch.Tensor]]) -> List[Dict
         results.append({
             "loss_fn_output_type": batch.loss_fn.value,
             "loss": losses[i],
-            "metrics": {"loss:sum": losses[i], "clamped_positions": int(clamped[i])},
+            "metrics": {"loss:sum": losses[i], "clamped_positions:sum": int(clamped[i])},
             "loss_fn_outputs": outputs,
             "deferred": False,
         })
