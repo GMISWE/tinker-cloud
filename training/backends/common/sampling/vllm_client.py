@@ -53,6 +53,7 @@ class VllmGenerateClient:
         cache_salt: str,
         topk_sample_logprobs: int = 0,
         topk_prompt_logprobs: int = 0,
+        model: Optional[str] = None,
     ) -> Dict[str, Any]:
         """The validated API SamplingParams (temperature / top_p / max_tokens
         always present) as one vLLM SamplingParams. vLLM detokenizes only when
@@ -64,7 +65,10 @@ class VllmGenerateClient:
         BUG-013) and so carry no stop strings; nothing of theirs is generated.
         vLLM's `logprobs` / `prompt_logprobs` say how many it computes per
         position (0 = the sampled token only; prompt scoring needs >= 1); the
-        route emits top-k entries only for the topk_* counts beside them."""
+        route emits top-k entries only for the topk_* counts beside them.
+        `model` names the weights on a server that holds several (the base
+        model's name or a loaded adapter's, R14); None sends no name, as the
+        single-model fork route expects."""
         temperature = float(sampling_params["temperature"])
         score_prompt = prompt_logprobs or topk_prompt_logprobs > 0
         sp: Dict[str, Any] = {
@@ -90,10 +94,13 @@ class VllmGenerateClient:
             sp["stop_token_ids"] = [int(t) for t in sampling_params["stop_token_ids"]]
         if score_prompt:
             sp["prompt_logprobs"] = max(1, topk_prompt_logprobs)
-        return {
+        body: Dict[str, Any] = {
             "token_ids": list(token_ids), "sampling_params": sp, "cache_salt": cache_salt,
             "topk_sample_logprobs": topk_sample_logprobs, "topk_prompt_logprobs": topk_prompt_logprobs,
         }
+        if model is not None:
+            body["model"] = model
+        return body
 
     def parse_response(
         self, body: Dict[str, Any], token_ids: List[int], num_samples: int, prompt_logprobs: bool,
@@ -171,10 +178,12 @@ class VllmGenerateClient:
         cache_salt: str,
         topk_sample_logprobs: int = 0,
         topk_prompt_logprobs: int = 0,
+        model: Optional[str] = None,
     ) -> Dict[str, Any]:
         body = self.build_request(
             token_ids, sampling_params, num_samples, prompt_logprobs, cache_salt,
             topk_sample_logprobs=topk_sample_logprobs, topk_prompt_logprobs=topk_prompt_logprobs,
+            model=model,
         )
         try:
             response = await self._http.post(self.generate_url, json=body)
@@ -229,3 +238,39 @@ class VllmControlClient:
 
     async def reset_prefix_cache(self) -> None:
         await self._post("reset_prefix_cache")
+
+
+class VllmLoraClient:
+    """vLLM's runtime LoRA routes on one server URL (VLLM_ALLOW_RUNTIME_LORA_UPDATING):
+    load a PEFT adapter directory under a name, unload a name. The directory
+    must be on the server's filesystem. A load reads the weights into the
+    engine, so it gets its own timeout instead of the pool's."""
+
+    LOAD_TIMEOUT_S = 300.0
+
+    def __init__(self, base_url: str, http: httpx.AsyncClient, backend: str):
+        self.base_url = base_url.rstrip("/")
+        self._http = http
+        self.backend = backend
+
+    async def _post(self, route: str, body: Dict[str, Any], operation: str, timeout: Optional[float]) -> None:
+        url = f"{self.base_url}/v1/{route}"
+        try:
+            response = await self._http.post(url, json=body, timeout=timeout)
+        except httpx.TransportError as e:
+            raise BackendError(
+                f"vLLM server {self.base_url} unreachable during {route}: {e}",
+                backend=self.backend, operation=operation, original_error=e,
+            ) from e
+        if response.status_code != 200:
+            raise BackendError(
+                f"vLLM server {self.base_url} returned {response.status_code} on {route}: {response.text[:300]}",
+                backend=self.backend, operation=operation,
+            )
+
+    async def load_adapter(self, name: str, path: str) -> None:
+        await self._post("load_lora_adapter", {"lora_name": name, "lora_path": path}, "load_adapter",
+                         self.LOAD_TIMEOUT_S)
+
+    async def unload_adapter(self, name: str) -> None:
+        await self._post("unload_lora_adapter", {"lora_name": name}, "unload_adapter", None)

@@ -310,3 +310,13 @@ def test_topk_reaches_the_result_dict_over_http(leaders):
     assert res["prompt_logprobs"] == [None, -1.0, -2.0]
     plain = run(HttpClientPool(transport=httpx.MockTransport(handler)), handle())
     assert "topk_sample_logprobs" not in plain["sequences"][0] and "topk_prompt_logprobs" not in plain
+
+
+def test_model_field_is_sent_only_when_named(leaders):
+    seen = []
+    run(HttpClientPool(transport=vllm_transport(seen)), handle())
+    assert "model" not in seen[0][2], "the single-model fork route gets no name"
+    body = VllmGenerateClient.build_request([1], {"temperature": 1.0, "top_p": 1.0, "max_tokens": 2}, 1, False, "m@1",
+                                            model="m@v1")
+    assert body["model"] == "m@v1"
+
