@@ -62,5 +62,17 @@ def test_malformed_results_fail_naming_the_field(op, result, loc):
         validate_result(op, result)
 
 
+@pytest.mark.parametrize("key", ["clamped_positions", "loss:", "loss:total", ":sum"])
+def test_forward_metric_keys_need_a_known_reduction(key):
+    """The SDK splits every forward/forward_backward metric key on ':' and reduces
+    by the suffix; a bare name fails there with an unpacking error, so it fails
+    here first, naming the key."""
+    for op in ("forward_backward", "forward"):
+        with pytest.raises(ResultShapeError, match=rf"metric keys \['{key}'\] lack a `:reduction` suffix"):
+            validate_result(op, {**FB, "metrics": {"loss:sum": 1.0, key: 0.0}})
+    # optim_step metrics are not reduced by the SDK: bare names stay legal there
+    assert validate_result("optim_step", {"metrics": {"grad_norm": 1.0}})["metrics"] == {"grad_norm": 1.0}
+
+
 def test_unregistered_operation_passes_through():
     assert validate_result("telemetry", {"anything": 1}) == {"anything": 1}

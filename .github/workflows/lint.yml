@@ -18,3 +18,20 @@ jobs:
       # Type check of the backend seam (pyproject [tool.pyright]); engine
       # packages are not installed here, so only our own types are checked.
       - run: pyright
+
+  tests:
+    # The CPU unit suites (tests/unit_suites.txt). `import training` pulls the
+    # FastAPI app and Ray; the checkpoint interchange tests need CPU torch.
+    # tests/protocol needs the tinker SDK, which is not installable here.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install pytest fastapi pydantic httpx safetensors numpy orjson ray torch
+                 --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      # the tests import the tree as the `tinkercloud` package (as pod_pytest.sh aliases it)
+      - run: mkdir -p /tmp/ns && ln -s "$PWD" /tmp/ns/tinkercloud
+      - run: PYTHONPATH=/tmp/ns python -m pytest $(grep -v '^#' tests/unit_suites.txt) -q -p no:cacheprovider
