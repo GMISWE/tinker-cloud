@@ -7,7 +7,7 @@
 # Profiles (cased by BASE IMAGE — the images ship incompatible stacks)
 #   nemo_rl  (default) NeMo RL server backend. Image nvcr.io/nvidia/nemo-rl:*.
 #            Overlays RL/nemo_rl, starts a Ray head + `python3 -m training`
-#            (TINKERCLOUD_BACKEND=nemo_rl), health-checks :8000. GPUS=4, master-02.
+#            (TINKERCLOUD_BACKEND=nemo_rl), health-checks :8000. GPUS=4.
 #   bionemo  cu12 NeMo2 exploration env (feature 004 P5). Image
 #            nvcr.io/nvidia/clara/bionemo-framework:* — hyena Megatron-LM + TE +
 #            bionemo.evo2 + NeMo2. Env only (code + scripts/evo2 helpers, no server).
@@ -15,11 +15,11 @@
 #            Image nvcr.io/nvidia/pytorch:26.04-py3. Builds the bionemo-recipes
 #            evo2_megatron recipe (megatron-bridge v0.4.1) so the megatron_bridge
 #            backend can import megatron.bridge + evo2_classifier. Env only until
-#            that backend lands (stubs today). GPUS=2, master-03.
+#            that backend lands (stubs today). GPUS=2.
 #   miles    Miles/Slime backend. Image is the private GMI GAR build of
 #            github.com/GavinZhu-GMI/miles (miles + Megatron/SGLang/TE pre-installed);
 #            overlays only the server code, starts Ray head + `python3 -m training`
-#            (TINKERCLOUD_BACKEND=miles), health-checks :8000. GPUS=4, master-02.
+#            (TINKERCLOUD_BACKEND=miles), health-checks :8000. GPUS=4.
 #            Needs a pull secret for the private image: IMAGE_PULL_SECRET (default
 #            gcp-secret) must exist in namespace $NS.
 #   automodel  Automodel backend env (specs/027). Image built from
@@ -31,7 +31,8 @@
 #            The backend's required knobs default here and are overridable:
 #            AUTOMODEL_TRAIN_GPUS=2 AUTOMODEL_MAX_LORAS=4 AUTOMODEL_MAX_LORA_RANK=64
 #            AUTOMODEL_MAX_CPU_LORAS=8 AUTOMODEL_MICRO_BATCH_ROWS=4.
-#   Per-profile defaults (IMAGE, GPUS, NODE, BACKEND) are overridable by env vars.
+#   Per-profile defaults (IMAGE, GPUS, NODE, BACKEND) are overridable by env vars;
+#   KUBECONFIG, NS and the node come from scripts/lib/cluster.sh.
 #   See specs/004-bionemo-classification/P5-TINKER-BACKEND.md.
 #
 # Sources
@@ -72,21 +73,22 @@ done
 
 # --- profile: case by base image (the two images' stacks are incompatible) --
 # Sets per-profile DEFAULTS; every one is overridable by the same-named env var.
+. "$SCRIPT_DIR/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE
 BACKEND_ENV=""   # backend knobs exported to the server process (step 6)
 case "$PROFILE" in
   nemo_rl)
     IMAGE="${IMAGE:-nvcr.io/nvidia/nemo-rl:v0.5.0}"
     BACKEND="${BACKEND:-nemo_rl}"
     GPUS="${GPUS:-4}"
-    NODE="${NODE:-master-02}"
-    POD="${POD:-tinkercloud-nemorl-m02}"
+    NODE="${NODE:-$DEFAULT_NODE}"
+    POD="${POD:-tinkercloud-nemorl}"
     CONTAINER="${CONTAINER:-tinkercloud-nemorl}"
     RUN_SERVER=1 ;;   # Ray head + `python3 -m training` + health check
   bionemo)
     IMAGE="${IMAGE:-nvcr.io/nvidia/clara/bionemo-framework:2.7.1}"
     BACKEND="${BACKEND:-automodel}"
     GPUS="${GPUS:-2}"
-    NODE="${NODE:-master-03}"
+    NODE="${NODE:-$DEFAULT_NODE}"
     POD="${POD:-bionemo-evo2-p5}"
     CONTAINER="${CONTAINER:-bionemo-evo2-p5}"
     RUN_SERVER=0 ;;   # env only (cu12 NeMo2 exploration env): code + evo2 helpers
@@ -96,7 +98,7 @@ case "$PROFILE" in
     IMAGE="${IMAGE:-nvcr.io/nvidia/pytorch:26.04-py3}"
     BACKEND="${BACKEND:-megatron_bridge}"
     GPUS="${GPUS:-2}"
-    NODE="${NODE:-master-03}"
+    NODE="${NODE:-$DEFAULT_NODE}"
     POD="${POD:-evo2-recipe}"
     CONTAINER="${CONTAINER:-evo2-recipe}"
     RUN_SERVER=0 ;;   # env only until the megatron_bridge backend lands (stubs today)
@@ -108,7 +110,7 @@ case "$PROFILE" in
     IMAGE="${IMAGE:-us-west1-docker.pkg.dev/devv-404803/gmi-test-repo/miles_tinker_seam:20260730a}"
     BACKEND="${BACKEND:-miles}"
     GPUS="${GPUS:-4}"
-    NODE="${NODE:-master-02}"
+    NODE="${NODE:-$DEFAULT_NODE}"
     POD="${POD:-tinkercloud-miles}"
     CONTAINER="${CONTAINER:-tinkercloud-miles}"
     IMAGE_PULL_SECRET="${IMAGE_PULL_SECRET:-gcp-secret}"
@@ -121,8 +123,8 @@ case "$PROFILE" in
     IMAGE_PULL_SECRET="${IMAGE_PULL_SECRET:-gar-secret}"
     BACKEND="${BACKEND:-automodel}"
     GPUS="${GPUS:-4}"
-    NODE="${NODE:-master-03}"
-    POD="${POD:-tinkercloud-automodel-m03}"
+    NODE="${NODE:-$DEFAULT_NODE}"
+    POD="${POD:-tinkercloud-automodel}"
     CONTAINER="${CONTAINER:-tinkercloud-automodel}"
     # AutomodelConfig has no defaults (a server without them fails at startup);
     # these are the deploy's. TRAIN_GPUS ranks per training group, the rest of
@@ -149,8 +151,6 @@ HF_CACHE_HOSTPATH="${HF_CACHE_HOSTPATH:-}"
 # Blank keeps /data an emptyDir. The claim is left in place when the pod goes.
 DATA_PVC_SIZE="${DATA_PVC_SIZE:-}"
 # k8s
-export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/ns.config}"
-NS="${NS:-tinkercloud-nemorl}"
 # docker
 DATA_DIR="${DATA_DIR:-/opt/dlami/nvme/$USER}"
 DOCKER="${DOCKER:-docker}"

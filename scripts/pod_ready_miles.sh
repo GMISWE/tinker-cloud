@@ -17,8 +17,7 @@ set -euo pipefail
 
 MODEL="${1:-Qwen2.5-0.5B}"
 HF_ID="${HF_ID:-Qwen/$MODEL}"
-export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/ns.config}"
-NS="${NS:-tinkercloud-nemorl}"
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE
 POD="${POD:-tinkercloud-miles}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # deploy_tinkercloud.sh --source dev bundles the sibling checkouts of

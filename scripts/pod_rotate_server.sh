@@ -17,8 +17,7 @@ LOG_NAME="${1:?usage: pod_rotate_server.sh <server-log-basename> [KEY=VAL ...]}"
 shift
 EXTRA_ENV=("$@")
 
-export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/ns.config}"
-NS="${NS:-tinkercloud-nemorl}"
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE
 POD="${POD:-tinkercloud-miles}"
 GPUS="${GPUS:-4}"
 BACKEND="${BACKEND:-miles}"
