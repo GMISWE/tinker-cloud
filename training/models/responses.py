@@ -6,7 +6,7 @@ providing structured responses and documentation.
 """
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 
 class AsyncOperationResponse(BaseModel):
@@ -115,12 +115,27 @@ class _Result(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
+# The SDK reduces forward/forward_backward metrics across chunks by the suffix
+# of each key (`loss:sum`, `mfu:mean`) and raises on a bare name, so a bare key
+# is refused here, where the backend's result enters the server.
+METRIC_REDUCTIONS = frozenset({"mean", "sum", "min", "max", "slack", "hash2"})
+
+
 class ForwardBackwardResult(_Result):
     """Result from forward-backward pass (SDK ForwardBackwardOutput)."""
 
     loss_fn_output_type: str = Field(..., description="Loss function type")
     loss_fn_outputs: List[LossFnOutput] = Field(..., description="Per-sample outputs")
-    metrics: Dict[str, float] = Field(default_factory=dict, description="Training metrics")
+    metrics: Dict[str, float] = Field(default_factory=dict, description="Training metrics, keys `name:reduction`")
+
+    @field_validator("metrics")
+    @classmethod
+    def _keys_carry_a_reduction(cls, metrics: Dict[str, float]) -> Dict[str, float]:
+        bad = [k for k in metrics if not k.rpartition(":")[0] or k.rpartition(":")[2] not in METRIC_REDUCTIONS]
+        if bad:
+            raise ValueError(
+                f"metric keys {bad} lack a `:reduction` suffix (one of {sorted(METRIC_REDUCTIONS)})")
+        return metrics
 
 
 class ForwardResult(ForwardBackwardResult):
