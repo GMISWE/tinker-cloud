@@ -20,30 +20,14 @@ dropped AdamParams and the ignored checkpoint_path).
 
 import pytest
 
+from tinkercloud.training.backends.miles import builder
+
+from .model_shapes import QWEN25_05B
+
 # The measured switch point for linear_fc2 on H200 / TE 2.17 / Qwen2.5-0.5B.
 # Not a constant of nature — re-measure with probes/bi_fc2_bisect.py when the
 # model shape, GPU or cuBLAS changes.
 FC2_BATCH_INVARIANCE_THRESHOLD = 352
-
-
-def _load_builder_module():
-    from tinkercloud.training.backends.miles import builder
-    return builder
-
-
-# Qwen2.5-0.5B, the shape every number in the investigation was measured on.
-MODEL_CONFIG = {
-    "num_layers": 24,
-    "hidden_size": 896,
-    "ffn_hidden_size": 4864,
-    "num_attention_heads": 14,
-    "num_query_groups": 2,
-    "kv_channels": 64,
-    "vocab_size": 151936,
-    "norm_epsilon": 1e-6,
-    "rotary_base": 1000000,
-    "tie_word_embeddings": True,
-}
 
 
 def _build(builder_mod):
@@ -52,7 +36,7 @@ def _build(builder_mod):
         default_save_dir="/tmp/ckpt"
     )._build_minimal_args(
         hf_model_path="/tmp/model",
-        model_config=MODEL_CONFIG,
+        model_config=QWEN25_05B,
         tp_size=1,
         pp_size=1,
         cp_size=1,
@@ -62,7 +46,7 @@ def _build(builder_mod):
 
 @pytest.fixture(scope="module")
 def cli():
-    return _build(_load_builder_module())
+    return _build(builder)
 
 
 def _flag_value(cli, name):
@@ -96,5 +80,5 @@ def test_pad_multiplier_divides_the_dynamic_budget(cli):
 
 def test_pad_multiplier_is_overridable(monkeypatch):
     monkeypatch.setenv("SLIME_DATA_PAD_MULT", "1024")
-    cli = _build(_load_builder_module())
+    cli = _build(builder)
     assert _flag_value(cli, "--data-pad-size-multiplier") == "1024"

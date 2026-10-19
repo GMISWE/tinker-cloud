@@ -13,9 +13,12 @@ from pathlib import Path
 import pytest
 import requests
 
+from tinkercloud.training.proto.wire import PROTO_CONTENT_TYPE
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 API_KEY = "tml-protocol-test-key"
 SIGNING_KEY = "protocol-test-url-signing-key"  # tests forge expired download tokens with it
+ACCEPT_PROTO = {"Accept": PROTO_CONTENT_TYPE}
 
 
 def _free_port() -> int:

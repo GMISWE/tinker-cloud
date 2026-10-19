@@ -17,6 +17,7 @@ import pytest
 
 from gates import comparators, invariants, runner
 from gates.traces.order_perm import OrderPerm, default_arms, verdict
+from tests.fakes.gates import CannedRows, StubDriver
 
 MONOREPO = Path(__file__).resolve().parents[4]
 RESULTS = MONOREPO / "specs/014-gate-suite/results"
@@ -167,27 +168,10 @@ class TestRecordedReplay:
         assert tags == set(EXPECTED)
 
 
-class StubDriver:
-    base_url = "stub://"
-
-    def __init__(self):
-        self.deleted = []
-
-    def delete_model(self, model_id):
-        self.deleted.append(model_id)
-        return True
-
-
-class StubTrace(OrderPerm):
-    """OrderPerm with execute() replaced by canned rows (no SDK/torch)."""
-
-    def __init__(self, rows, **kw):
-        super().__init__(**kw)
-        self._rows = rows
-
+class StubTrace(CannedRows, OrderPerm):
     def execute(self, driver):
         self.created_models.append("model_perm")
-        return [dict(r) for r in self._rows]
+        return super().execute(driver)
 
 
 class TestRunner:

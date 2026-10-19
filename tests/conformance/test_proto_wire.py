@@ -11,8 +11,9 @@ import pytest
 from tinkercloud.training.proto import tinker_public_pb2 as pb
 from tinkercloud.training.proto.wire import PROTO_CONTENT_TYPE, zstd_available
 
+from .conftest import ACCEPT_PROTO
+
 PROTO = {"Content-Type": PROTO_CONTENT_TYPE}
-ACCEPT_PROTO = {"Accept": PROTO_CONTENT_TYPE}
 
 
 def _logprobs(tokens):  # the fake backend's per-token logprob

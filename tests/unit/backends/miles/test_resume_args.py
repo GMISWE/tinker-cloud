@@ -7,12 +7,14 @@ from argparse import Namespace
 
 import pytest
 
-from .test_pack_length import MODEL_CONFIG, _load_builder_module
+from tinkercloud.training.backends.miles import builder
+
+from .model_shapes import QWEN25_05B
 
 
 @pytest.fixture(scope="module")
 def builder_mod():
-    return _load_builder_module()
+    return builder
 
 
 def _configure(builder_mod, load_dir, save_dir=None):
@@ -20,7 +22,7 @@ def _configure(builder_mod, load_dir, save_dir=None):
     return b._configure_model_args(
         Namespace(), base_model="/tmp/model", megatron_checkpoint_path="/tmp/mcore",
         lora_config={"rank": 8}, debug_train_only=False, load_dir=load_dir,
-        model_config=MODEL_CONFIG, parallel_config={"tensor_parallel_size": 1, "pipeline_parallel_size": 1, "context_parallel_size": 1, "num_gpus": 1}, save_dir=save_dir,
+        model_config=QWEN25_05B, parallel_config={"tensor_parallel_size": 1, "pipeline_parallel_size": 1, "context_parallel_size": 1, "num_gpus": 1}, save_dir=save_dir,
     )
 
 

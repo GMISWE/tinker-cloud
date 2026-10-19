@@ -21,11 +21,6 @@ from tinkercloud.training.storage.metadata import MetadataStorage
 W, S = CheckpointKind.WEIGHTS, CheckpointKind.SAMPLER_WEIGHTS
 
 
-@pytest.fixture
-def store(tmp_path):
-    return CheckpointStore(tmp_path / "ckpt", MetadataStorage(tmp_path / "meta"))
-
-
 class TestRef:
     def test_round_trip(self):
         ref = CheckpointRef.parse("tinker://model_a/weights/step-3")

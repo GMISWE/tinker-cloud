@@ -61,12 +61,14 @@ def test_learning_rate_rpc_failure_is_a_backend_error():
 
 
 def test_miles_parallel_config_keys_are_required():
-    from .backends.miles.test_pack_length import MODEL_CONFIG, _load_builder_module
+    from tinkercloud.training.backends.miles import builder
+
+    from .backends.miles.model_shapes import QWEN25_05B
     from argparse import Namespace
-    b = _load_builder_module().MilesArgumentBuilder(default_save_dir="/tmp/ckpt")
+    b = builder.MilesArgumentBuilder(default_save_dir="/tmp/ckpt")
     with pytest.raises(KeyError, match="tensor_parallel_size"):
         b._configure_model_args(
             Namespace(), base_model="/tmp/model", megatron_checkpoint_path="/tmp/mcore",
             lora_config={"rank": 8}, debug_train_only=False, load_dir=None,
-            model_config=MODEL_CONFIG, parallel_config={"num_gpus": 4}, save_dir=None,
+            model_config=QWEN25_05B, parallel_config={"num_gpus": 4}, save_dir=None,
         )

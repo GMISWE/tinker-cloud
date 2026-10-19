@@ -11,7 +11,6 @@ import inside the Ray actor process; define it inside a function so it is
 pickled by value. An fp32-compute variant needs attn_implementation="sdpa";
 FlashAttention takes only fp16/bf16.
 """
-import os
 
 import pytest
 
@@ -26,19 +25,12 @@ from tinkercloud.training.backends.automodel.converter import coalesce, convert_
 from tinkercloud.training.backends.automodel.lora import LoraSpec, lora_spec  # noqa: E402
 from tinkercloud.training.backends.automodel.worker import AutomodelWorker  # noqa: E402
 from tinkercloud.training.backends.automodel.errors import NonFiniteGradNorm  # noqa: E402
-from tinkercloud.training.models.requests import AdamParams, Datum, LoraConfig  # noqa: E402
+from tinkercloud.training.models.requests import AdamParams, LoraConfig  # noqa: E402
+from tests.datums import random_ce_datum  # noqa: E402
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 LORA: LoraSpec = lora_spec(LoraConfig(rank=8, alpha=16))
 SEED = 1234
-
-
-@pytest.fixture(scope="module", autouse=True)
-def ray_local():
-    ray.init(num_gpus=torch.cuda.device_count(), runtime_env={"env_vars": {
-        "PYTHONPATH": os.environ["PYTHONPATH"], "HF_HUB_OFFLINE": "1"}})
-    yield
-    ray.shutdown()
 
 
 class Group:
@@ -70,18 +62,10 @@ class Group:
             ray.kill(w)
 
 
-def ce_datum(g, length):
-    tokens = torch.randint(100, 20000, (length,), generator=g).tolist()
-    targets = tokens[1:] + [tokens[0]]
-    weights = [0.0] * (length // 3) + [1.0] * (length - length // 3)
-    return Datum.model_validate({"model_input": {"tokens": tokens}, "loss_fn_inputs": {
-        "target_tokens": {"data": targets}, "weights": {"data": weights}}})
-
-
 def requests():
     g = torch.Generator().manual_seed(0)
-    x = convert_request([ce_datum(g, n) for n in (37, 64, 5)], "cross_entropy")
-    y = convert_request([ce_datum(g, n) for n in (80, 21, 50, 9, 33)], "cross_entropy")
+    x = convert_request([random_ce_datum(g, n) for n in (37, 64, 5)], "cross_entropy")
+    y = convert_request([random_ce_datum(g, n) for n in (80, 21, 50, 9, 33)], "cross_entropy")
     return x, y
 
 

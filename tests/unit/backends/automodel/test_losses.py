@@ -6,19 +6,9 @@ import torch
 
 from tinkercloud.training.backends.automodel.converter import coalesce, convert_request, shard
 from tinkercloud.training.backends.automodel.losses import compute_loss, token_logprobs
-from tinkercloud.training.models.requests import Datum
+from tests.datums import ce_datum, rl_datum
 
 V = 11
-
-
-def ce(tokens, targets, weights):
-    return Datum.model_validate({"model_input": {"tokens": tokens}, "loss_fn_inputs": {
-        "target_tokens": {"data": targets}, "weights": {"data": weights}}})
-
-
-def rl(tokens, targets, q, adv):
-    return Datum.model_validate({"model_input": {"tokens": tokens}, "loss_fn_inputs": {
-        "target_tokens": {"data": targets}, "logprobs": {"data": q}, "advantages": {"data": adv}}})
 
 
 class Toy(torch.nn.Module):
@@ -69,7 +59,7 @@ def batch_of(datums, loss_fn, ranks=1):
 
 
 def test_cross_entropy_is_weighted_sum_of_neg_logprobs():
-    b = batch_of([ce([1, 2, 3], [2, 3, 4], [0.0, 1.0, 2.0]), ce([5], [6], [1.0])], "cross_entropy")
+    b = batch_of([ce_datum([1, 2, 3], [2, 3, 4], [0.0, 1.0, 2.0]), ce_datum([5], [6], [1.0])], "cross_entropy")
     m = Toy()
     logits = m(b.input_ids)
     out = compute_loss(logits, b)
@@ -89,7 +79,7 @@ def test_rl_losses_match_the_bug017_formulas(loss_fn, clip):
         lp_true = reference_lp(m(torch.tensor([tokens])), torch.tensor([targets]))[0]
     q = (lp_true - 3.0).tolist()                 # ratio ~ e^3: the clip must bind for ppo, never for IS
     adv = [1.0, -0.5, 0.0, 2.0]
-    b = batch_of([rl(tokens, targets, q, adv)], loss_fn)
+    b = batch_of([rl_datum(tokens, targets, q, adv)], loss_fn)
     out = compute_loss(m(b.input_ids), b, clip=clip)
     r = torch.exp(lp_true - torch.tensor(q, dtype=torch.float64))
     a = torch.tensor(adv, dtype=torch.float64)
@@ -99,8 +89,8 @@ def test_rl_losses_match_the_bug017_formulas(loss_fn, clip):
 
 def test_padding_is_inert_even_with_extreme_values():
     # row 2 is short; its padding and the padding row would overflow exp if computed
-    b = batch_of([rl([1, 2, 3], [2, 3, 4], [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]),
-                  rl([5], [6], [-1.0], [1.0])], "importance_sampling", ranks=3)
+    b = batch_of([rl_datum([1, 2, 3], [2, 3, 4], [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]),
+                  rl_datum([5], [6], [-1.0], [1.0])], "importance_sampling", ranks=3)
     b.inputs["logprobs"][1, 1:] = -1e9
     b.inputs["logprobs"][2, :] = -1e9
     m = Toy()
@@ -113,7 +103,7 @@ def test_padding_is_inert_even_with_extreme_values():
 def test_shard_gradients_average_to_the_full_batch_gradient():
     """The worker's rule: each rank backprops loss * num_ranks, ranks average
     gradients; that must equal one pass over every row."""
-    datums = [ce([i % V, (i + 3) % V], [(i + 1) % V, (i + 5) % V], [1.0, 0.5]) for i in range(5)]
+    datums = [ce_datum([i % V, (i + 3) % V], [(i + 1) % V, (i + 5) % V], [1.0, 0.5]) for i in range(5)]
     full = batch_of(datums, "cross_entropy", ranks=2)                  # 5 rows + 1 padding row
     m = Toy(seed=4)
     out = compute_loss(m(full.input_ids), full)
@@ -133,10 +123,10 @@ def test_shard_gradients_average_to_the_full_batch_gradient():
 
 
 def test_clip_is_required_for_ppo_and_refused_elsewhere():
-    b = batch_of([rl([1], [2], [-1.0], [1.0])], "ppo")
+    b = batch_of([rl_datum([1], [2], [-1.0], [1.0])], "ppo")
     with pytest.raises(ValueError, match="required by ppo"):
         compute_loss(Toy()(b.input_ids), b)
-    b = batch_of([ce([1], [2], [1.0])], "cross_entropy")
+    b = batch_of([ce_datum([1], [2], [1.0])], "cross_entropy")
     with pytest.raises(ValueError, match="not taken by cross_entropy"):
         compute_loss(Toy()(b.input_ids), b, clip=(0.8, 1.2))
 
@@ -151,7 +141,7 @@ def test_extreme_ratio_is_clamped_counted_and_finite(loss_fn, clip):
         lp_true = reference_lp(m(torch.tensor([tokens])), torch.tensor([targets]))[0]
     q = [float("-inf"), float("-inf"), float(lp_true[2]) - 0.1]
     adv = [-1.0, 0.0, 1.0]
-    b = batch_of([rl(tokens, targets, q, adv)], loss_fn)
+    b = batch_of([rl_datum(tokens, targets, q, adv)], loss_fn)
     out = compute_loss(m(b.input_ids), b, clip=clip)
     out.loss.backward()
     assert torch.isfinite(out.loss) and torch.isfinite(m.E.grad).all()
@@ -165,5 +155,5 @@ def test_extreme_ratio_is_clamped_counted_and_finite(loss_fn, clip):
 
 
 def test_cross_entropy_reports_no_clamping():
-    b = batch_of([ce([1, 2], [2, 3], [1.0, 1.0])], "cross_entropy")
+    b = batch_of([ce_datum([1, 2], [2, 3], [1.0, 1.0])], "cross_entropy")
     assert compute_loss(Toy()(b.input_ids), b).clamped.tolist() == [0.0]
