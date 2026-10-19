@@ -20,9 +20,9 @@ jobs:
       - run: pyright
 
   tests:
-    # The CPU unit suites (tests/unit_suites.txt). `import training` pulls the
+    # The unit suite. `import training` pulls the
     # FastAPI app and Ray; the checkpoint interchange tests need CPU torch.
-    # tests/protocol needs the tinker SDK, which is not installable here.
+    # tests/conformance needs the tinker SDK, which is not installable here.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,4 +34,4 @@ jobs:
                  --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
       # the tests import the tree as the `tinkercloud` package (as pod_pytest.sh aliases it)
       - run: mkdir -p /tmp/ns && ln -s "$PWD" /tmp/ns/tinkercloud
-      - run: PYTHONPATH=/tmp/ns python -m pytest $(grep -v '^#' tests/unit_suites.txt) -q -p no:cacheprovider
+      - run: PYTHONPATH=/tmp/ns python -m pytest tests/unit -q -p no:cacheprovider --durations=10

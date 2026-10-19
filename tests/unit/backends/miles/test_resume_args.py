@@ -7,7 +7,7 @@ from argparse import Namespace
 
 import pytest
 
-from test_miles_pack_length import MODEL_CONFIG, _load_builder_module
+from .test_pack_length import MODEL_CONFIG, _load_builder_module
 
 
 @pytest.fixture(scope="module")

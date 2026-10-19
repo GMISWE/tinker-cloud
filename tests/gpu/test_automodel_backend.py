@@ -7,7 +7,7 @@ Needs >= 3 GPUs (2 ranks + vLLM), the Automodel training env with
 Skipped elsewhere.
 
 Run on a GPU pod (about 5 minutes; vLLM boots in ~2):
-  KX_TIMEOUT=1700 scripts/pod_pytest.sh <pod> tests/gpu/test_automodel_backend_gpu.py -v
+  KX_TIMEOUT=1700 scripts/pod_pytest.sh <pod> tests/gpu/test_automodel_backend.py -v
 
 HF_HUB_OFFLINE is set before huggingface_hub loads: create_model reads the
 raw HF config through hf_hub_download in this process. An actor class

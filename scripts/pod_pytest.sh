@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Run the CPU-only pytest suites (tests/protocol on the fake backend, the unit
-# suites listed in tests/unit_suites.txt) on a cluster pod against the LOCAL working tree, without touching
-# the deployed /app.
+# Run the CPU-only pytest suites (tests/unit, and tests/conformance on the fake
+# backend) on a cluster pod against the LOCAL working tree, without touching the
+# deployed /app.
 #
 #   scripts/pod_pytest.sh [pod] [pytest args...]
-#   scripts/pod_pytest.sh tinkercloud-nemorl tests/protocol tests/test_ordering.py -q
+#   scripts/pod_pytest.sh tinkercloud-nemorl tests/conformance tests/unit/core -q
 #
 # The tree is tarred (training/ tests/ gates/ pyproject.toml), pushed with
 # sha256 verified on both sides, unpacked under /tmp/pytest-<user>/app and
@@ -22,8 +22,7 @@ set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE
 POD="${1:-tinkercloud-nemorl}"; shift || true
 if [ $# -eq 0 ]; then
-  # shellcheck disable=SC2046  # one path per line, no spaces in them
-  set -- tests/protocol $(grep -v '^#' "$(dirname "$0")/../tests/unit_suites.txt") -q -p no:cacheprovider
+  set -- tests/unit tests/conformance -q -p no:cacheprovider
 fi
 GPU_RUN=0
 case " $* " in

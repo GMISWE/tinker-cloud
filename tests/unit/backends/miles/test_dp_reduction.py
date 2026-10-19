@@ -30,52 +30,15 @@ The regression this guards is narrow and source-level on purpose: the bug was
 never a wrong VALUE, it was the service owning a flag the engine also derives.
 A second derivation is exactly what must not come back.
 """
-import importlib.util
 import inspect
-import os
 import re
-import sys
-import types
 
 import pytest
 
 
 def _load_builder_module():
-    """Import backends/miles/builder.py without dragging FastAPI in via the package init."""
-    try:  # in-container / installed layout
-        from tinkercloud.training.backends.miles import builder as m
-        return m
-    except ImportError:
-        pass
-    root = os.path.join(os.path.dirname(__file__), os.pardir, "training")
-
-    def _pkg(name):
-        p = types.ModuleType(name)
-        p.__path__ = []
-        sys.modules[name] = p
-        return p
-
-    def _load(dotted, path):
-        spec = importlib.util.spec_from_file_location(dotted, path)
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules[dotted] = mod
-        spec.loader.exec_module(mod)
-        return mod
-
-    _pkg("_tcbdp")
-    _pkg("_tcbdp.utils")
-    _pkg("_tcbdp.backends")
-    _pkg("_tcbdp.backends.miles")
-    base = types.ModuleType("_tcbdp.backends.base")
-    base.ArgumentBuilder = object
-    sys.modules["_tcbdp.backends.base"] = base
-    # the builder imports these leaves relatively; they must exist under the alias first
-    _load("_tcbdp.utils.model_config", os.path.join(root, "utils", "model_config.py"))
-    _load("_tcbdp.backends.env_config", os.path.join(root, "backends", "env_config.py"))
-    _load("_tcbdp.backends.miles.config", os.path.join(root, "backends", "miles", "config.py"))
-    _load("_tcbdp.backends.miles.model_setup", os.path.join(root, "backends", "miles", "model_setup.py"))
-    return _load("_tcbdp.backends.miles.builder",
-                 os.path.join(root, "backends", "miles", "builder.py"))
+    from tinkercloud.training.backends.miles import builder
+    return builder
 
 
 @pytest.fixture(scope="module")

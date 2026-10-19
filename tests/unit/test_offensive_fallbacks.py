@@ -61,7 +61,7 @@ def test_learning_rate_rpc_failure_is_a_backend_error():
 
 
 def test_miles_parallel_config_keys_are_required():
-    from test_miles_pack_length import MODEL_CONFIG, _load_builder_module
+    from .backends.miles.test_pack_length import MODEL_CONFIG, _load_builder_module
     from argparse import Namespace
     b = _load_builder_module().MilesArgumentBuilder(default_save_dir="/tmp/ckpt")
     with pytest.raises(KeyError, match="tensor_parallel_size"):
