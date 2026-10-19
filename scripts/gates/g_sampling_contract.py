@@ -1,6 +1,6 @@
 """G-SC: sampling contract on a live server (specs/016 task 2.8; API-CONTRACT S4-S7).
 
-Runs the same assertions as tests/protocol/test_sampling_contract.py against a
+Runs the same assertions as tests/conformance/test_sampling_contract.py against a
 real backend with a real tokenizer, on a fresh model that is deleted at the end.
 
   TINKER_BASE_URL=http://127.0.0.1:8001 python scripts/gates/g_sampling_contract.py \

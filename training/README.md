@@ -78,6 +78,6 @@ per-model order; passes may overlap.
 
 ## Tests
 
-`tests/protocol/` (SDK against a live `fake`-backend server) and the unit tests
-under `tests/` need no GPU; `scripts/pod_pytest.sh` runs them on a cluster pod
-against your working tree. See `tests/README.md`.
+`tests/unit/` and `tests/conformance/` (the SDK against a live `fake`-backend
+server) need no GPU; `scripts/pod_pytest.sh` runs them on a cluster pod against
+your working tree. See `tests/README.md`.
