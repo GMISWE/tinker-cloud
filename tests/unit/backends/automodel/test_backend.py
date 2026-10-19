@@ -17,6 +17,7 @@ from tinkercloud.training.backends.base import BackendError
 from tinkercloud.training.backends.http_pool import HttpClientPool
 from tinkercloud.training.core import routing
 from tinkercloud.training.models.requests import Datum
+from tests.datums import ce_datum
 
 CONFIG = dict(train_gpus=2, max_loras=1, max_lora_rank=8, max_cpu_loras=1, micro_batch_rows=2)
 ADAM = dict(beta1=0.9, beta2=0.95, eps=1e-8, weight_decay=0.0, grad_clip_norm=0.0)
@@ -24,11 +25,6 @@ LORA = LoraSpec(rank=8, alpha=16, target_modules=("q_proj",), dropout=0.0)
 VLLM = "http://vllm:1"
 SP = {"temperature": 0.0, "top_p": 1.0, "max_tokens": 4}
 run = asyncio.run
-
-
-def ce(tokens):
-    return Datum.model_validate({"model_input": {"tokens": tokens}, "loss_fn_inputs": {
-        "target_tokens": {"data": tokens}, "weights": {"data": [1.0] * len(tokens)}}})
 
 
 class Ranks:
@@ -163,8 +159,8 @@ def test_pass_results_are_split_per_request():
     async def go():
         backend, ranks, handle = wired()
         a, b = await asyncio.gather(
-            backend.forward_backward(handle, [ce([1, 2, 3]), ce([1, 2, 3, 4, 5])], "cross_entropy"),
-            backend.forward_backward(handle, [ce([7, 8])], "cross_entropy"),
+            backend.forward_backward(handle, [ce_datum([1, 2, 3]), ce_datum([1, 2, 3, 4, 5])], "cross_entropy"),
+            backend.forward_backward(handle, [ce_datum([7, 8])], "cross_entropy"),
         )
         assert a["loss"] == 8.0 and b["loss"] == 2.0
         assert a["loss_fn_output_type"] == LossFn.CROSS_ENTROPY.value
@@ -206,7 +202,7 @@ def test_rank_fault_releases_the_group():
         await until_stopped(ranks)
         assert "g" not in backend._groups
         with pytest.raises(BackendError, match="CUDA error"):
-            await backend.forward_backward(handle, [ce([1, 2])], "cross_entropy")
+            await backend.forward_backward(handle, [ce_datum([1, 2])], "cross_entropy")
         with pytest.raises(BackendError, match="CUDA error"):
             await backend.sample(handle, "r", [1, 2], 1, SP)
         await backend.delete_model(handle)   # nothing left to free; not an error
@@ -221,7 +217,7 @@ def test_bad_request_fails_before_the_ranks():
         with pytest.raises(BackendError, match="missing weights"):
             await backend.forward_backward(handle, [no_weights], "cross_entropy")
         with pytest.raises(BackendError, match="not served"):
-            await backend.forward_backward(handle, [ce([1, 2])], "dro")
+            await backend.forward_backward(handle, [ce_datum([1, 2])], "dro")
         with pytest.raises(BackendError, match="adam_params"):
             await backend.apply_optimizer_step(handle)
         assert ranks.passes == []
@@ -235,7 +231,7 @@ def test_delete_closes_the_scheduler_and_stops_the_ranks():
         await backend.delete_model(handle)
         assert ranks.stopped and "g" not in backend._groups
         with pytest.raises(BackendError, match="deleted"):
-            await backend.forward(handle, [ce([1, 2])], "cross_entropy")
+            await backend.forward(handle, [ce_datum([1, 2])], "cross_entropy")
     run(go())
 
 
@@ -286,7 +282,7 @@ def test_a_step_whose_publish_fails_reports_the_step_as_taken(tmp_path, routed):
     async def go():
         vllm = Vllm(fail_load=True)
         backend, ranks, handle = wired(tmp_path, vllm)
-        await backend.forward_backward(handle, [ce([1, 2])], "cross_entropy")
+        await backend.forward_backward(handle, [ce_datum([1, 2])], "cross_entropy")
         with pytest.raises(BackendError, match=r"step was taken \(weights at v1\).*500"):
             await backend.apply_optimizer_step(handle, 0.5, ADAM)
         assert handle.weight_version == 1 and handle.generation_synced_version == -1

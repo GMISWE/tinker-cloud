@@ -13,19 +13,12 @@ from tinkercloud.training.checkpoints import (
     CheckpointKind,
     CheckpointNotFound,
     CheckpointRef,
-    CheckpointStore,
     InvalidCheckpointPath,
 )
 from tinkercloud.training.checkpoints.store import is_expired
-from tinkercloud.training.storage.metadata import MetadataStorage
 from tinkercloud.training.utils import signed_urls
 
 E = CheckpointKind.EXTERNAL_WEIGHTS
-
-
-@pytest.fixture
-def store(tmp_path):
-    return CheckpointStore(tmp_path / "ckpt", MetadataStorage(tmp_path / "meta"))
 
 
 class TestStoreKind:

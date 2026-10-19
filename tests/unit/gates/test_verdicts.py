@@ -19,6 +19,7 @@ from gates.traces.seg_sweep import (
     parse_segmentations,
     verdict,
 )
+from tests.fakes.gates import CannedRows, StubDriver
 
 MONOREPO = Path(__file__).resolve().parents[4]
 RECORDED = [
@@ -128,19 +129,8 @@ class TestRecordedReplay:
                 assert new["bit_identical"] == old["bit_identical"]
 
 
-class StubDriver:
-    base_url = "stub://"
-
-
-class StubTrace(SegSweep):
-    """SegSweep with execute() replaced by canned rows (no SDK/torch)."""
-
-    def __init__(self, rows, **kw):
-        super().__init__(**kw)
-        self._rows = rows
-
-    def execute(self, driver):
-        return [dict(r) for r in self._rows]
+class StubTrace(CannedRows, SegSweep):
+    pass
 
 
 class TestRunner:
@@ -179,17 +169,6 @@ class TestRunner:
         assert doc["expect_met"] is True
 
 
-class RecordingDriver(StubDriver):
-    """Driver that records delete_model calls (the cleanup contract)."""
-
-    def __init__(self):
-        self.deleted = []
-
-    def delete_model(self, model_id):
-        self.deleted.append(model_id)
-        return True
-
-
 class TestModelCleanup:
     """A gate owns the models it creates: miles does not auto-reap them, and
     a leftover model wedges the next gate's create_model in placement."""
@@ -200,14 +179,14 @@ class TestModelCleanup:
         return t
 
     def test_models_released_after_run(self):
-        driver = RecordingDriver()
+        driver = StubDriver()
         trace = self._trace(rows_for([3.0] * 6), ["model_a"])
         runner.run(invariants.get("SPLIT_INV"), trace, tag="stub", driver=driver)
         assert driver.deleted == ["model_a"]
         assert trace.created_models == []
 
     def test_models_released_even_when_trace_raises(self):
-        driver = RecordingDriver()
+        driver = StubDriver()
         trace = self._trace(rows_for([3.0] * 6), ["model_b"])
 
         def boom(_driver):

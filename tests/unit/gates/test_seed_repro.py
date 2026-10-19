@@ -16,6 +16,7 @@ import pytest
 
 from gates import comparators, invariants, runner
 from gates.traces.seed_repro import SeedRepro, default_arms, verdict
+from tests.fakes.gates import CannedRows, StubDriver
 
 E0 = comparators.REGISTRY["e0_bitwise"]
 
@@ -165,17 +166,8 @@ class TestExecute:
         assert driver.live == set() and trace.created_models == []
 
 
-class StubDriver:
-    base_url = "stub://"
-
-
-class StubTrace(SeedRepro):
-    def __init__(self, rows, **kw):
-        super().__init__(**kw)
-        self._rows = rows
-
-    def execute(self, driver):
-        return [dict(r) for r in self._rows]
+class StubTrace(CannedRows, SeedRepro):
+    pass
 
 
 class TestRunner:

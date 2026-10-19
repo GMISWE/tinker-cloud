@@ -13,7 +13,8 @@ from tinker import types
 from tinkercloud.training.proto import tinker_public_pb2 as pb
 from tinkercloud.training.proto.wire import PROTO_CONTENT_TYPE
 
-ACCEPT_PROTO = {"Accept": PROTO_CONTENT_TYPE}
+from .conftest import ACCEPT_PROTO
+
 MASK = (0, -99999.0)   # the SDK's undefined top-k cell
 PROMPT = [3, 4, 5, 6, 7, 8]
 

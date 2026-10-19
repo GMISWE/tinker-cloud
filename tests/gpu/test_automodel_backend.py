@@ -40,6 +40,7 @@ from tinkercloud.training.backends.automodel.group import sweep_leftovers  # noq
 from tinkercloud.training.backends.base import BackendError  # noqa: E402
 from tinkercloud.training.core import routing  # noqa: E402
 from tinkercloud.training.models.requests import Datum  # noqa: E402
+from tests.datums import random_ce_datum  # noqa: E402
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 # two adapter versions coexist while a sample of the older one is in flight
@@ -50,27 +51,9 @@ ADAM = dict(beta1=0.9, beta2=0.95, eps=1e-8, weight_decay=0.0, grad_clip_norm=0.
 BACKEND_LOGGER = "tinkercloud.training.backends.automodel.backend"
 
 
-@pytest.fixture(scope="module", autouse=True)
-def ray_local():
-    ray.init(num_gpus=torch.cuda.device_count(), runtime_env={"env_vars": {
-        "PYTHONPATH": os.environ["PYTHONPATH"], "HF_HUB_OFFLINE": "1"}})
-    yield
-    ray.shutdown()
-
-
-def ce_datum(g, length, weight=1.0):
-    """Random tokens; each position predicts the next (the last wraps), with
-    the first third of the positions weighted 0."""
-    tokens = torch.randint(100, 20000, (length,), generator=g).tolist()
-    targets = tokens[1:] + [tokens[0]]
-    weights = [0.0] * (length // 3) + [weight] * (length - length // 3)
-    return Datum.model_validate({"model_input": {"tokens": tokens}, "loss_fn_inputs": {
-        "target_tokens": {"data": targets}, "weights": {"data": weights}}})
-
-
 def datums(lengths, weight=1.0):
     g = torch.Generator().manual_seed(0)
-    return [ce_datum(g, n, weight) for n in lengths]
+    return [random_ce_datum(g, n, weight) for n in lengths]
 
 
 def am_actors(prefix):

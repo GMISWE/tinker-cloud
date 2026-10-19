@@ -35,15 +35,12 @@ import re
 
 import pytest
 
-
-def _load_builder_module():
-    from tinkercloud.training.backends.miles import builder
-    return builder
+from tinkercloud.training.backends.miles import builder
 
 
 @pytest.fixture(scope="module")
 def builder_src():
-    return inspect.getsource(_load_builder_module())
+    return inspect.getsource(builder)
 
 
 def test_builder_does_not_pin_use_distributed_optimizer(builder_src):
