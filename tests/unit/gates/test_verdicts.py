@@ -20,7 +20,7 @@ from gates.traces.seg_sweep import (
     verdict,
 )
 
-MONOREPO = Path(__file__).resolve().parents[2]
+MONOREPO = Path(__file__).resolve().parents[4]
 RECORDED = [
     p
     for pattern in (

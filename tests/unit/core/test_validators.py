@@ -11,21 +11,11 @@ specs/008-q3-abstraction-tax/HANDOFF.md.
 The flag still governs the genuinely partial cases (RL group alignment), where
 the consequence is normalization rather than liveness.
 """
-import importlib.util
-import os
 from argparse import Namespace
 
 import pytest
 
-try:  # in-container / installed layout, as the other test modules use
-    from tinkercloud.training.core.validators import RequestValidator
-except ImportError:  # standalone: validators.py is stdlib-only, load it directly
-    _p = os.path.join(os.path.dirname(__file__), os.pardir,
-                      "training", "core", "validators.py")
-    _spec = importlib.util.spec_from_file_location("_validators", _p)
-    _mod = importlib.util.module_from_spec(_spec)
-    _spec.loader.exec_module(_mod)
-    RequestValidator = _mod.RequestValidator
+from tinkercloud.training.core.validators import RequestValidator
 
 
 def _args(dp=2, gbs=8, balance_data=False, n_per_prompt=1):

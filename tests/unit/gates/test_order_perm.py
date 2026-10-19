@@ -18,7 +18,7 @@ import pytest
 from gates import comparators, invariants, runner
 from gates.traces.order_perm import OrderPerm, default_arms, verdict
 
-MONOREPO = Path(__file__).resolve().parents[2]
+MONOREPO = Path(__file__).resolve().parents[4]
 RESULTS = MONOREPO / "specs/014-gate-suite/results"
 RECORDED = sorted(RESULTS.glob("order_perm_*.json"))
 

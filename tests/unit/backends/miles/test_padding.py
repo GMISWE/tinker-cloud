@@ -13,45 +13,13 @@ tested here:
   * observationally — a pad has no observation key, so it must sit at the TAIL
     and be truncated off before any client-visible output.
 """
-import importlib.util
-import os
-import sys
-import types
 
 import pytest
 
 
 def _load_converter_module():
-    """Import converter.py without dragging FastAPI in via the package init."""
-    try:  # in-container / installed layout
-        from tinkercloud.training.backends.miles import converter as m
-        return m
-    except ImportError:
-        pass
-    root = os.path.join(os.path.dirname(__file__), os.pardir, "training")
-
-    def _pkg(name):
-        p = types.ModuleType(name)
-        p.__path__ = []
-        sys.modules[name] = p
-        return p
-
-    _pkg("_tcp")
-    _pkg("_tcp.backends")
-    _pkg("_tcp.backends.miles")
-    base = types.ModuleType("_tcp.backends.base")
-    base.DataConverter = object
-    sys.modules["_tcp.backends.base"] = base
-    dc = types.ModuleType("_tcp.backends.miles.rollout_data")
-    dc.TinkerDataConverter = object
-    sys.modules["_tcp.backends.miles.rollout_data"] = dc
-
-    path = os.path.join(root, "backends", "miles", "converter.py")
-    spec = importlib.util.spec_from_file_location("_tcp.backends.miles.converter", path)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = mod
-    spec.loader.exec_module(mod)
-    return mod
+    from tinkercloud.training.backends.miles import converter
+    return converter
 
 
 CONV = _load_converter_module()
