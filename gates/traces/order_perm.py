@@ -2,7 +2,7 @@
 specs/014-gate-suite/probes/order_perm_probe.py. Datum generator, arm
 naming and verdict semantics are preserved, so the 13 recorded
 `order_perm_*.json` runs replay against this logic (see
-tests/test_gates_order_perm.py).
+tests/unit/gates/test_order_perm.py).
 
 Strictly stronger than SPLIT_INV and it needs no segmentation at all:
 ONE call, all n datums, only the submission order changes. miles assigns
