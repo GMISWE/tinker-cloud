@@ -1,12 +1,17 @@
-"""Drain before sleep (specs/019): a sample is admitted and counted under the
-same lock a training op uses to take the engine; the op waits for admitted
-samples to return before sleeping; a refit resets the prefix cache or fails."""
+"""NemoRLBackend without a cluster: R9 buffering (forward_backward defers, optim_step trains the buffer) and the
+drain-before-sleep generation lifecycle (specs/019): a sample is admitted and counted under the same lock a training
+op uses to take the engine; the op waits for admitted samples before sleeping; a refit resets the prefix cache or fails."""
 import asyncio
+import importlib.util
 
 import pytest
 
+from tinkercloud.training.backends.base import BackendError
 from tinkercloud.training.backends.nemo_rl import backend as nb
 from tinkercloud.training.backends.nemo_rl.backend import NemoRLHandle
+from tests.datums import make_synthetic_batch
+
+HAS_NEMO_RL = importlib.util.find_spec("nemo_rl") is not None
 
 
 class FakeGeneration:
@@ -162,9 +167,6 @@ def test_refit_resets_the_prefix_cache_or_fails(monkeypatch):
         nb._refit_policy_generation(policy, gen, colocated_inference=True)
 
 
-# --- specs/021 (D16): the split layout keeps the engine serving through a step
-
-
 def test_split_training_leaves_the_engine_with_its_samples():
     async def run():
         log = []
@@ -251,3 +253,118 @@ def test_create_time_split_sync_tolerates_a_busy_prefix_cache(monkeypatch):
     assert log == ["nccl-send", "nccl-recv", "invalidate"]
     with pytest.raises(RuntimeError, match="drain violated"):
         nb._refit_policy_generation(policy, gen, colocated_inference=True)
+
+
+@pytest.mark.skipif(not HAS_NEMO_RL, reason="NeMo RL not installed")
+class TestNemoRLBackendBuffering:
+    """Test the R9 buffering strategy without GPU."""
+
+    @pytest.fixture
+    def backend(self):
+        from tinkercloud.training.backends.nemo_rl.backend import NemoRLBackend
+        return NemoRLBackend()
+
+    @pytest.fixture
+    def handle(self):
+        from tinkercloud.training.backends.nemo_rl.backend import NemoRLHandle
+        return NemoRLHandle(model_id="test", backend_type="nemo_rl", config={})
+
+    def test_forward_backward_returns_deferred(self, backend, handle):
+        """forward_backward() should return deferred=True."""
+        data = make_synthetic_batch(batch_size=2)
+        result = asyncio.run(
+            backend.forward_backward(handle, data, "importance_sampling")
+        )
+        assert result["deferred"] is True
+        assert result["metrics"] == {}
+        assert len(handle.data_buffer) == 1
+
+    def test_forward_backward_accumulates_buffer(self, backend, handle):
+        """Multiple forward_backward() calls accumulate in buffer."""
+        for _ in range(3):
+            asyncio.run(
+                backend.forward_backward(handle, make_synthetic_batch(2), "importance_sampling")
+            )
+        assert len(handle.data_buffer) == 3
+
+    def test_forward_backward_empty_data_is_noop(self, backend, handle):
+        """Empty data (GRPO all-zero advantages) is a deferred no-op, not an error."""
+        result = asyncio.run(backend.forward_backward(handle, [], "importance_sampling"))
+        assert result == {
+            "loss_fn_output_type": "importance_sampling",
+            "metrics": {}, "deferred": True, "loss_fn_outputs": [],
+        }
+        assert len(handle.data_buffer) == 0
+
+    def test_apply_optimizer_step_empty_buffer_is_noop(self, backend, handle):
+        """An empty buffer steps nothing and reports success with grad_norm 0."""
+        result = asyncio.run(backend.apply_optimizer_step(handle))
+        assert result["success"] is True
+        assert result["grad_norm"] == 0.0
+        assert result["loss_fn_outputs"] == []
+
+    def test_buffer_overflow_raises(self, backend, handle):
+        """forward_backward() should raise when buffer exceeds max_buffer_size (CHK006)."""
+        handle.max_buffer_size = 3
+        for _ in range(3):
+            asyncio.run(
+                backend.forward_backward(handle, make_synthetic_batch(2), "importance_sampling")
+            )
+        assert len(handle.data_buffer) == 3
+        with pytest.raises(BackendError, match="Buffer full"):
+            asyncio.run(
+                backend.forward_backward(handle, make_synthetic_batch(2), "importance_sampling")
+            )
+
+    def test_delete_model_clears_buffer(self, backend, handle):
+        """delete_model() should warn and clear pending buffer (CHK007)."""
+        asyncio.run(
+            backend.forward_backward(handle, make_synthetic_batch(2), "importance_sampling")
+        )
+        assert len(handle.data_buffer) == 1
+        # delete_model will fail on policy shutdown (no real policy), but
+        # the buffer should be cleared before that error
+        try:
+            asyncio.run(backend.delete_model(handle))
+        except BackendError:
+            pass  # Expected — no real policy
+        assert len(handle.data_buffer) == 0
+
+    def test_deferred_result_format(self, backend, handle):
+        """forward_backward() deferred result must have exact contract fields (CHK010)."""
+        data = make_synthetic_batch(batch_size=2)
+        result = asyncio.run(
+            backend.forward_backward(handle, data, "importance_sampling")
+        )
+        assert result == {
+            "loss_fn_output_type": "importance_sampling",
+            "metrics": {}, "deferred": True, "loss_fn_outputs": [],
+        }
+
+    def test_concurrent_forward_backward_thread_safe(self, backend, handle):
+        """Concurrent forward_backward() calls should be serialized by lock (CHK018)."""
+        async def run_concurrent():
+            tasks = [
+                backend.forward_backward(handle, make_synthetic_batch(2), "importance_sampling")
+                for _ in range(5)
+            ]
+            results = await asyncio.gather(*tasks)
+            return results
+
+        results = asyncio.run(run_concurrent())
+        assert len(handle.data_buffer) == 5
+        assert all(r["deferred"] is True for r in results)
+
+
+def test_learning_rate_rpc_failure_is_a_backend_error():
+    from tinkercloud.training.backends.nemo_rl.backend import _set_learning_rate
+
+    class _WorkerGroup:
+        def run_all_workers_single_data(self, *a, **k):
+            raise RuntimeError("actor died")
+
+    class _Policy:
+        worker_group = _WorkerGroup()
+
+    with pytest.raises(BackendError, match="could not set learning rate 0.5"):
+        _set_learning_rate(_Policy(), 0.5)

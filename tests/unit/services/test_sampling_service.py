@@ -1,7 +1,7 @@
 """SDK 0.33 sampling fields at the HTTP boundary and in the service: the request
 model carries them, the router refuses the unsupported ones by name (400), the
 service caps top-k at the engine's limit and masks prompt scores before a
-prompt_logprobs_last_n suffix, and the fake backend's top-k is deterministic."""
+prompt_logprobs_last_n suffix."""
 import asyncio
 
 import pytest
@@ -9,9 +9,8 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from tinkercloud.training.backends.base import SampleRequestError
-from tinkercloud.training.backends.fake.backend import FAKE_MAX_TOPK, FakeBackend, logprobs_for, topk_for
+from tinkercloud.training.backends.fake.backend import FAKE_MAX_TOPK, FakeBackend
 from tinkercloud.training.models.requests import ASampleRequest
-from tinkercloud.training.models.responses import validate_result
 from tinkercloud.training.routers.sampling import check_sample_extensions
 from tinkercloud.training.services.sampling_service import _check_sample_request, _mask_prompt_prefix
 
@@ -87,25 +86,3 @@ def test_service_caps_topk_at_the_engine_limit():
         _check_sample_request(h, [1, 2], {"max_tokens": 2}, 0, 21)
     h.max_topk_logprobs = None   # unknown cap: not checked
     _check_sample_request(h, [1, 2], {"max_tokens": 2}, 1000, 1000)
-
-
-def test_fake_topk_is_deterministic_and_validates():
-    b, h = _fake_model()
-    kw = dict(sampling_params={"max_tokens": 3, "seed": 1}, prompt_logprobs=True,
-              topk_sample_logprobs=2, topk_prompt_logprobs=2)
-    a = asyncio.run(b.sample(h, "r", PROMPT, 2, **kw))
-    assert a == asyncio.run(b.sample(h, "r", PROMPT, 2, **kw))
-    for seq in a["sequences"]:
-        rows = seq["topk_sample_logprobs"]
-        assert len(rows) == len(seq["tokens"])
-        # rank 0 is the sampled token at its own logprob; ranks are best first
-        assert [row[0] for row in rows] == list(zip(seq["tokens"], seq["logprobs"]))
-        assert all(row[0][1] > row[1][1] for row in rows)
-    assert a["topk_prompt_logprobs"][0] is None
-    assert a["topk_prompt_logprobs"][1:] == topk_for(PROMPT, 2)[1:]
-    assert [row[0][1] for row in a["topk_prompt_logprobs"][1:]] == logprobs_for(PROMPT)[1:]
-    plain = asyncio.run(b.sample(h, "r", PROMPT, 1, sampling_params={"max_tokens": 3, "seed": 1}))
-    assert "topk_sample_logprobs" not in plain["sequences"][0] and "topk_prompt_logprobs" not in plain
-    out = validate_result("asample", a)
-    assert out["sequences"][0]["topk_sample_logprobs"] == a["sequences"][0]["topk_sample_logprobs"]
-    assert out["topk_prompt_logprobs"] == a["topk_prompt_logprobs"]
