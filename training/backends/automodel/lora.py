@@ -49,3 +49,27 @@ def tenant_seed(model_id: str, seed: Optional[int]) -> int:
     if seed is not None:
         return seed
     return int.from_bytes(hashlib.sha256(model_id.encode()).digest()[:8], "little") >> 1
+
+
+def spec_mismatch(adapter_config: object, lora: LoraSpec) -> Optional[str]:
+    """The first field of a PEFT adapter_config.json that does not describe
+    `lora`, as "field: checkpoint vs model"; a field of the wrong type is a
+    mismatch, never a crash. None when the adapter fits."""
+    if not isinstance(adapter_config, dict):
+        return "adapter_config.json is not a JSON object"
+    for key in ("r", "lora_alpha", "target_modules"):
+        if key not in adapter_config:
+            return f"{key}: absent from adapter_config.json"
+    r, alpha, targets = adapter_config["r"], adapter_config["lora_alpha"], adapter_config["target_modules"]
+    if not _is_int(r) or r != lora.rank:
+        return f"r: {r!r} vs {lora.rank}"
+    if not (_is_int(alpha) or isinstance(alpha, float)) or float(alpha) != float(lora.alpha):
+        return f"lora_alpha: {alpha!r} vs {lora.alpha}"
+    if not (isinstance(targets, list) and all(isinstance(t, str) for t in targets)) \
+            or set(targets) != set(lora.target_modules):
+        return f"target_modules: {targets!r} vs {sorted(lora.target_modules)}"
+    return None
+
+
+def _is_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)   # JSON true is not a rank

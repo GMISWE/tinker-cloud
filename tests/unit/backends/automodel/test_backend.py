@@ -1,6 +1,8 @@
 """AutomodelBackend over stand-ins for the ranks and for vLLM: per-request
 results, the two fault paths (refused step vs lost group), request validation,
-delete, and the versioned adapter publish behind sample() (R4, D20)."""
+delete, the versioned adapter publish behind sample(), and the checkpoint
+seam: what a save writes, what a load refuses before it
+touches a rank, and the publish after a load."""
 import asyncio
 import json
 
@@ -10,7 +12,7 @@ import torch
 
 from tinkercloud.training.backends.automodel.backend import AutomodelBackend, AutomodelHandle, _Group, _Sampler
 from tinkercloud.training.backends.automodel.converter import LossFn
-from tinkercloud.training.backends.automodel.errors import NonFiniteGradNorm
+from tinkercloud.training.backends.automodel.errors import NonFiniteGradNorm, StateMismatch
 from tinkercloud.training.backends.automodel.lora import LoraSpec
 from tinkercloud.training.backends.automodel.scheduler import GroupScheduler
 from tinkercloud.training.backends.base import BackendError
@@ -30,7 +32,9 @@ run = asyncio.run
 class Ranks:
     """TrainingGroup stand-in: every real position scores logprob -1 and term
     +1, so a row's loss is its length; optim_step reports the lr as the norm,
-    or raises `fault` once; export_adapter writes a marker file."""
+    or raises `fault` once; export_adapter writes a marker file; save_state
+    writes the three checkpoint files (waiting on `hold_save` when set) and
+    load_state records its arguments, or raises `fault` once."""
     num_ranks = 2
 
     def __init__(self):
@@ -38,11 +42,26 @@ class Ranks:
         self.fault = None
         self.stopped = False
         self.exports = []
+        self.saves = []
+        self.loads = []         # (adapter_dir, optimizer_dir)
+        self.hold_save = None   # asyncio.Event a save waits for
 
     async def export_adapter(self, dest):
         dest.mkdir(parents=True, exist_ok=True)   # a version is re-exported when its load failed
         (dest / "adapter_model.safetensors").write_bytes(b"")
         self.exports.append(dest)
+
+    async def save_state(self, root):
+        if self.hold_save is not None:
+            await self.hold_save.wait()
+        write_root(root)
+        self.saves.append(root)
+
+    async def load_state(self, adapter_dir, optimizer_dir):
+        if self.fault is not None:
+            fault, self.fault = self.fault, None
+            raise fault
+        self.loads.append((adapter_dir, optimizer_dir))
 
     async def forward_backward(self, shards, clip):
         return self._run("forward_backward", shards, clip)
@@ -121,6 +140,25 @@ class Vllm:
         return httpx.Response(200, json={"request_id": "r", "prompt_logprobs": None, "choices": [
             {"index": 0, "finish_reason": "length", "token_ids": [version, 7],
              "logprobs": {"content": [{"logprob": -0.5}, {"logprob": -1.0}]}}]})
+
+
+ADAPTER_CONFIG = {"peft_type": "LORA", "r": 8, "lora_alpha": 16, "target_modules": ["q_proj"]}
+
+
+def write_root(root, config=ADAPTER_CONFIG, optimizer=True):
+    """A checkpoint root as the worker writes it (empty tensors: the stand-in
+    never reads them), or without optimizer state as another backend writes it."""
+    (root / "hf_adapter").mkdir(parents=True)
+    (root / "hf_adapter" / "adapter_model.safetensors").write_bytes(b"")
+    (root / "hf_adapter" / "adapter_config.json").write_text(json.dumps(config))
+    if optimizer:
+        (root / "optimizer").mkdir()
+        (root / "optimizer" / "adamw.safetensors").write_bytes(b"")
+    return root
+
+
+def files_under(path):
+    return {p.relative_to(path).as_posix() for p in path.rglob("*") if p.is_file()}
 
 
 def wired(tmp_path=None, vllm=None, tenants=("m",)):
@@ -310,5 +348,176 @@ def test_delete_unloads_the_adapters_and_the_last_tenant_stops_vllm(tmp_path, ro
         await backend.prepare_for_generation(handle)
         await backend.delete_model(handle)
         assert host.stopped and "s" not in backend._samplers
+        await backend.close()
+    run(go())
+
+
+# --- checkpoints ------------------------------------------------------------
+
+def test_checkpoint_ephemeral_save_writes_nothing_and_calls_no_rank(tmp_path):
+    async def go():
+        backend, ranks, handle = wired()
+        root = tmp_path / "sampler_weights" / "e1"
+        root.mkdir(parents=True)
+        await backend.save_checkpoint(handle, root, step=None, persist=False)
+        assert files_under(tmp_path) == set() and ranks.saves == []
+        await backend.close()
+    run(go())
+
+
+def test_checkpoint_save_writes_the_three_files_under_the_root_as_one_barrier(tmp_path):
+    async def go():
+        backend, ranks, handle = wired()
+        root = tmp_path / "weights" / "c1"
+        root.mkdir(parents=True)
+        ranks.hold_save = asyncio.Event()
+        save = asyncio.create_task(backend.save_checkpoint(handle, root, step=1))
+        await asyncio.sleep(0.02)
+        fwd = asyncio.create_task(backend.forward_backward(handle, [ce_datum([1, 2])], "cross_entropy"))
+        await asyncio.sleep(0.02)
+        assert ranks.passes == [], "a pass waits behind the save barrier"
+        ranks.hold_save.set()
+        await save
+        assert (await fwd)["loss"] == 2.0
+        assert ranks.saves == [root]
+        assert files_under(tmp_path) == {"weights/c1/hf_adapter/adapter_model.safetensors",
+                                         "weights/c1/hf_adapter/adapter_config.json",
+                                         "weights/c1/optimizer/adamw.safetensors"}
+        await backend.close()
+    run(go())
+
+
+def test_checkpoint_save_on_a_rank_fault_releases_the_group(tmp_path):
+    async def go():
+        backend, ranks, handle = wired()
+        root = tmp_path / "weights" / "c1"
+        root.mkdir(parents=True)
+        ranks.hold_save = asyncio.Event()
+        ranks.hold_save.set()
+        ranks.save_state = _raise(RuntimeError("CUDA error"))
+        with pytest.raises(BackendError, match="released"):
+            await backend.save_checkpoint(handle, root, step=1)
+        await until_stopped(ranks)
+    run(go())
+
+
+def _raise(exc):
+    async def fail(*args):
+        raise exc
+    return fail
+
+
+def test_checkpoint_load_refuses_a_root_without_adapter_or_for_another_lora(tmp_path):
+    async def go():
+        backend, ranks, handle = wired(tmp_path)
+        empty = tmp_path / "weights" / "empty"
+        empty.mkdir(parents=True)
+        with pytest.raises(BackendError, match="holds no hf_adapter/adapter_model.safetensors"):
+            await backend.load_checkpoint(handle, empty)
+        cases = (({**ADAPTER_CONFIG, "r": 4}, r"r: 4 vs 8"),
+                 ({**ADAPTER_CONFIG, "lora_alpha": 32}, r"lora_alpha: 32 vs 16"),
+                 ({**ADAPTER_CONFIG, "target_modules": ["q_proj", "v_proj"]}, r"target_modules: .*v_proj"),
+                 ({"peft_type": "LORA", "r": 8}, r"lora_alpha: absent"),
+                 # the wrong type is a mismatch that names the field, never a crash
+                 ({**ADAPTER_CONFIG, "r": 8.5}, r"r: 8\.5 vs 8"),
+                 ({**ADAPTER_CONFIG, "r": "abc"}, r"r: 'abc' vs 8"),
+                 ({**ADAPTER_CONFIG, "r": True}, r"r: True vs 8"),
+                 ({**ADAPTER_CONFIG, "lora_alpha": None}, r"lora_alpha: None vs 16"),
+                 ({**ADAPTER_CONFIG, "target_modules": None}, r"target_modules: None vs"),
+                 ({**ADAPTER_CONFIG, "target_modules": "q_proj"}, r"target_modules: 'q_proj' vs"),
+                 ([1, 2], r"adapter_config.json is not a JSON object"))
+        for i, (config, field) in enumerate(cases):
+            root = write_root(tmp_path / "weights" / f"other{i}", config)
+            with pytest.raises(BackendError, match=f"another LoRA \\({field}"):
+                await backend.load_checkpoint(handle, root)
+        assert ranks.loads == [] and handle.weight_version == 0
+        fits = write_root(tmp_path / "weights" / "fits")
+        await backend.load_checkpoint(handle, fits)   # the model is still usable
+        assert ranks.loads == [(fits / "hf_adapter", None)]
+        # the float 16.0 names the same alpha
+        await backend.load_checkpoint(handle, write_root(tmp_path / "weights" / "float", {**ADAPTER_CONFIG, "lora_alpha": 16.0}))
+        assert len(ranks.loads) == 2
+        assert (await backend.forward(handle, [ce_datum([1, 2, 3])], "cross_entropy"))["loss"] == 3.0
+        await backend.close()
+    run(go())
+
+
+def test_checkpoint_load_refuses_keys_that_do_not_fit_and_keeps_the_group(tmp_path):
+    async def go():
+        backend, ranks, handle = wired(tmp_path)
+        root = write_root(tmp_path / "weights" / "c1")
+        ranks.fault = StateMismatch("adapter keys are not this model's LoRA parameters: 2 missing")
+        with pytest.raises(BackendError, match="does not fit this model: adapter keys"):
+            await backend.load_checkpoint(handle, root)
+        assert not ranks.stopped and handle.weight_version == 0
+        ranks.fault = RuntimeError("CUDA error")
+        with pytest.raises(BackendError, match="released"):
+            await backend.load_checkpoint(handle, root)
+        await until_stopped(ranks)
+    run(go())
+
+
+def test_checkpoint_load_with_optimizer_needs_optimizer_state(tmp_path):
+    async def go():
+        backend, ranks, handle = wired(tmp_path)
+        foreign = write_root(tmp_path / "weights" / "foreign", optimizer=False)
+        with pytest.raises(BackendError, match="carries no optimizer state"):
+            await backend.load_checkpoint(handle, foreign, optimizer=True)
+        assert ranks.loads == [] and handle.weight_version == 0
+        await backend.load_checkpoint(handle, foreign, optimizer=False)
+        assert ranks.loads == [(foreign / "hf_adapter", None)]
+        own = write_root(tmp_path / "weights" / "own")
+        await backend.load_checkpoint(handle, own, optimizer=True)
+        assert ranks.loads[-1] == (own / "hf_adapter", own / "optimizer")
+        await backend.close()
+    run(go())
+
+
+def test_checkpoint_load_publishes_the_next_version_before_it_returns(tmp_path, routed):
+    async def go():
+        vllm = Vllm()
+        backend, ranks, handle = wired(tmp_path, vllm)
+        await backend.prepare_for_generation(handle)   # v0 is in vLLM
+        root = write_root(tmp_path / "weights" / "c1")
+        await backend.load_checkpoint(handle, root)
+        assert handle.weight_version == 1 and handle.generation_synced_version == 1
+        assert ranks.exports[-1] == tmp_path / "adapters" / "v1" and set(vllm.loaded) == {"m@v1"}
+        assert vllm.unloaded == ["m@v0"] and handle.loaded_versions == [1]
+        res = await backend.sample(handle, "r", [1], 1, SP)
+        assert res["weight_version"] == 1 and res["latest_weight_version"] == 1
+        assert res["sequences"][0]["tokens"] == [1, 7]
+        # a model whose v0 was never published: the load publishes v1 only
+        vllm2 = Vllm()
+        backend2, ranks2, handle2 = wired(tmp_path, vllm2)
+        await backend2.load_checkpoint(handle2, root)
+        assert handle2.weight_version == 1 and set(vllm2.loaded) == {"m@v1"} and vllm2.unloaded == []
+        await backend.close()
+        await backend2.close()
+    run(go())
+
+
+def test_checkpoint_load_whose_publish_fails_reports_the_load_as_done(tmp_path, routed):
+    async def go():
+        vllm = Vllm(fail_load=True)
+        backend, ranks, handle = wired(tmp_path, vllm)
+        root = write_root(tmp_path / "weights" / "c1")
+        with pytest.raises(BackendError, match=r"loaded \(weights at v1\).*500"):
+            await backend.load_checkpoint(handle, root)
+        assert ranks.loads == [(root / "hf_adapter", None)] and handle.weight_version == 1
+        assert not ranks.stopped, "a vLLM fault is not the group's"
+        vllm.fail_load = False
+        assert (await backend.sample(handle, "r", [1], 1, SP))["weight_version"] == 1
+        await backend.close()
+    run(go())
+
+
+def test_external_weights_export_leaves_the_adapter_at_the_root(tmp_path):
+    async def go():
+        backend, ranks, handle = wired()
+        root = tmp_path / "external_weights" / "x"
+        root.mkdir(parents=True)
+        await backend.export_external_weights(handle, root, step=1)
+        assert ranks.saves == [root / ".native"]
+        assert files_under(root) == {"adapter_model.safetensors", "adapter_config.json"}
         await backend.close()
     run(go())

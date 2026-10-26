@@ -3,7 +3,7 @@
 Needs >= 4 GPUs, the Automodel training env and the model in the HF cache;
 starts its own Ray instance. Skipped elsewhere.
 
-Run on a GPU pod (about 4.5 minutes for the 5 tests):
+Run on a GPU pod (about 7 minutes for the 6 tests):
   KX_TIMEOUT=1700 scripts/pod_pytest.sh <pod> tests/gpu/test_automodel_worker.py -v
 
 When extending: a worker subclass defined at this module's top level fails to
@@ -21,7 +21,9 @@ import torch  # noqa: E402
 if torch.cuda.device_count() < 4:
     pytest.skip("needs >= 4 GPUs", allow_module_level=True)
 
+from tinkercloud.training.backends.automodel.adapter import OPTIMIZER_DIRNAME, OPTIMIZER_FILE, peft_key  # noqa: E402
 from tinkercloud.training.backends.automodel.converter import coalesce, convert_request, row_sums, shard  # noqa: E402
+from tinkercloud.training.checkpoints import interchange as ci  # noqa: E402
 from tinkercloud.training.backends.automodel.lora import LoraSpec, lora_spec  # noqa: E402
 from tinkercloud.training.backends.automodel.worker import AutomodelWorker  # noqa: E402
 from tinkercloud.training.backends.automodel.errors import NonFiniteGradNorm  # noqa: E402
@@ -202,3 +204,55 @@ def with_weight(batch, w):
     from dataclasses import replace
     weights = batch.inputs["weights"]
     return replace(batch, inputs={**batch.inputs, "weights": torch.where(weights != 0, torch.full_like(weights, w), weights)})
+
+
+def test_checkpoint_round_trip_restores_weights_and_optimizer(tmp_path):
+    """save_state after one step; a fresh group that loads weights and
+    optimizer reproduces the weights exactly and the next step to 1e-6; one
+    that loads weights only takes a different next step (fresh Adam moments)."""
+    from safetensors.torch import load_file
+
+    x, _ = requests()
+    batch = coalesce([x], 2)
+    root = tmp_path / "ckpt"
+    grp = Group(2, 2)
+    try:
+        grp.fwd_bwd(batch)
+        grp.optim(ADAM)
+        grp.call("save_state", same=(str(root),))
+        s1 = grp.lora()
+        grp.fwd_bwd(batch)
+        grp.optim(ADAM)
+        s2 = grp.lora()                     # the uninterrupted second step
+    finally:
+        grp.kill()
+    adapter = ci.find_hf_adapter(str(root))
+    assert adapter is not None
+    saved = load_file(f"{adapter}/{ci.ADAPTER_WEIGHTS_FILE}")
+    assert set(saved) == {peft_key(k) for k in s1}
+    assert all(saved[peft_key(k)].dtype == torch.float32 and torch.equal(saved[peft_key(k)], s1[k]) for k in s1)
+    assert (root / OPTIMIZER_DIRNAME / OPTIMIZER_FILE).is_file()
+
+    grp = Group(2, 2)
+    try:
+        grp.call("load_state", same=(adapter, str(root / OPTIMIZER_DIRNAME)))
+        r1 = grp.lora()
+        assert all(torch.equal(r1[k], s1[k]) for k in s1)
+        grp.fwd_bwd(batch)
+        grp.optim(ADAM)
+        r2 = grp.lora()
+    finally:
+        grp.kill()
+    for k in s2:
+        torch.testing.assert_close(r2[k], s2[k], atol=1e-6, rtol=0)
+
+    grp = Group(2, 2)
+    try:
+        grp.call("load_state", same=(adapter, None))
+        grp.fwd_bwd(batch)
+        grp.optim(ADAM)
+        w2 = grp.lora()
+    finally:
+        grp.kill()
+    b_names = [k for k in s2 if ".lora_B." in k]
+    assert any(not torch.allclose(w2[k], s2[k], atol=1e-6, rtol=0) for k in b_names)
