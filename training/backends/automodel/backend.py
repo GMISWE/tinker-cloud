@@ -18,6 +18,14 @@ version published when it was submitted and reports it; an older version is
 unloaded once no sample of it is in flight. The export is a barrier on the
 group (no pass may change the weights during the gather).
 
+Checkpoints: a save writes the interchange adapter and the
+LoRA parameters' AdamW state under the root the store hands over, as a barrier
+on the group; an ephemeral sampler save writes nothing (vLLM holds the version
+a sampler pins). A load checks the adapter config against the model's LoRA,
+copies the adapter into the ranks, restores the optimizer state only when
+asked and only whole, and publishes the loaded weights as the next adapter
+version, so no version name is reused.
+
 Faults: a non-finite grad norm fails that optimizer step only; the grads were
 zeroed on every rank and the group goes on (R10). Any other failure inside a
 rank call is the group's: its actors and bundles are released, the queued
@@ -36,6 +44,7 @@ from typing import Any, Dict, List, Optional, Set
 import httpx
 import torch
 
+from ...checkpoints.interchange import ADAPTER_CONFIG_FILE, ADAPTER_WEIGHTS_FILE, HF_ADAPTER_DIRNAME, find_hf_adapter, read_adapter_config
 from ...core.loss_registry import clip_thresholds
 from ...models.requests import AdamParams, Datum, LoraConfig
 from ...utils.model_config import model_context_length, read_raw_hf_config
@@ -44,11 +53,12 @@ from ..common.sampling.generation import sample_over_http
 from ..common.sampling.vllm_client import VllmLoraClient
 from ..http_pool import HttpClientPool
 from ..objectives import classification_spec
+from .adapter import OPTIMIZER_DIRNAME, OPTIMIZER_FILE
 from .config import AutomodelConfig
 from .converter import Batch, LossFn, RequestRows, coalesce, convert_request, row_sums, shard, split_rows
-from .errors import NonFiniteGradNorm
+from .errors import NonFiniteGradNorm, StateMismatch
 from .group import TrainingGroup, sweep_leftovers
-from .lora import LoraSpec, lora_spec, tenant_seed
+from .lora import LoraSpec, lora_spec, spec_mismatch, tenant_seed
 from .sampler import MAX_LOGPROBS, SamplerGroup
 from .scheduler import GroupScheduler, PassKey, pass_key
 
@@ -450,18 +460,76 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    # --- not in this build -----------------------------------------------
-    @staticmethod
-    def _not_served(op: str, what: str) -> BackendError:
-        return BackendError(f"{op} is not served by this build of the automodel backend ({what})",
-                            backend=BACKEND, operation=op)
-
+    # --- checkpoints ------------------------------------------------------
     async def save_checkpoint(self, handle: AutomodelHandle, root: Path, step: Optional[int] = None,
                               persist: bool = True) -> None:
-        raise self._not_served("save_checkpoint", "no checkpoint writer")
+        """Rank 0 writes the interchange adapter (`hf_adapter/`) and the AdamW
+        state of the LoRA parameters (`optimizer/`) under `root`, as a barrier
+        on the group. An ephemeral sampler save writes nothing: vLLM holds the
+        version the sampler pins."""
+        if not persist:
+            return
+        group = self._live_group(handle, "save_checkpoint")
+
+        async def save() -> None:
+            try:
+                await group.ranks.save_state(root)
+            except Exception as e:
+                self._mark_lost(group, f"save_state failed on a rank: {e!r}")
+                raise BackendError("save_checkpoint failed; the training group was released",
+                                   backend=BACKEND, operation="save_checkpoint", original_error=e) from e
+
+        await group.scheduler.submit_barrier(handle.model_id, save)
+        logger.info("model %s: checkpoint of v%d written under %s", handle.model_id, handle.weight_version, root)
 
     async def load_checkpoint(self, handle: AutomodelHandle, root: Path, optimizer: bool = False) -> None:
-        raise self._not_served("load_checkpoint", "no checkpoint reader")
+        """Copy the adapter under `root` into the ranks and, when asked, the
+        AdamW state: restored whole or refused. The loaded weights are
+        published to vLLM as the next version."""
+        adapter = find_hf_adapter(str(root))
+        if adapter is None:
+            raise BackendError(f"checkpoint {root} holds no {HF_ADAPTER_DIRNAME}/{ADAPTER_WEIGHTS_FILE}",
+                               backend=BACKEND, operation="load_checkpoint")
+        config = read_adapter_config(str(root))
+        if config is None:
+            raise BackendError(f"checkpoint {root} has no readable {HF_ADAPTER_DIRNAME}/{ADAPTER_CONFIG_FILE}",
+                               backend=BACKEND, operation="load_checkpoint")
+        assert handle.lora is not None
+        mismatch = spec_mismatch(config, handle.lora)
+        if mismatch is not None:
+            raise BackendError(f"checkpoint {root} was saved for another LoRA ({mismatch})",
+                               backend=BACKEND, operation="load_checkpoint")
+        optimizer_dir = root / OPTIMIZER_DIRNAME if optimizer else None
+        if optimizer_dir is not None and not (optimizer_dir / OPTIMIZER_FILE).is_file():
+            raise BackendError(
+                f"checkpoint {root} carries no optimizer state ({OPTIMIZER_DIRNAME}/{OPTIMIZER_FILE}): load it with "
+                "optimizer=false, or resume from a checkpoint the automodel backend wrote",
+                backend=BACKEND, operation="load_checkpoint")
+        group = self._live_group(handle, "load_checkpoint")
+
+        async def load() -> None:
+            try:
+                await group.ranks.load_state(Path(adapter), optimizer_dir)
+            except StateMismatch as e:   # refused on every rank before any copy; the group is intact
+                raise BackendError(f"checkpoint {root} does not fit this model: {e}",
+                                   backend=BACKEND, operation="load_checkpoint") from e
+            except Exception as e:
+                self._mark_lost(group, f"load_state failed on a rank: {e!r}")
+                raise BackendError("load_checkpoint failed; the training group was released",
+                                   backend=BACKEND, operation="load_checkpoint", original_error=e) from e
+            handle.weight_version += 1
+            try:
+                await self._publish(group, handle)
+            except BackendError as e:
+                raise BackendError(
+                    f"the checkpoint was loaded (weights at v{handle.weight_version}) but the adapter could not "
+                    f"be published to vLLM: {e}", backend=BACKEND, operation="load_checkpoint") from e
+
+        await group.scheduler.submit_barrier(handle.model_id, load)
+        await self._retire(handle)
+        logger.info("model %s: loaded %s from %s; the weights are v%d", handle.model_id,
+                    "weights and optimizer state" if optimizer else "weights (the optimizer keeps its state)",
+                    root, handle.weight_version)
 
 
 def _per_request(batch: Batch, outs: List[Dict[str, torch.Tensor]]) -> List[Dict[str, Any]]:

@@ -8,6 +8,9 @@ results in rank order. Each call is one Tinker primitive; there is no training
 loop here (Automodel's recipe owns its loop, Tinker's client owns this one):
   forward_backward  runs now and returns the real loss; grads accumulate (R9)
   optim_step        writes the request's AdamParams, clips, steps (R11)
+  save_state        gathers the LoRA weights and AdamW state; rank 0 writes
+  load_state        copies a checkpoint's weights, and its AdamW state when
+                    asked, into every rank's shard
 
 Lockstep: FSDP2 runs collectives in every forward and backward, so every rank
 must run the same number of them. shard() gives each rank the same row count
@@ -21,7 +24,7 @@ import hashlib
 import math
 import socket
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import ray
 import torch
@@ -31,13 +34,15 @@ from nemo_automodel.components._peft.lora import PeftConfig
 from nemo_automodel.components.distributed.config import DistributedSetup
 from nemo_automodel.components.distributed.mesh import ParallelismSizes
 from nemo_automodel.components.training.utils import clip_grad_norm
+from safetensors.torch import load_file
 from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor, distribute_tensor
 
+from ...checkpoints.interchange import ADAPTER_WEIGHTS_FILE, HF_ADAPTER_DIRNAME
 from ...models.requests import AdamParams
-from .adapter import write_peft_adapter
+from .adapter import ADAM_STATE_KEYS, OPTIMIZER_DIRNAME, peft_key, read_adam_state, write_adam_state, write_peft_adapter
 from .converter import Batch
-from .errors import NonFiniteGradNorm
+from .errors import NonFiniteGradNorm, StateMismatch
 from .losses import compute_loss
 from .lora import LoraSpec
 
@@ -125,8 +130,62 @@ class AutomodelWorker:
     def lora_state(self) -> Dict[str, torch.Tensor]:
         """The full fp32 LoRA weights on CPU, on every rank. Gathers the
         shards: call it on all ranks at once."""
-        return {n: (p.full_tensor() if isinstance(p, DTensor) else p).detach().float().cpu()
-                for n, p in self.lora_params}
+        return {n: _full(p).float() for n, p in self.lora_params}
+
+    def save_state(self, root: str) -> None:
+        """Rank 0 writes the adapter (`hf_adapter/`) and the AdamW state of the
+        LoRA parameters (`optimizer/`) under `root` (adapter.py). Both gathers
+        are collective: call it on all ranks at once."""
+        lora = self.lora_state()
+        adam = self._adam_state()
+        if self.rank == 0:
+            write_peft_adapter(lora, self.lora, self.base_model, Path(root) / HF_ADAPTER_DIRNAME)
+            write_adam_state(adam, Path(root) / OPTIMIZER_DIRNAME)
+
+    def _adam_state(self) -> Dict[str, Dict[str, torch.Tensor]]:
+        """The full AdamW moments and step per LoRA parameter on CPU, keyed as
+        the adapter is; empty until the first step. torch's Adam creates a
+        parameter's state at its first step with a grad (`torch/optim/adam.py`,
+        `if p.grad is not None`), so the state is all or none here, every LoRA
+        parameter being in the forward path; a partial state is a bug and is
+        refused, never written."""
+        stepped = [p in self.optimizer.state for _, p in self.lora_params]
+        if any(stepped) and not all(stepped):
+            raise RuntimeError(f"AdamW holds state for {sum(stepped)} of {len(stepped)} LoRA parameters; "
+                               "a checkpoint of it would be partial")
+        return {peft_key(n): {k: _full(self.optimizer.state[p][k]) for k in ADAM_STATE_KEYS}
+                for n, p in self.lora_params if p in self.optimizer.state}
+
+    def load_state(self, adapter_dir: str, optimizer_dir: Optional[str]) -> None:
+        """Copy the adapter's weights into this rank's shards and, given
+        optimizer_dir, the AdamW state; without it the optimizer keeps what it
+        has (fresh on a model that has not trained). The files' keys must
+        be exactly this model's LoRA parameters: StateMismatch before anything
+        is copied. Collective: call it on all ranks at once."""
+        weights = load_file(str(Path(adapter_dir) / ADAPTER_WEIGHTS_FILE))
+        self._require_keys(weights, "adapter")
+        adam = None if optimizer_dir is None else read_adam_state(Path(optimizer_dir))
+        if adam:
+            self._require_keys(adam, "optimizer state")
+        with torch.no_grad():
+            for n, p in self.lora_params:
+                _copy_full(p, weights[peft_key(n)].float())
+        if adam is None:
+            return
+        for n, p in self.lora_params:
+            if not adam:   # saved before the first step: no state to restore
+                self.optimizer.state.pop(p, None)
+                continue
+            st = adam[peft_key(n)]
+            self.optimizer.state[p] = {"exp_avg": _like(p, st["exp_avg"]), "exp_avg_sq": _like(p, st["exp_avg_sq"]),
+                                       "step": st["step"].clone()}
+
+    def _require_keys(self, have: Dict[str, Any], what: str) -> None:
+        want = {peft_key(n) for n, _ in self.lora_params}
+        missing, unknown = sorted(want - set(have)), sorted(set(have) - want)
+        if missing or unknown:
+            raise StateMismatch(f"{what} keys are not this model's LoRA parameters: {len(missing)} missing "
+                                f"(first: {missing[:1]}), {len(unknown)} unknown (first: {unknown[:1]})")
 
     def export_adapter(self, dest: str) -> None:
         """Write the HF PEFT adapter at `dest` (adapter.py). The gather is
@@ -198,8 +257,26 @@ def _init_lora(params, seed: int) -> None:
         else:
             full.zero_()
         with torch.no_grad():
-            if isinstance(p, DTensor):
-                local = distribute_tensor(full.to(p.to_local().device), p.device_mesh, p.placements).to_local()
-                p.to_local().copy_(local)
-            else:
-                p.copy_(full)
+            _copy_full(p, full)
+
+
+def _full(t: torch.Tensor) -> torch.Tensor:
+    """The whole tensor on CPU; collective for a DTensor."""
+    return (t.full_tensor() if isinstance(t, DTensor) else t).detach().cpu()
+
+
+def _like(p: torch.Tensor, full: torch.Tensor) -> torch.Tensor:
+    """`full` laid out as `p` is: this rank's shard of a DTensor, else on p's device."""
+    if isinstance(p, DTensor):
+        return distribute_tensor(full.to(p.to_local().device), p.device_mesh, p.placements)
+    return full.to(p.device)
+
+
+def _copy_full(p: torch.Tensor, full: torch.Tensor) -> None:
+    """Copy `full` into `p` in place; a DTensor takes its own slice."""
+    if isinstance(p, DTensor):
+        local = _like(p, full)
+        assert isinstance(local, DTensor)
+        p.to_local().copy_(local.to_local())
+    else:
+        p.copy_(full)

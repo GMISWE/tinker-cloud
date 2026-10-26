@@ -1,12 +1,13 @@
 """AutomodelBackend on real GPUs (Qwen2.5-0.5B-Instruct, LoRA rank 8): one
 tenant's lifecycle through the backend, training and sampling through its
-vLLM with versioned adapters (R4, D20), and the leftover sweep (R5).
+vLLM with versioned adapters, the leftover sweep, and a checkpoint round
+trip through fresh models.
 
 Needs >= 3 GPUs (2 ranks + vLLM), the Automodel training env with
 /opt/vllm-env, and the model in the HF cache; starts its own Ray instance.
 Skipped elsewhere.
 
-Run on a GPU pod (about 5 minutes; vLLM boots in ~2):
+Run on a GPU pod (about 13 minutes; vLLM boots in ~2, three times for the round trip):
   KX_TIMEOUT=1700 scripts/pod_pytest.sh <pod> tests/gpu/test_automodel_backend.py -v
 
 HF_HUB_OFFLINE is set before huggingface_hub loads: create_model reads the
@@ -24,6 +25,7 @@ import re  # noqa: E402
 import socket  # noqa: E402
 import time  # noqa: E402
 
+import httpx  # noqa: E402
 import pytest  # noqa: E402
 
 pytest.importorskip("nemo_automodel", reason="needs the Automodel training env")
@@ -188,3 +190,76 @@ def test_sweep_removes_leftover_actors_and_placement_groups():
     wait_until(lambda: not am_actors("am-stale"))
     assert pg_states("am-stale") == {"REMOVED"}
     assert sweep_leftovers() == 0
+
+
+def vllm_models(url):
+    return {m["id"] for m in httpx.get(f"{url}/v1/models", timeout=10).json()["data"]}
+
+
+def test_checkpoint_round_trip_through_fresh_models(tmp_path):
+    """Save after one step, delete, create afresh: a weights-only load scores
+    the saved loss and publishes v1 to vLLM; a load with the optimizer
+    reproduces the uninterrupted run's next step, which a weights-only load
+    does not."""
+    x = datums((37, 64, 5))
+    root = tmp_path / "weights" / "c1"
+    root.mkdir(parents=True)
+
+    async def model(name):
+        h = await backend.create_model(name, f"req-{name}", MODEL, num_gpus=2, lora_config=LORA,
+                                       native_root=tmp_path / f"native-{name}")
+        routing.table.publish(name, routing.InferenceEndpoint(h.inference_endpoints))
+        return h
+
+    async def drop(h):
+        await backend.delete_model(h)
+        routing.table.withdraw(h.model_id)
+
+    async def loss(h):
+        return (await backend.forward(h, x, "cross_entropy"))["loss"]
+
+    async def step(h):
+        await backend.forward_backward(h, x, "cross_entropy")
+        await backend.apply_optimizer_step(h, 1e-3, ADAM)
+
+    async def go():
+        h = await model("m")
+        try:
+            await step(h)
+            l1 = await loss(h)
+            await backend.save_checkpoint(h, root, step=1)
+            assert {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()} == {
+                "hf_adapter/adapter_model.safetensors", "hf_adapter/adapter_config.json", "optimizer/adamw.safetensors"}
+            await step(h)
+            l2 = await loss(h)                  # the uninterrupted second step
+        finally:
+            await drop(h)
+
+        h2 = await model("m2")
+        try:
+            await backend.load_checkpoint(h2, root, optimizer=False)
+            assert h2.weight_version == 1 and h2.generation_synced_version == 1
+            assert "m2@v1" in vllm_models(h2.inference_endpoints[0])
+            assert await loss(h2) == pytest.approx(l1, rel=1e-3)
+            prompt = h2.tokenizer.encode("The capital of France is")
+            s = await backend.sample(h2, "s", prompt, 1, GREEDY)
+            assert s["weight_version"] == 1 and s["latest_weight_version"] == 1
+            await step(h2)
+            l2_weights_only = await loss(h2)
+        finally:
+            await drop(h2)
+
+        h3 = await model("m3")
+        try:
+            await backend.load_checkpoint(h3, root, optimizer=True)
+            assert h3.weight_version == 1
+            await step(h3)
+            l2_resumed = await loss(h3)
+        finally:
+            await drop(h3)
+        assert l2_resumed == pytest.approx(l2, rel=1e-3)
+        assert abs(l2_weights_only - l2) > 10 * abs(l2_resumed - l2), (l2, l2_resumed, l2_weights_only)
+        await backend.close()
+
+    backend = AutomodelBackend(overrides=CONFIG)
+    asyncio.run(go())
