@@ -1,6 +1,6 @@
 """Sampling contract (specs/016 task 2.8, API-CONTRACT S4-S7), driven by the SDK.
 
-Shape ported from SkyRL tests/tinker/test_api.py (stop tokens, stop strings).
+Shape ported from SkyRL's `tinker/test_api.py` (stop tokens, stop strings).
 The fake backend decodes token t as its decimal digits, space-joined, so stop
 strings are testable without a tokenizer. The context window comes from the
 model's own config.json (specs/025, D17): a fake model directory declares it.
