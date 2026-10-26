@@ -73,6 +73,7 @@ done
 
 # --- profile: case by base image (the two images' stacks are incompatible) --
 # Sets per-profile DEFAULTS; every one is overridable by the same-named env var.
+# shellcheck source=scripts/lib/cluster.sh
 . "$SCRIPT_DIR/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE
 BACKEND_ENV=""   # backend knobs exported to the server process (step 6)
 case "$PROFILE" in
@@ -170,12 +171,16 @@ trap 'rm -rf "$TMP"' EXIT
 
 # --- transport abstraction: CP <local> <remote-path>, EX "<script>" --------
 if [ "$TARGET" = k8s ]; then
+  require_tunnel
   CP() { kubectl -n "$NS" cp "$1" "$POD:$2"; }
   EX() { kubectl -n "$NS" exec "$POD" -- bash -c "$1"; }
   EX_TIMEOUT() { timeout 30 kubectl -n "$NS" exec "$POD" -- bash -c "$1" || true; }
 elif [ "$TARGET" = docker ]; then
+  # shellcheck disable=SC2086  # DOCKER may carry words ("sg docker -c")
   CP() { $DOCKER cp "$1" "$CONTAINER:$2"; }
+  # shellcheck disable=SC2086
   EX() { $DOCKER exec "$CONTAINER" bash -c "$1"; }
+  # shellcheck disable=SC2086
   EX_TIMEOUT() { timeout 30 $DOCKER exec "$CONTAINER" bash -c "$1" || true; }
 else
   echo "unknown --target $TARGET"; exit 1
@@ -279,7 +284,7 @@ EOF
     $DOCKER run -d --name "$CONTAINER" --init --gpus all --network host \
       --shm-size=32g -v "$DATA_DIR:/data" \
       -e PYTHONUNBUFFERED=1 -e TOKENIZERS_PARALLELISM=false \
-      -e TINKER_API_KEY=tml-dev-key -e TINKERCLOUD_BACKEND=$BACKEND \
+      -e TINKER_API_KEY=tml-dev-key -e TINKERCLOUD_BACKEND="$BACKEND" \
       -e ALLOW_PARTIAL_BATCHES=true -e HF_HOME=/data/.cache/huggingface \
       -e CUDA_DEVICE_MAX_CONNECTIONS=1 -e NCCL_NVLS_ENABLE=0 \
       -e NCCL_IGNORE_DISABLED_P2P=1 \
