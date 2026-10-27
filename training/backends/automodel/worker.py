@@ -9,9 +9,11 @@ tenant's shard, grads and AdamW state wait in a pinned-CPU slot. An op of a
 non-live tenant swaps it in first: the live tenant's state is copied into its
 slot, then the requested tenant's slot is copied into the model's tensors.
 Both are `copy_()` on the local shard, no collective. Grads and the optimizer
-state move with the tenant, so passes of several tenants interleave freely
-and each tenant computes exactly what it would compute alone. Export and save
-read a slot without swapping it in; a load swaps the tenant in and writes.
+state move with the tenant, and the LoRA modules take the tenant's dropout
+(the shapes are the group's, the dropout is each tenant's), so passes of
+several tenants interleave freely and each tenant computes exactly what it
+would compute alone. Export and save read a slot without swapping it in; a
+load swaps the tenant in and writes.
 
 The driver calls every rank with the same method at once and gathers the
 results in rank order. Each call is one Tinker primitive; there is no training
@@ -44,7 +46,7 @@ import ray
 import torch
 import torch.distributed as dist
 from nemo_automodel import NeMoAutoModelForCausalLM
-from nemo_automodel.components._peft.lora import PeftConfig
+from nemo_automodel.components._peft.lora import LinearLoRA, PeftConfig
 from nemo_automodel.components.distributed.config import DistributedSetup
 from nemo_automodel.components.distributed.mesh import ParallelismSizes
 from nemo_automodel.components.training.utils import clip_grad_norm
@@ -84,6 +86,7 @@ class AutomodelWorker:
         self.micro_batch_rows = micro_batch_rows
         self.live: Optional[str] = None       # the tenant in the model's LoRA tensors
         self.slots: Dict[str, _Slot] = {}     # every other tenant
+        self.tenant_lora: Dict[str, LoraSpec] = {}   # each tenant's spec: the group's signature, its own dropout
 
     def rendezvous_address(self) -> str:
         assert self.rank == 0, "rank 0 hosts the rendezvous"
@@ -117,24 +120,30 @@ class AutomodelWorker:
             torch_dtype=torch.bfloat16, use_liger_kernel=False)
         self.lora_params = [(n, p) for n, p in self.model.named_parameters() if p.requires_grad]
         _check_targets(self.lora_params, self.lora.target_modules)
+        self.lora_modules = [m for m in self.model.modules() if isinstance(m, LinearLoRA)]
+        assert self.lora_modules, "the model has LoRA parameters but no LoRA module"
         # lr, betas, eps and weight_decay are rewritten from each request's AdamParams
         # before every step (R11); the constructor's values are never used
         self.optimizer = torch.optim.AdamW([p for _, p in self.lora_params])
         return sum(p.numel() for _, p in self.lora_params)
 
     # --- tenants ---------------------------------------------------------
-    def add_tenant(self, tenant: str, seed: int) -> None:
-        """Make `tenant` live with a freshly initialised adapter. The
-        tenant that was live goes to its slot first, so a failure here leaves
-        every other tenant intact."""
+    def add_tenant(self, tenant: str, lora: LoraSpec, seed: int) -> None:
+        """Make `tenant` live with a freshly initialised adapter. `lora` has
+        the group's signature and the tenant's dropout. The tenant that was
+        live goes to its slot first, so a failure here leaves every other
+        tenant intact."""
         if tenant == self.live or tenant in self.slots:
             raise ValueError(f"tenant {tenant} is already in this group")
+        assert lora.signature == self.lora.signature, (lora, self.lora)
         self._stash_live()
         self.live = None
         _init_lora(self.lora_params, seed)
         for _, p in self.lora_params:
             p.grad = None
             self.optimizer.state.pop(p, None)
+        self.tenant_lora[tenant] = lora
+        self._set_dropout(lora.dropout)
         self.live = tenant
 
     def remove_tenant(self, tenant: str) -> None:
@@ -146,6 +155,11 @@ class AutomodelWorker:
             del self.slots[tenant]
         else:
             raise ValueError(f"tenant {tenant} is not in this group")
+        del self.tenant_lora[tenant]
+
+    def _set_dropout(self, p: float) -> None:
+        for m in self.lora_modules:
+            m.dropout_p = p
 
     def _swap_to(self, tenant: str) -> float:
         """Make `tenant` live; returns the seconds it took (0 when it was)."""
@@ -179,6 +193,7 @@ class AutomodelWorker:
                     state[p] = {"exp_avg": _on_device(p, adam["exp_avg"]), "exp_avg_sq": _on_device(p, adam["exp_avg_sq"]),
                                 "step": adam["step"].clone()}
         torch.cuda.synchronize()
+        self._set_dropout(self.tenant_lora[tenant].dropout)
         self.live = tenant
         return time.perf_counter() - started
 
@@ -220,6 +235,7 @@ class AutomodelWorker:
         self.model.eval()
         with torch.no_grad():
             out = self._run(shard, clip, backward=False)
+        _reshard(self.model)
         out["swap_seconds"] = swap
         return out
 
@@ -284,7 +300,7 @@ class AutomodelWorker:
         lora = self.lora_state(tenant)
         adam = self._adam_state(tenant)
         if self.rank == 0:
-            write_peft_adapter(lora, self.lora, self.base_model, Path(root) / HF_ADAPTER_DIRNAME)
+            write_peft_adapter(lora, self.tenant_lora[tenant], self.base_model, Path(root) / HF_ADAPTER_DIRNAME)
             write_adam_state(adam, Path(root) / OPTIMIZER_DIRNAME)
 
     def load_state(self, tenant: str, adapter_dir: str, optimizer_dir: Optional[str]) -> None:
@@ -326,7 +342,7 @@ class AutomodelWorker:
         once; rank 0 writes."""
         state = self.lora_state(tenant)
         if self.rank == 0:
-            write_peft_adapter(state, self.lora, self.base_model, Path(dest))
+            write_peft_adapter(state, self.tenant_lora[tenant], self.base_model, Path(dest))
 
     def _run(self, shard: Batch, clip: Optional[Tuple[float, float]], backward: bool) -> Dict[str, Any]:
         rows, width = shard.input_ids.shape
@@ -352,6 +368,19 @@ class AutomodelWorker:
             out["elementwise"][start:end, :w] = res.elementwise.cpu()
             out["clamped"][start:end] = res.clamped.cpu()
         return out
+
+
+def _reshard(model: torch.nn.Module) -> None:
+    """Free the unsharded parameter copies a forward without a backward
+    leaves in FSDP2 units. While they exist, `model.parameters()` yields
+    them instead of the sharded parameters: the next optimizer step's grad
+    norm skips them (they carry no grad), and the next forward of another
+    tenant would read them, which hold the weights of the tenant that ran.
+    A backward reshards on its own. Pinned by the GPU test
+    `test_tenant_eval_forward_in_between_leaves_the_step_and_the_scores_solo`."""
+    for m in model.modules():
+        if isinstance(m, FSDPModule):
+            m.reshard()
 
 
 def _micro_batch(shard: Batch, start: int, end: int) -> Batch:

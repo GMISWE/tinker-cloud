@@ -79,9 +79,9 @@ class TrainingGroup:
             await self.stop()
             raise
 
-    async def add_tenant(self, tenant: str, seed: int) -> None:
-        """Every rank initialises the tenant's adapter from `seed` and makes it live."""
-        await self._all([w.add_tenant.remote(tenant, seed) for w in self.ranks])
+    async def add_tenant(self, tenant: str, lora: LoraSpec, seed: int) -> None:
+        """Every rank initialises the tenant's adapter from `seed` and makes it live, with the tenant's dropout."""
+        await self._all([w.add_tenant.remote(tenant, lora, seed) for w in self.ranks])
 
     async def remove_tenant(self, tenant: str) -> None:
         """Every rank drops the tenant's state; the group stays up."""

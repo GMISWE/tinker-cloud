@@ -36,16 +36,18 @@ SEED = 1234
 
 
 class Group:
-    """n ranks with the tenants {name: seed} added in order (the last one is
-    live); one tenant "t" by default. Every op names its tenant."""
+    """n ranks with the tenants {name: seed} or {name: (seed, LoraSpec)}
+    added in order (the last one is live); one tenant "t" with LORA by
+    default. Every op names its tenant."""
     def __init__(self, n, micro_batch_rows, tenants=None):
         cls = ray.remote(num_gpus=1, num_cpus=1)(AutomodelWorker)
         self.n = n
         self.ranks = [cls.remote(r, n, MODEL, LORA, micro_batch_rows) for r in range(n)]
         addr = ray.get(self.ranks[0].rendezvous_address.remote())
         self.trainable = ray.get([w.setup.remote(addr) for w in self.ranks])[0]
-        for name, seed in (tenants or {"t": SEED}).items():
-            self.call("add_tenant", before=(name, seed))
+        for name, spec in (tenants or {"t": SEED}).items():
+            seed, lora = spec if isinstance(spec, tuple) else (spec, LORA)
+            self.call("add_tenant", before=(name, lora, seed))
         self.last_swap = 0.0    # seconds the last pass or step spent swapping (the slowest rank)
 
     def call(self, method, per_rank=(), *, before=(), after=()):
@@ -333,6 +335,62 @@ def test_tenant_interleaved_passes_equal_the_solo_run_and_leave_the_other_untouc
         assert all(torch.equal(saved[peft_key(k)], init_b[k]) for k in init_b)
         assert load_file(str(tmp_path / "b" / OPTIMIZER_DIRNAME / OPTIMIZER_FILE)) == {}, "b has not stepped"
         assert shared.optim(ADAM, "b") == norm_b
+    finally:
+        shared.kill()
+
+
+def test_tenant_dropout_is_the_tenants_not_the_groups():
+    """b (dropout 0.5) shares a's group (dropout 0): after one step of b (B
+    is zero at init, so the LoRA branch dropout drops is zero until then),
+    two train passes of b on one batch score differently, two of a score
+    the same, and b's eval forwards score the same (no dropout in eval)."""
+    from dataclasses import replace
+
+    x, _ = requests()
+    bx = coalesce([x], 2)
+    shared = Group(2, 2, {"a": 1, "b": (2, replace(LORA, dropout=0.5))})
+    try:
+        shared.fwd_bwd(bx, tenant="b")
+        shared.optim(ADAM, "b")
+        b1 = shared.fwd_bwd(bx, tenant="b")["row_loss"]
+        b2 = shared.fwd_bwd(bx, tenant="b")["row_loss"]
+        assert not torch.equal(b1, b2), "b trains with its dropout"
+        a1 = shared.fwd_bwd(bx, tenant="a")["row_loss"]
+        a2 = shared.fwd_bwd(bx, tenant="a")["row_loss"]
+        assert torch.equal(a1, a2), "a trains without dropout, after b"
+        e1 = shared.fwd_bwd(bx, tenant="b", method="forward")["row_loss"]
+        e2 = shared.fwd_bwd(bx, tenant="b", method="forward")["row_loss"]
+        assert torch.equal(e1, e2), "eval has no dropout"
+    finally:
+        shared.kill()
+
+
+def test_tenant_eval_forward_in_between_leaves_the_step_and_the_scores_solo():
+    """After a step of A: forward(B), forward(A) scores A's weights, not the
+    copies B's forward left unsharded; fwd_bwd(A), forward(B), optim(A)
+    reports A's solo grad norm. (A must have stepped: at init B = 0 and every
+    tenant scores as the base model.)"""
+    x, _ = requests()
+    bx = coalesce([x], 2)
+    solo = Group(2, 2, {"a": 1})
+    try:
+        solo.fwd_bwd(bx, tenant="a")
+        norm_1 = solo.optim(ADAM, "a")
+        scores_a = solo.fwd_bwd(bx, method="forward", tenant="a")["row_loss"]
+        solo.fwd_bwd(bx, tenant="a")
+        norm_2 = solo.optim(ADAM, "a")
+    finally:
+        solo.kill()
+    shared = Group(2, 2, {"a": 1, "b": 2})
+    try:
+        shared.fwd_bwd(bx, tenant="a")
+        assert shared.optim(ADAM, "a") == norm_1
+        scores_b = shared.fwd_bwd(bx, method="forward", tenant="b")["row_loss"]
+        assert not torch.equal(scores_b, scores_a), "b is at init, a has stepped"
+        assert torch.equal(shared.fwd_bwd(bx, method="forward", tenant="a")["row_loss"], scores_a)
+        shared.fwd_bwd(bx, tenant="a")
+        shared.fwd_bwd(bx, method="forward", tenant="b")
+        assert shared.optim(ADAM, "a") == norm_2
     finally:
         shared.kill()
 
