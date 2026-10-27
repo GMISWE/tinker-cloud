@@ -121,8 +121,11 @@ def test_lifecycle_through_the_backend(caplog, tmp_path):
             assert scored["prompt_logprobs"][0] is None and len(gap) == len(prompt) - 1
             assert sum(gap) / len(gap) < 0.1 and max(gap) < 0.5, f"sampler vs trainer logprobs: {gap}"
 
-            with pytest.raises(BackendError, match="already serves m"):
-                await backend.create_model("m2", "req-2", MODEL, num_gpus=2, lora_config=LORA, native_root=tmp_path)
+            # the same signature joins the group: no new ranks; leaving keeps them
+            m2 = await backend.create_model("m2", "req-2", MODEL, num_gpus=2, lora_config=LORA, native_root=tmp_path / "m2")
+            assert m2.group_key == key and am_actors(f"am-{key}-r") == {f"am-{key}-r0", f"am-{key}-r1"}
+            await backend.delete_model(m2)
+            assert am_actors(f"am-{key}-r") == {f"am-{key}-r0", f"am-{key}-r1"} and pg_states(f"am-{key}") == {"CREATED"}
 
             at_init = await backend.forward(handle, x, "cross_entropy")
             a, b = await asyncio.gather(
@@ -134,7 +137,8 @@ def test_lifecycle_through_the_backend(caplog, tmp_path):
             assert a["loss"] > 0 and b["loss"] > 0
             assert [o["logprobs"]["shape"] for o in a["loss_fn_outputs"]] == [[37], [64], [5]]
             assert all(v <= 0 for o in a["loss_fn_outputs"] for v in o["logprobs"]["data"])
-            assert a["metrics"] == {"loss:sum": a["loss"], "clamped_positions:sum": 0}
+            assert a["metrics"] == {"loss:sum": a["loss"], "clamped_positions:sum": 0, "swap_seconds:max": 0.0}, \
+                "m was swapped in by at_init's forward; the passes behind it swap nothing"
 
             step = await backend.apply_optimizer_step(handle, 1e-3, ADAM)
             assert step["grad_norm"] > 0
@@ -262,4 +266,82 @@ def test_checkpoint_round_trip_through_fresh_models(tmp_path):
         await backend.close()
 
     backend = AutomodelBackend(overrides=CONFIG)
+    asyncio.run(go())
+
+
+def test_two_tenants_share_a_group_and_match_their_solo_runs(tmp_path):
+    """The multi-tenant gate: A and B (different seeds) on one base model and
+    signature, forward_backward + optimizer step interleaved A, B, A, B, A, B.
+    Every per-step loss and grad norm equals the tenant's solo run's exactly.
+    After A's first step A samples v1 and B samples v0, both in vLLM; a save
+    of B while A is live is B's published v0 export byte for byte. Prints the
+    swap share of the shared run's wall time."""
+    batches = [datums((37, 64, 5)), datums((80, 21, 50, 9, 33)), datums((37, 64, 5))]
+    lora_a, lora_b = {**LORA, "seed": 1}, {**LORA, "seed": 2}
+    backend = AutomodelBackend(overrides=CONFIG)
+
+    async def model(name, lora, phase):
+        h = await backend.create_model(name, f"req-{name}-{phase}", MODEL, num_gpus=2, lora_config=lora,
+                                       native_root=tmp_path / f"native-{name}-{phase}")
+        routing.table.publish(name, routing.InferenceEndpoint(h.inference_endpoints))
+        return h
+
+    async def drop(h):
+        await backend.delete_model(h)
+        routing.table.withdraw(h.model_id)
+
+    async def one_step(h, batch):
+        """(loss, grad_norm, swap seconds of the pass and the step)."""
+        r = await backend.forward_backward(h, batch, "cross_entropy")
+        s = await backend.apply_optimizer_step(h, 1e-3, ADAM)
+        return r["loss"], s["grad_norm"], r["metrics"]["swap_seconds:max"] + s["metrics"]["swap_seconds"]
+
+    async def solo(name, lora):
+        h = await model(name, lora, "solo")
+        try:
+            return [(await one_step(h, batch))[:2] for batch in batches]
+        finally:
+            await drop(h)
+
+    async def go():
+        solo_a = await solo("a", lora_a)
+        solo_b = await solo("b", lora_b)
+
+        a = await model("a", lora_a, "shared")
+        b = await model("b", lora_b, "shared")
+        key = a.group_key
+        assert b.group_key == key and am_actors(f"am-{key}-r") == {f"am-{key}-r0", f"am-{key}-r1"}
+        shared_a, shared_b, swap, started = [], [], 0.0, time.monotonic()
+        try:
+            for i, batch in enumerate(batches):
+                la, na, sa = await one_step(a, batch)
+                if i == 0:
+                    # A stepped, B has not: each samples its own version, both in vLLM
+                    prompt = a.tokenizer.encode("The capital of France is")
+                    assert (await backend.sample(a, "sa", prompt, 1, GREEDY))["weight_version"] == 1
+                    assert (await backend.sample(b, "sb", prompt, 1, GREEDY))["weight_version"] == 0
+                    assert {"a@v1", "b@v0"} <= vllm_models(a.inference_endpoints[0])
+                    # A is live; a save of B reads B's slot: its published v0 export, byte for byte
+                    root = tmp_path / "weights" / "b0"
+                    root.mkdir(parents=True)
+                    await backend.save_checkpoint(b, root, step=0)
+                    v0 = b.native_root / "adapters" / "v0"
+                    assert (root / "hf_adapter" / "adapter_model.safetensors").read_bytes() == (v0 / "adapter_model.safetensors").read_bytes()
+                    assert (root / "hf_adapter" / "adapter_config.json").read_bytes() == (v0 / "adapter_config.json").read_bytes()
+                lb, nb, sb = await one_step(b, batch)
+                shared_a.append((la, na))
+                shared_b.append((lb, nb))
+                swap += sa + sb
+            wall = time.monotonic() - started
+            print(f"\nswap share of the shared run: {swap:.3f} s of {wall:.1f} s = {100 * swap / wall:.2f}%")
+            assert swap > 0, "every op of the interleaved run but the first swaps its tenant in"
+            assert shared_a == solo_a, f"A: shared {shared_a} vs solo {solo_a}"
+            assert shared_b == solo_b, f"B: shared {shared_b} vs solo {solo_b}"
+        finally:
+            await drop(a)
+            await drop(b)
+        wait_until(lambda: not am_actors("am-"))
+        assert pg_states(f"am-{key}") == {"REMOVED"}
+        await backend.close()
+
     asyncio.run(go())
