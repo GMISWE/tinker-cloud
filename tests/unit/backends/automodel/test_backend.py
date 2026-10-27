@@ -480,6 +480,35 @@ def test_tenant_delete_queued_behind_a_fault_completes_and_stops_vllm(tmp_path):
     run(go())
 
 
+def test_tenant_fault_cause_outlives_a_group_reopened_under_its_key(monkeypatch, tmp_path):
+    """a's step faults and the group goes; c then opens a fresh group for the
+    same signature. a's and b's calls still name the fault, c trains, and a
+    deleted b reports the deletion."""
+    backend, started = creatable(monkeypatch)
+
+    async def go():
+        a = await backend.create_model("a", "r1", "base", 2, lora_config=LORA_A, native_root=tmp_path / "a")
+        b = await backend.create_model("b", "r2", "base", 2, lora_config=LORA_A, native_root=tmp_path / "b")
+        started[0].fault = RuntimeError("CUDA error")
+        with pytest.raises(BackendError, match="released"):
+            await backend.apply_optimizer_step(a, 0.5, ADAM)
+        await until_stopped(started[0])
+        c = await backend.create_model("c", "r3", "base", 2, lora_config=LORA_A, native_root=tmp_path / "c")
+        assert c.group_key == a.group_key and len(started) == 2 and backend._groups[c.group_key].tenants == {"c"}
+        assert (await backend.forward(c, [ce_datum([1, 2])], "cross_entropy"))["loss"] == 2.0
+        for handle in (a, b):
+            with pytest.raises(BackendError, match="CUDA error"):
+                await backend.forward(handle, [ce_datum([1, 2])], "cross_entropy")
+        assert started[1].ops == [("add_tenant", "c"), ("forward", "c")], "the old tenants never reach the new group"
+        await backend.delete_model(b)
+        with pytest.raises(BackendError, match="the model was deleted"):
+            await backend.forward(b, [ce_datum([1, 2])], "cross_entropy")
+        with pytest.raises(BackendError, match="CUDA error"):
+            await backend.forward(a, [ce_datum([1, 2])], "cross_entropy")
+        await backend.close()
+    run(go())
+
+
 def test_tenant_delete_whose_leave_faults_on_a_rank_reports_it_and_loses_the_group(tmp_path):
     async def go():
         vllm = Vllm()
