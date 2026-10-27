@@ -187,7 +187,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         async with self._membership_lock(key):   # one create at a time per key: the check and the open or join are one step
             if key in self._groups and self._groups[key].lost is None:   # the signature's group is up: join it
                 group = self._groups[key]
-                await group.scheduler.submit_barrier(model_id, lambda: self._join(group, model_id, seed))
+                await group.scheduler.submit_barrier(model_id, lambda: self._join(group, model_id, lora, seed))
                 logger.info("[%s] model %s joined training group %s (%d tenants)", request_id, model_id, key, len(group.tenants))
             else:
                 group = await self._open_group(key, base_model, lora, model_id, seed, request_id)
@@ -224,7 +224,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
                     request_id, key, base_model, self.config.train_gpus, lora.signature)
         lora_numel = await ranks.start(base_model, lora, self.config.micro_batch_rows)
         try:
-            await ranks.add_tenant(model_id, seed)
+            await ranks.add_tenant(model_id, lora, seed)
         except BaseException:
             await ranks.stop()
             raise
@@ -236,12 +236,12 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         logger.info("[%s] training group %s up: LoRA %d elements", request_id, key, lora_numel)
         return group
 
-    async def _join(self, group: _Group, model_id: str, seed: int) -> None:
+    async def _join(self, group: _Group, model_id: str, lora: LoraSpec, seed: int) -> None:
         """Runs inside the group's scheduler. The ranks stash the live tenant
         before they touch the adapter, so a refused join leaves the group as
         it was."""
         try:
-            await group.ranks.add_tenant(model_id, seed)
+            await group.ranks.add_tenant(model_id, lora, seed)
         except Exception as e:
             raise BackendError(f"model {model_id} could not join training group {group.key}: {e}",
                                backend=BACKEND, operation="create_model", original_error=e) from e

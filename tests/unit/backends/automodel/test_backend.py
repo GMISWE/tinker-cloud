@@ -49,15 +49,17 @@ class Ranks:
         self.hold_save = None   # asyncio.Event a save waits for
         self.hold_step = None   # asyncio.Event a step waits for
         self.swap_seconds = 0.0
+        self.loras = {}         # tenant -> the LoraSpec add_tenant received
 
     def _maybe_fault(self):
         if self.fault is not None:
             fault, self.fault = self.fault, None
             raise fault
 
-    async def add_tenant(self, tenant, seed):
+    async def add_tenant(self, tenant, lora, seed):
         self.ops.append(("add_tenant", tenant))
         self._maybe_fault()
+        self.loras[tenant] = lora
 
     async def remove_tenant(self, tenant):
         self.ops.append(("remove_tenant", tenant))
@@ -365,10 +367,15 @@ def test_tenant_create_joins_the_group_or_opens_its_own_group(monkeypatch, tmp_p
         assert c.group_key != a.group_key and len(started) == 2, "another signature opens its own group"
         assert started[1].ops == [("add_tenant", "c")] and backend._groups[c.group_key].tenants == {"c"}
         assert a.sampler_key == b.sampler_key == c.sampler_key, "one vLLM per base model"
+        # dropout is the tenant's, not the group's: d joins a's group and the ranks receive its own spec
+        d = await backend.create_model("d", "r4", "base", 2, lora_config={**LORA_A, "dropout": 0.3}, native_root=tmp_path / "d")
+        assert d.group_key == a.group_key and len(started) == 2
+        assert started[0].loras["d"].dropout == 0.3 and started[0].loras["a"].dropout == 0.0
+        assert started[0].loras["d"].signature == started[0].loras["a"].signature
         # every pass names its tenant to the one group
         await backend.forward_backward(a, [ce_datum([1, 2])], "cross_entropy")
         assert (await backend.forward_backward(b, [ce_datum([1, 2, 3])], "cross_entropy"))["loss"] == 3.0
-        assert started[0].ops[2:] == [("forward_backward", "a"), ("forward_backward", "b")]
+        assert started[0].ops[3:] == [("forward_backward", "a"), ("forward_backward", "b")]
         await backend.close()
     run(go())
 
