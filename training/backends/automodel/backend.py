@@ -135,6 +135,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         self._lost: Dict[str, str] = {}      # group key -> why it was torn down
         self._samplers: Dict[str, _Sampler] = {}
         self._sampler_boots: Dict[str, asyncio.Lock] = {}   # one vLLM boot per base model at a time
+        self._membership: Dict[str, asyncio.Lock] = {}      # per group key: who opens, joins, leaves, releases
         self._tasks: Set[asyncio.Task] = set()
         self._swept = False
         # One connection pool for every vLLM this process talks to. No read
@@ -183,24 +184,20 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
 
         key = group_key(base_model, lora)
         seed = tenant_seed(model_id, config.seed)
-        if key in self._groups and self._groups[key].lost is None:   # the signature's group is up: join it
-            group = self._groups[key]
-            await group.scheduler.submit_barrier(model_id, lambda: self._join(group, model_id, seed))
-            opened = False
-            logger.info("[%s] model %s joined training group %s (%d tenants)", request_id, model_id, key, len(group.tenants))
-        else:
-            group = await self._open_group(key, base_model, lora, model_id, seed, request_id)
-            opened = True
+        async with self._membership_lock(key):   # one create at a time per key: the check and the open or join are one step
+            if key in self._groups and self._groups[key].lost is None:   # the signature's group is up: join it
+                group = self._groups[key]
+                await group.scheduler.submit_barrier(model_id, lambda: self._join(group, model_id, seed))
+                logger.info("[%s] model %s joined training group %s (%d tenants)", request_id, model_id, key, len(group.tenants))
+            else:
+                group = await self._open_group(key, base_model, lora, model_id, seed, request_id)
 
         try:
             from transformers import AutoTokenizer   # the training env's transformers
             tokenizer = await asyncio.to_thread(AutoTokenizer.from_pretrained, base_model)
             sampler = await self._sampler_for(base_model, context_length, request_id)
         except BaseException:   # a failed create cleans up what it started (R5)
-            if opened:
-                await self._release(group, f"create_model of {model_id} failed")
-            else:
-                await self._leave(group, model_id, "create_model")
+            await self._drop_tenant(key, model_id, "create_model", f"create_model of {model_id} failed")
             raise
         sampler.tenants.add(model_id)
         return AutomodelHandle(
@@ -209,9 +206,19 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
             base_model=base_model, lora=lora, group_key=key, sampler_key=sampler.key,
             native_root=native_root, tokenizer=tokenizer)
 
+    def _membership_lock(self, key: str) -> asyncio.Lock:
+        """The lock a create holds to check for the key's group and open or
+        join it, and a delete holds to leave or release it: two creates of a
+        new signature open one group, and two deletes of a group's last two
+        tenants leave, then release."""
+        if key not in self._membership:
+            self._membership[key] = asyncio.Lock()
+        return self._membership[key]
+
     async def _open_group(self, key: str, base_model: str, lora: LoraSpec, model_id: str, seed: int,
                           request_id: str) -> _Group:
-        """A new training group with `model_id` as its first tenant."""
+        """A new training group with `model_id` as its first tenant. Runs
+        under the key's membership lock."""
         ranks = TrainingGroup(key, self.config.train_gpus)
         logger.info("[%s] starting training group %s: %s, %d ranks, LoRA %s",
                     request_id, key, base_model, self.config.train_gpus, lora.signature)
@@ -240,6 +247,23 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
                                backend=BACKEND, operation="create_model", original_error=e) from e
         group.tenants.add(model_id)
 
+    async def _drop_tenant(self, key: str, model_id: str, op: str, reason: str) -> None:
+        """Free what the key's group holds for the tenant: its slot when other
+        tenants stay, the ranks and the placement group (closed with `reason`)
+        when it was the last. A group torn down after a fault, or a tenant
+        already gone from it, leaves nothing to free."""
+        async with self._membership_lock(key):
+            if key not in self._groups:
+                return
+            group = self._groups[key]
+            if group.lost is not None or model_id not in group.tenants:
+                return
+            if group.tenants - {model_id}:
+                await self._leave(group, model_id, op)
+            else:
+                group.tenants.discard(model_id)
+                await self._release(group, reason)
+
     async def _leave(self, group: _Group, model_id: str, op: str) -> None:
         """Free the tenant's state on every rank, as a barrier; the group stays
         up for its other tenants. A rank fault here is the group's."""
@@ -253,7 +277,12 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
                 raise BackendError(f"{op} failed; the training group was released",
                                    backend=BACKEND, operation=op, original_error=e) from e
 
-        await group.scheduler.submit_barrier(model_id, leave)
+        try:
+            await group.scheduler.submit_barrier(model_id, leave)
+        except BackendError:
+            if group.lost is None:
+                raise
+            # the group was lost while the leave waited in its queue: the slot went with the ranks
 
     async def _sampler_for(self, base_model: str, max_model_len: int, request_id: str) -> _Sampler:
         """The base model's sampler, booted on first use."""
@@ -271,15 +300,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
             return self._samplers[key]
 
     async def delete_model(self, handle: AutomodelHandle) -> None:
-        key = handle.group_key
-        # a group torn down after a fault, or a tenant already gone from it: nothing left to free there
-        if key in self._groups and self._groups[key].lost is None and handle.model_id in self._groups[key].tenants:
-            group = self._groups[key]
-            if group.tenants - {handle.model_id}:   # others stay: free this tenant's slot only
-                await self._leave(group, handle.model_id, "delete_model")
-            else:   # last tenant out: the ranks and the placement group go
-                group.tenants.discard(handle.model_id)
-                await self._release(group, f"model {handle.model_id} was deleted")
+        await self._drop_tenant(handle.group_key, handle.model_id, "delete_model", f"model {handle.model_id} was deleted")
         if handle.sampler_key in self._samplers:
             sampler = self._samplers[handle.sampler_key]
             sampler.tenants.discard(handle.model_id)

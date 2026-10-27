@@ -227,6 +227,7 @@ def creatable(monkeypatch):
             started.append(self)
 
         async def start(self, base_model, lora, micro_batch_rows):
+            await asyncio.sleep(0.01)   # a real start awaits Ray: another create can run meanwhile
             return 42
 
     class Sampler(Host):
@@ -372,6 +373,20 @@ def test_tenant_create_joins_the_group_or_opens_its_own_group(monkeypatch, tmp_p
     run(go())
 
 
+def test_tenant_concurrent_creates_of_one_signature_open_one_group_and_the_second_joins(monkeypatch, tmp_path):
+    backend, started = creatable(monkeypatch)
+
+    async def go():
+        a, b = await asyncio.gather(
+            backend.create_model("a", "r1", "base", 2, lora_config=LORA_A, native_root=tmp_path / "a"),
+            backend.create_model("b", "r2", "base", 2, lora_config=LORA_A, native_root=tmp_path / "b"))
+        assert len(started) == 1 and a.group_key == b.group_key
+        assert backend._groups[a.group_key].tenants == {"a", "b"}
+        assert started[0].ops == [("add_tenant", "a"), ("add_tenant", "b")] and not started[0].stopped
+        await backend.close()
+    run(go())
+
+
 def test_tenant_failed_joins_leave_the_group_untouched(monkeypatch, tmp_path):
     backend, started = creatable(monkeypatch)
 
@@ -409,6 +424,51 @@ def test_tenant_delete_frees_the_slot_and_the_last_delete_stops_the_ranks(tmp_pa
 
         await backend.delete_model(b)
         assert ranks.stopped and "g" not in backend._groups and host.stopped
+        await backend.close()
+    run(go())
+
+
+def test_tenant_concurrent_deletes_leave_then_release_and_stop_vllm(tmp_path):
+    async def go():
+        vllm = Vllm()
+        backend, ranks, m = wired(tmp_path, vllm, tenants=("m", "b"), group_tenants=("m", "b"))
+        b = tenant_handle(m, "b")
+        host = backend._samplers["s"].host
+        await backend.prepare_for_generation(m)
+        await backend.prepare_for_generation(b)
+        await asyncio.gather(backend.delete_model(m), backend.delete_model(b))
+        assert ranks.ops[-1] == ("remove_tenant", "m") and ranks.stopped
+        assert "g" not in backend._groups
+        assert vllm.unloaded == ["m@v0"] and host.stopped and "s" not in backend._samplers, "b, the last tenant, stops vLLM"
+        await backend.close()
+    run(go())
+
+
+def test_tenant_delete_queued_behind_a_fault_completes_and_stops_vllm(tmp_path):
+    """m's leave waits behind b's step; the step faults and the group is lost
+    before the leave runs. Nothing is left to free: the delete completes and
+    the sampler is cleaned up."""
+    async def go():
+        vllm = Vllm()
+        backend, ranks, m = wired(tmp_path, vllm, tenants=("m", "b"), group_tenants=("m", "b"))
+        b = tenant_handle(m, "b")
+        host = backend._samplers["s"].host
+        await backend.prepare_for_generation(m)
+        ranks.hold_step = asyncio.Event()
+        ranks.fault = RuntimeError("CUDA error")
+        step_b = asyncio.create_task(backend.apply_optimizer_step(b, 0.5, ADAM))
+        await asyncio.sleep(0.02)
+        delete_m = asyncio.create_task(backend.delete_model(m))
+        await asyncio.sleep(0.02)
+        ranks.hold_step.set()
+        with pytest.raises(BackendError, match="released"):
+            await step_b
+        await delete_m
+        assert ("remove_tenant", "m") not in ranks.ops
+        assert vllm.unloaded == ["m@v0"] and backend._samplers["s"].tenants == {"b"} and not host.stopped
+        await until_stopped(ranks)
+        await backend.delete_model(b)   # torn down after the fault: nothing left to free; the last sampler tenant stops vLLM
+        assert host.stopped and "s" not in backend._samplers
         await backend.close()
     run(go())
 
