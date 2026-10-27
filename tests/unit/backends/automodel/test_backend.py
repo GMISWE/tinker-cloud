@@ -413,7 +413,24 @@ def test_tenant_delete_frees_the_slot_and_the_last_delete_stops_the_ranks(tmp_pa
     run(go())
 
 
+def test_tenant_repeated_delete_frees_nothing_and_keeps_the_group():
+    async def go():
+        backend, ranks, a = wired(group_tenants=("a", "b", "c"))
+        a.model_id = "a"
+        b = tenant_handle(a, "b")
+        await backend.delete_model(a)
+        await backend.delete_model(a)   # already gone: nothing to free, not an error
+        assert ranks.ops == [("remove_tenant", "a")] and not ranks.stopped
+        assert backend._groups["g"].tenants == {"b", "c"} and backend._groups["g"].lost is None
+        assert (await backend.forward(b, [ce_datum([1, 2])], "cross_entropy"))["loss"] == 2.0
+        await backend.close()
+    run(go())
+
+
 def test_tenant_fault_in_one_pass_fails_every_queued_tenant_and_names_the_cause_after():
+    """a's step faults with b's pass, b's step and a's pass queued behind it:
+    all three fail with the cause, none reaches the ranks, and so does every
+    later call of either tenant."""
     async def go():
         backend, ranks, a = wired(group_tenants=("a", "b"))
         a.model_id = "a"
@@ -422,19 +439,24 @@ def test_tenant_fault_in_one_pass_fails_every_queued_tenant_and_names_the_cause_
         ranks.fault = RuntimeError("CUDA error")
         step_a = asyncio.create_task(backend.apply_optimizer_step(a, 0.5, ADAM))
         await asyncio.sleep(0.02)
-        pass_b = asyncio.create_task(backend.forward_backward(b, [ce_datum([1, 2])], "cross_entropy"))
+        queued = [asyncio.create_task(backend.forward_backward(b, [ce_datum([1, 2])], "cross_entropy")),
+                  asyncio.create_task(backend.apply_optimizer_step(b, 0.5, ADAM)),
+                  asyncio.create_task(backend.forward_backward(a, [ce_datum([1, 2, 3])], "cross_entropy"))]
         await asyncio.sleep(0.02)
-        assert ranks.passes == [], "b's pass waits behind a's step"
+        assert ranks.passes == [], "the queued ops wait behind a's step"
         ranks.hold_step.set()
         with pytest.raises(BackendError, match="released"):
             await step_a
-        with pytest.raises(BackendError, match="CUDA error"):
-            await pass_b
+        for op in queued:
+            with pytest.raises(BackendError, match="CUDA error"):
+                await op
         await until_stopped(ranks)
-        assert ranks.passes == [], "the queued pass never ran"
+        assert ranks.passes == [] and ranks.ops == [("optim_step", "a")], "no queued op reached the ranks"
         for handle in (a, b):
             with pytest.raises(BackendError, match="CUDA error"):
                 await backend.forward(handle, [ce_datum([1, 2])], "cross_entropy")
+            with pytest.raises(BackendError, match="CUDA error"):
+                await backend.apply_optimizer_step(handle, 0.5, ADAM)
         await backend.close()
     run(go())
 

@@ -272,7 +272,8 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
 
     async def delete_model(self, handle: AutomodelHandle) -> None:
         key = handle.group_key
-        if key in self._groups and self._groups[key].lost is None:   # else torn down after a fault: nothing left to free
+        # a group torn down after a fault, or a tenant already gone from it: nothing left to free there
+        if key in self._groups and self._groups[key].lost is None and handle.model_id in self._groups[key].tenants:
             group = self._groups[key]
             if group.tenants - {handle.model_id}:   # others stay: free this tenant's slot only
                 await self._leave(group, handle.model_id, "delete_model")
@@ -505,13 +506,16 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         raise BackendError(f"model {handle.model_id} has no training group: {why}", backend=BACKEND, operation=op)
 
     def _mark_lost(self, group: _Group, reason: str) -> None:
-        """Runs inside the group's scheduler. close() waits for the op in
-        progress, which is this one, so the teardown is a task of its own."""
+        """Runs inside the group's scheduler. The queue is abandoned here, at
+        once, so no op behind the faulting one reaches the ranks; close()
+        waits for the op in progress, which is this one, so the rest of the
+        teardown is a task of its own."""
         if group.lost is not None:
             return
         group.lost = reason
         self._lost[group.key] = reason
         logger.error("training group %s is lost: %s", group.key, reason)
+        group.scheduler.abandon(reason)
         task = asyncio.create_task(self._release(group, reason))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)

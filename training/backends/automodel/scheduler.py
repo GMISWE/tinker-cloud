@@ -79,12 +79,17 @@ class GroupScheduler(Generic[P, R]):
     def queued(self) -> int:
         return len(self._queue)
 
-    async def close(self, reason: str) -> None:
-        """Fail every queued op with `reason` and stop after the op in progress."""
+    def abandon(self, reason: str) -> None:
+        """Fail every queued op with `reason` and refuse new ones, at once;
+        the op in progress finishes. Callable from inside that op."""
         self._closed = reason
         while self._queue:
             self._fail(self._queue.popleft().future, reason)
         self._wakeup.set()
+
+    async def close(self, reason: str) -> None:
+        """abandon(reason), then wait for the op in progress."""
+        self.abandon(reason)
         await self._worker
 
     def _new_future(self) -> asyncio.Future:
