@@ -268,8 +268,11 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         """Free the tenant's state on every rank, as a barrier; the group stays
         up for its other tenants. A rank fault here is the group's."""
         group.tenants.discard(model_id)
+        ran = False
 
         async def leave() -> None:
+            nonlocal ran
+            ran = True
             try:
                 await group.ranks.remove_tenant(model_id)
             except Exception as e:
@@ -280,7 +283,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         try:
             await group.scheduler.submit_barrier(model_id, leave)
         except BackendError:
-            if group.lost is None:
+            if ran or group.lost is None:   # the leave's own fault, or a closed scheduler: the caller hears it
                 raise
             # the group was lost while the leave waited in its queue: the slot went with the ranks
 

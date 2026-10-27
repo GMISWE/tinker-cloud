@@ -473,6 +473,22 @@ def test_tenant_delete_queued_behind_a_fault_completes_and_stops_vllm(tmp_path):
     run(go())
 
 
+def test_tenant_delete_whose_leave_faults_on_a_rank_reports_it_and_loses_the_group(tmp_path):
+    async def go():
+        vllm = Vllm()
+        backend, ranks, m = wired(tmp_path, vllm, tenants=("m", "b"), group_tenants=("m", "b"))
+        b = tenant_handle(m, "b")
+        ranks.fault = RuntimeError("CUDA error")
+        with pytest.raises(BackendError, match="delete_model failed; the training group was released"):
+            await backend.delete_model(m)
+        assert ranks.ops[-1] == ("remove_tenant", "m")
+        await until_stopped(ranks)
+        with pytest.raises(BackendError, match="CUDA error"):
+            await backend.forward(b, [ce_datum([1, 2])], "cross_entropy")
+        await backend.close()
+    run(go())
+
+
 def test_tenant_repeated_delete_frees_nothing_and_keeps_the_group():
     async def go():
         backend, ranks, a = wired(group_tenants=("a", "b", "c"))
