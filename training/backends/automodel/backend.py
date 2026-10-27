@@ -1,11 +1,13 @@
 """
 The Automodel backend: one FSDP2 training group per (base model, LoRA
-signature), one tenant per group in this build, one vLLM per base model, and
-every Tinker primitive run when it is called (R9).
+signature), shared by every LoRA tenant with that signature, one vLLM per base
+model, and every Tinker primitive run when it is called.
 
 A model's requests reach its group through the group's scheduler: a pass
 coalesces with the consecutive same-key passes behind it (R15); a barrier
-(optimizer step, publish, delete) runs alone. One pass is: convert each request
+(optimizer step, publish, join, leave, delete) runs alone. The ranks keep one
+adapter per tenant and swap the op's tenant in (worker.py); a pass or step
+reports the swap's seconds as `swap_seconds`. One pass is: convert each request
 (validated alone, so a bad request fails alone) -> coalesce into one batch
 padded to a multiple of the rank count -> one shard per rank -> every rank
 runs it -> the rows come back in rank order and are split per request (R3).
@@ -86,7 +88,7 @@ class AutomodelHandle(BackendHandle):
 @dataclass
 class _Group:
     key: str
-    ranks: TrainingGroup          # or a stand-in with the same five coroutines
+    ranks: TrainingGroup          # or a stand-in with the same nine coroutines
     scheduler: GroupScheduler
     tenants: Set[str] = field(default_factory=set)
     lost: Optional[str] = None    # why; set before the teardown runs
@@ -180,27 +182,25 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
             self._swept = True
 
         key = group_key(base_model, lora)
-        if key in self._groups:
-            tenants = ", ".join(sorted(self._groups[key].tenants))
-            raise BackendError(f"training group {key} already serves {tenants}; this build holds one tenant per group",
-                               backend=BACKEND, operation="create_model")
-        ranks = TrainingGroup(key, self.config.train_gpus)
-        logger.info("[%s] starting training group %s: %s, %d ranks, LoRA %s",
-                    request_id, key, base_model, self.config.train_gpus, lora.signature)
-        lora_numel = await ranks.start(base_model, lora, tenant_seed(model_id, config.seed), self.config.micro_batch_rows)
-        scheduler = GroupScheduler(key, lambda pk, payloads: self._run_pass(key, pk, payloads))
-        group = _Group(key, ranks, scheduler, {model_id})
-        self._groups[key] = group
-        if key in self._lost:
-            del self._lost[key]
-        logger.info("[%s] training group %s up: LoRA %d elements", request_id, key, lora_numel)
+        seed = tenant_seed(model_id, config.seed)
+        if key in self._groups and self._groups[key].lost is None:   # the signature's group is up: join it
+            group = self._groups[key]
+            await group.scheduler.submit_barrier(model_id, lambda: self._join(group, model_id, seed))
+            opened = False
+            logger.info("[%s] model %s joined training group %s (%d tenants)", request_id, model_id, key, len(group.tenants))
+        else:
+            group = await self._open_group(key, base_model, lora, model_id, seed, request_id)
+            opened = True
 
         try:
             from transformers import AutoTokenizer   # the training env's transformers
             tokenizer = await asyncio.to_thread(AutoTokenizer.from_pretrained, base_model)
             sampler = await self._sampler_for(base_model, context_length, request_id)
         except BaseException:   # a failed create cleans up what it started (R5)
-            await self._release(group, f"create_model of {model_id} failed")
+            if opened:
+                await self._release(group, f"create_model of {model_id} failed")
+            else:
+                await self._leave(group, model_id, "create_model")
             raise
         sampler.tenants.add(model_id)
         return AutomodelHandle(
@@ -208,6 +208,52 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
             hf_path=base_model, inference_endpoints=(sampler.url,),
             base_model=base_model, lora=lora, group_key=key, sampler_key=sampler.key,
             native_root=native_root, tokenizer=tokenizer)
+
+    async def _open_group(self, key: str, base_model: str, lora: LoraSpec, model_id: str, seed: int,
+                          request_id: str) -> _Group:
+        """A new training group with `model_id` as its first tenant."""
+        ranks = TrainingGroup(key, self.config.train_gpus)
+        logger.info("[%s] starting training group %s: %s, %d ranks, LoRA %s",
+                    request_id, key, base_model, self.config.train_gpus, lora.signature)
+        lora_numel = await ranks.start(base_model, lora, self.config.micro_batch_rows)
+        try:
+            await ranks.add_tenant(model_id, seed)
+        except BaseException:
+            await ranks.stop()
+            raise
+        scheduler = GroupScheduler(key, lambda pk, payloads: self._run_pass(key, pk, payloads))
+        group = _Group(key, ranks, scheduler, {model_id})
+        self._groups[key] = group
+        if key in self._lost:
+            del self._lost[key]
+        logger.info("[%s] training group %s up: LoRA %d elements", request_id, key, lora_numel)
+        return group
+
+    async def _join(self, group: _Group, model_id: str, seed: int) -> None:
+        """Runs inside the group's scheduler. The ranks stash the live tenant
+        before they touch the adapter, so a refused join leaves the group as
+        it was."""
+        try:
+            await group.ranks.add_tenant(model_id, seed)
+        except Exception as e:
+            raise BackendError(f"model {model_id} could not join training group {group.key}: {e}",
+                               backend=BACKEND, operation="create_model", original_error=e) from e
+        group.tenants.add(model_id)
+
+    async def _leave(self, group: _Group, model_id: str, op: str) -> None:
+        """Free the tenant's state on every rank, as a barrier; the group stays
+        up for its other tenants. A rank fault here is the group's."""
+        group.tenants.discard(model_id)
+
+        async def leave() -> None:
+            try:
+                await group.ranks.remove_tenant(model_id)
+            except Exception as e:
+                self._mark_lost(group, f"remove_tenant failed on a rank: {e!r}")
+                raise BackendError(f"{op} failed; the training group was released",
+                                   backend=BACKEND, operation=op, original_error=e) from e
+
+        await group.scheduler.submit_barrier(model_id, leave)
 
     async def _sampler_for(self, base_model: str, max_model_len: int, request_id: str) -> _Sampler:
         """The base model's sampler, booted on first use."""
@@ -226,10 +272,12 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
 
     async def delete_model(self, handle: AutomodelHandle) -> None:
         key = handle.group_key
-        if key in self._groups:   # else torn down after a fault: nothing left to free
+        if key in self._groups and self._groups[key].lost is None:   # else torn down after a fault: nothing left to free
             group = self._groups[key]
-            group.tenants.discard(handle.model_id)
-            if not group.tenants:   # one tenant per group in this build
+            if group.tenants - {handle.model_id}:   # others stay: free this tenant's slot only
+                await self._leave(group, handle.model_id, "delete_model")
+            else:   # last tenant out: the ranks and the placement group go
+                group.tenants.discard(handle.model_id)
                 await self._release(group, f"model {handle.model_id} was deleted")
         if handle.sampler_key in self._samplers:
             sampler = self._samplers[handle.sampler_key]
@@ -284,7 +332,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
 
         async def step() -> Dict[str, Any]:
             try:
-                outs = await group.ranks.optim_step(adam)
+                outs = await group.ranks.optim_step(handle.model_id, adam)
             except NonFiniteGradNorm as e:
                 # Every rank refused (the norm is all-reduced) and zeroed its
                 # grads; this request fails, but the group remains usable.
@@ -298,6 +346,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
                     original_error=e,
                 ) from e
             norm = float(outs[0]["grad_norm"])
+            swap = _swap_seconds(outs)
             handle.weight_version += 1
             # R4 (iii): the new version goes to vLLM before the step is answered
             try:
@@ -308,7 +357,9 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
                     f"could not be published to vLLM: {e}",
                     backend=BACKEND, operation="apply_optimizer_step") from e
             await self._retire(handle)
-            return {"grad_norm": norm, "weight_version": handle.weight_version}
+            # step metrics are not reduced (the SDK reads `metrics` only): a bare key, like grad_norm
+            return {"grad_norm": norm, "weight_version": handle.weight_version, "swap_seconds": swap,
+                    "metrics": {"swap_seconds": swap}}
 
         return await group.scheduler.submit_barrier(handle.model_id, step)
 
@@ -332,7 +383,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         clip = clip_thresholds(dict(pk.loss_fn_config)) if batch.loss_fn is LossFn.PPO else None
         run = group.ranks.forward_backward if pk.kind == "forward_backward" else group.ranks.forward
         try:
-            outs = await run(shards, clip)
+            outs = await run(pk.model_id, shards, clip)
         except Exception as e:
             self._mark_lost(group, f"{pk.kind} failed on a rank: {e!r}")
             raise BackendError(f"{pk.kind} failed; the training group was released",
@@ -395,7 +446,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
             return
         dest = adapter_dir(handle, version)
         try:
-            await group.ranks.export_adapter(dest)
+            await group.ranks.export_adapter(handle.model_id, dest)
         except Exception as e:
             self._mark_lost(group, f"export_adapter failed on a rank: {e!r}")
             raise BackendError("export_adapter failed; the training group was released",
@@ -444,7 +495,12 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         """The handle's group, if it is up; otherwise the error names why it is not."""
         key = handle.group_key
         if key in self._groups and self._groups[key].lost is None:
-            return self._groups[key]
+            group = self._groups[key]
+            if handle.model_id in group.tenants:
+                return group
+            # a stale handle must not reach the ranks: they would refuse the tenant, and a refusal is a fault
+            raise BackendError(f"model {handle.model_id} has no training group: the model was deleted",
+                               backend=BACKEND, operation=op)
         why = self._lost[key] if key in self._lost else "the model was deleted"
         raise BackendError(f"model {handle.model_id} has no training group: {why}", backend=BACKEND, operation=op)
 
@@ -473,7 +529,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
 
         async def save() -> None:
             try:
-                await group.ranks.save_state(root)
+                await group.ranks.save_state(handle.model_id, root)
             except Exception as e:
                 self._mark_lost(group, f"save_state failed on a rank: {e!r}")
                 raise BackendError("save_checkpoint failed; the training group was released",
@@ -509,7 +565,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
 
         async def load() -> None:
             try:
-                await group.ranks.load_state(Path(adapter), optimizer_dir)
+                await group.ranks.load_state(handle.model_id, Path(adapter), optimizer_dir)
             except StateMismatch as e:   # refused on every rank before any copy; the group is intact
                 raise BackendError(f"checkpoint {root} does not fit this model: {e}",
                                    backend=BACKEND, operation="load_checkpoint") from e
@@ -532,9 +588,11 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
                     root, handle.weight_version)
 
 
-def _per_request(batch: Batch, outs: List[Dict[str, torch.Tensor]]) -> List[Dict[str, Any]]:
-    """Rank outputs, in rank order -> one result per request of the batch."""
+def _per_request(batch: Batch, outs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Rank outputs, in rank order -> one result per request of the batch.
+    The swap served the whole pass, so every request reports it."""
     cat = {k: torch.cat([o[k] for o in outs]) for k in ("row_loss", "logprobs", "elementwise", "clamped")}
+    swap = _swap_seconds(outs)
     losses = row_sums(batch, cat["row_loss"])
     clamped = row_sums(batch, cat["clamped"])
     logprobs = split_rows(batch, cat["logprobs"])
@@ -546,11 +604,16 @@ def _per_request(batch: Batch, outs: List[Dict[str, torch.Tensor]]) -> List[Dict
         results.append({
             "loss_fn_output_type": batch.loss_fn.value,
             "loss": losses[i],
-            "metrics": {"loss:sum": losses[i], "clamped_positions:sum": int(clamped[i])},
+            "metrics": {"loss:sum": losses[i], "clamped_positions:sum": int(clamped[i]), "swap_seconds:max": swap},
             "loss_fn_outputs": outputs,
             "deferred": False,
         })
     return results
+
+
+def _swap_seconds(outs: List[Dict[str, Any]]) -> float:
+    """The slowest rank's swap: the op waited for it."""
+    return max(float(o["swap_seconds"]) for o in outs)
 
 
 def _tensor(values: List[float]) -> Dict[str, Any]:

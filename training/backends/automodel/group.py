@@ -2,7 +2,8 @@
 One training group's Ray side (R1): a placement group of {GPU:1, CPU:1}
 bundles, one AutomodelWorker per bundle, and the calls that reach every rank
 at once. The backend sees the ranks only through this class, so a CPU test
-can stand in a fake with the same seven coroutines.
+can stand in a fake with the same nine coroutines. Every op names its tenant:
+the ranks hold one adapter per tenant of the group (worker.py).
 
 Names: the placement group is `am-<key>`, rank r's actor `am-<key>-r<r>`.
 Neither is detached (they die with the server's Ray job); the names exist so
@@ -45,10 +46,10 @@ class TrainingGroup:
         self.pg: Optional[Any] = None
         self.ranks: List[Any] = []
 
-    async def start(self, base_model: str, lora: LoraSpec, seed: int, micro_batch_rows: int) -> int:
-        """Place the bundles, start the ranks, build the model on each; returns
-        the LoRA element count of the full model. A failure stops what was
-        started, then re-raises (R5)."""
+    async def start(self, base_model: str, lora: LoraSpec, micro_batch_rows: int) -> int:
+        """Place the bundles, start the ranks, build the model on each (no
+        tenant yet); returns the LoRA element count of the full model. A
+        failure stops what was started, then re-raises."""
         # The worker needs the training env (Automodel); importing it here
         # keeps this module importable where that env is absent.
         from .worker import AutomodelWorker
@@ -66,7 +67,7 @@ class TrainingGroup:
                 worker.options(
                     name=f"{self.name}-r{r}",
                     scheduling_strategy=PlacementGroupSchedulingStrategy(self.pg, placement_group_bundle_index=r),
-                ).remote(r, self.num_ranks, base_model, lora, seed, micro_batch_rows)
+                ).remote(r, self.num_ranks, base_model, lora, micro_batch_rows)
                 for r in range(self.num_ranks)
             ]
             init_method = await self.ranks[0].rendezvous_address.remote()
@@ -78,28 +79,37 @@ class TrainingGroup:
             await self.stop()
             raise
 
-    async def forward_backward(self, shards: Sequence[Batch], clip: Optional[Tuple[float, float]]) -> List[Dict[str, Any]]:
+    async def add_tenant(self, tenant: str, seed: int) -> None:
+        """Every rank initialises the tenant's adapter from `seed` and makes it live."""
+        await self._all([w.add_tenant.remote(tenant, seed) for w in self.ranks])
+
+    async def remove_tenant(self, tenant: str) -> None:
+        """Every rank drops the tenant's state; the group stays up."""
+        await self._all([w.remove_tenant.remote(tenant) for w in self.ranks])
+
+    async def forward_backward(self, tenant: str, shards: Sequence[Batch],
+                               clip: Optional[Tuple[float, float]]) -> List[Dict[str, Any]]:
         """One ray.put per rank (R3); results in rank order."""
-        return await self._all([w.forward_backward.remote(ray.put(s), clip) for w, s in zip(self.ranks, shards)])
+        return await self._all([w.forward_backward.remote(tenant, ray.put(s), clip) for w, s in zip(self.ranks, shards)])
 
-    async def forward(self, shards: Sequence[Batch], clip: Optional[Tuple[float, float]]) -> List[Dict[str, Any]]:
-        return await self._all([w.forward.remote(ray.put(s), clip) for w, s in zip(self.ranks, shards)])
+    async def forward(self, tenant: str, shards: Sequence[Batch], clip: Optional[Tuple[float, float]]) -> List[Dict[str, Any]]:
+        return await self._all([w.forward.remote(tenant, ray.put(s), clip) for w, s in zip(self.ranks, shards)])
 
-    async def optim_step(self, adam: AdamParams) -> List[Dict[str, float]]:
-        return await self._all([w.optim_step.remote(adam) for w in self.ranks])
+    async def optim_step(self, tenant: str, adam: AdamParams) -> List[Dict[str, float]]:
+        return await self._all([w.optim_step.remote(tenant, adam) for w in self.ranks])
 
-    async def export_adapter(self, dest: Path) -> None:
-        """Rank 0 writes the HF PEFT adapter at `dest`; every rank joins the gather."""
-        await self._all([w.export_adapter.remote(str(dest)) for w in self.ranks])
+    async def export_adapter(self, tenant: str, dest: Path) -> None:
+        """Rank 0 writes the tenant's HF PEFT adapter at `dest`; every rank joins the gather."""
+        await self._all([w.export_adapter.remote(tenant, str(dest)) for w in self.ranks])
 
-    async def save_state(self, root: Path) -> None:
-        """Rank 0 writes the adapter and the AdamW state under `root`; every rank joins the gathers."""
-        await self._all([w.save_state.remote(str(root)) for w in self.ranks])
+    async def save_state(self, tenant: str, root: Path) -> None:
+        """Rank 0 writes the tenant's adapter and AdamW state under `root`; every rank joins the gathers."""
+        await self._all([w.save_state.remote(tenant, str(root)) for w in self.ranks])
 
-    async def load_state(self, adapter_dir: Path, optimizer_dir: Optional[Path]) -> None:
-        """Every rank copies its shard of the adapter and, given optimizer_dir, of the AdamW state."""
+    async def load_state(self, tenant: str, adapter_dir: Path, optimizer_dir: Optional[Path]) -> None:
+        """Every rank copies its shard of the adapter and, given optimizer_dir, of the AdamW state into the tenant."""
         opt = None if optimizer_dir is None else str(optimizer_dir)
-        await self._all([w.load_state.remote(str(adapter_dir), opt) for w in self.ranks])
+        await self._all([w.load_state.remote(tenant, str(adapter_dir), opt) for w in self.ranks])
 
     async def stop(self) -> None:
         """Kill the ranks and free the bundles. Safe to call twice."""

@@ -36,28 +36,37 @@ SEED = 1234
 
 
 class Group:
-    def __init__(self, n, micro_batch_rows):
+    """n ranks with the tenants {name: seed} added in order (the last one is
+    live); one tenant "t" by default. Every op names its tenant."""
+    def __init__(self, n, micro_batch_rows, tenants=None):
         cls = ray.remote(num_gpus=1, num_cpus=1)(AutomodelWorker)
         self.n = n
-        self.ranks = [cls.remote(r, n, MODEL, LORA, SEED, micro_batch_rows) for r in range(n)]
+        self.ranks = [cls.remote(r, n, MODEL, LORA, micro_batch_rows) for r in range(n)]
         addr = ray.get(self.ranks[0].rendezvous_address.remote())
         self.trainable = ray.get([w.setup.remote(addr) for w in self.ranks])[0]
+        for name, seed in (tenants or {"t": SEED}).items():
+            self.call("add_tenant", before=(name, seed))
+        self.last_swap = 0.0    # seconds the last pass or step spent swapping (the slowest rank)
 
-    def call(self, method, *per_rank_args, same=()):
-        refs = [getattr(w, method).remote(*[a[i] for a in per_rank_args], *same) for i, w in enumerate(self.ranks)]
+    def call(self, method, per_rank=(), *, before=(), after=()):
+        """method(*before, <this rank's entry of each per_rank sequence>, *after) on every rank."""
+        refs = [getattr(w, method).remote(*before, *[a[i] for a in per_rank], *after) for i, w in enumerate(self.ranks)]
         return ray.get(refs)
 
-    def fwd_bwd(self, batch, clip=None, method="forward_backward"):
-        outs = self.call(method, shard(batch, self.n), same=(clip,))
-        return {k: torch.cat([o[k] for o in outs]) for k in outs[0]}
+    def fwd_bwd(self, batch, clip=None, method="forward_backward", tenant="t"):
+        outs = self.call(method, (shard(batch, self.n),), before=(tenant,), after=(clip,))
+        self.last_swap = max(o["swap_seconds"] for o in outs)
+        return {k: torch.cat([o[k] for o in outs]) for k in ("row_loss", "logprobs", "elementwise", "clamped")}
 
-    def optim(self, adam):
-        norms = [o["grad_norm"] for o in self.call("optim_step", same=(adam,))]
+    def optim(self, adam, tenant="t"):
+        outs = self.call("optim_step", before=(tenant, adam))
+        norms = [o["grad_norm"] for o in outs]
         assert len(set(norms)) == 1, f"ranks disagree on the grad norm: {norms}"
+        self.last_swap = max(o["swap_seconds"] for o in outs)
         return norms[0]
 
-    def lora(self):
-        return self.call("lora_state")[0]
+    def lora(self, tenant="t"):
+        return self.call("lora_state", before=(tenant,))[0]
 
     def kill(self):
         for w in self.ranks:
@@ -219,7 +228,7 @@ def test_checkpoint_round_trip_restores_weights_and_optimizer(tmp_path):
     try:
         grp.fwd_bwd(batch)
         grp.optim(ADAM)
-        grp.call("save_state", same=(str(root),))
+        grp.call("save_state", before=("t", str(root)))
         s1 = grp.lora()
         grp.fwd_bwd(batch)
         grp.optim(ADAM)
@@ -235,7 +244,7 @@ def test_checkpoint_round_trip_restores_weights_and_optimizer(tmp_path):
 
     grp = Group(2, 2)
     try:
-        grp.call("load_state", same=(adapter, str(root / OPTIMIZER_DIRNAME)))
+        grp.call("load_state", before=("t", adapter, str(root / OPTIMIZER_DIRNAME)))
         r1 = grp.lora()
         assert all(torch.equal(r1[k], s1[k]) for k in s1)
         grp.fwd_bwd(batch)
@@ -248,7 +257,7 @@ def test_checkpoint_round_trip_restores_weights_and_optimizer(tmp_path):
 
     grp = Group(2, 2)
     try:
-        grp.call("load_state", same=(adapter, None))
+        grp.call("load_state", before=("t", adapter, None))
         grp.fwd_bwd(batch)
         grp.optim(ADAM)
         w2 = grp.lora()
@@ -256,3 +265,98 @@ def test_checkpoint_round_trip_restores_weights_and_optimizer(tmp_path):
         grp.kill()
     b_names = [k for k in s2 if ".lora_B." in k]
     assert any(not torch.allclose(w2[k], s2[k], atol=1e-6, rtol=0) for k in b_names)
+
+
+# --- tenants of one group (the adapter store) --------------------------------
+
+def equal_states(a, b):
+    assert a.keys() == b.keys()
+    return all(torch.equal(a[k], b[k]) for k in a)
+
+
+def test_tenant_init_is_per_seed_and_equals_the_solo_init():
+    """Two tenants with different seeds start from different A matrices, and
+    each starts from exactly what a solo group with its seed builds."""
+    solo = Group(2, 2, {"a": 1})
+    try:
+        ia = solo.lora("a")
+    finally:
+        solo.kill()
+    solo = Group(2, 2, {"b": 2})
+    try:
+        ib = solo.lora("b")
+    finally:
+        solo.kill()
+    shared = Group(2, 2, {"a": 1, "b": 2})   # b is live, a waits in its slot
+    try:
+        sa, sb = shared.lora("a"), shared.lora("b")
+    finally:
+        shared.kill()
+    assert equal_states(sa, ia) and equal_states(sb, ib)
+    a_names = [k for k in ia if ".lora_A." in k]
+    assert all(not torch.equal(ia[k], ib[k]) for k in a_names)
+
+
+def test_tenant_interleaved_passes_equal_the_solo_run_and_leave_the_other_untouched(tmp_path):
+    """fwd_bwd(A), fwd_bwd(B), fwd_bwd(A), optim(A) is A's solo
+    fwd_bwd, fwd_bwd, optim exactly; B's weights and optimizer state are as
+    they were, its grads wait in its slot, and its first step is its solo one."""
+    from safetensors.torch import load_file
+
+    x, y = requests()
+    bx, by = coalesce([x], 2), coalesce([y], 2)
+    solo = Group(2, 2, {"a": 1})
+    try:
+        solo.fwd_bwd(bx, tenant="a")
+        solo.fwd_bwd(by, tenant="a")
+        norm_a = solo.optim(ADAM, "a")
+        weights_a = solo.lora("a")
+    finally:
+        solo.kill()
+    solo = Group(2, 2, {"b": 2})
+    try:
+        solo.fwd_bwd(bx, tenant="b")
+        norm_b = solo.optim(ADAM, "b")
+    finally:
+        solo.kill()
+
+    shared = Group(2, 2, {"a": 1, "b": 2})
+    try:
+        init_b = shared.lora("b")
+        shared.fwd_bwd(bx, tenant="a")
+        shared.fwd_bwd(bx, tenant="b")
+        shared.fwd_bwd(by, tenant="a")
+        assert shared.optim(ADAM, "a") == norm_a
+        assert equal_states(shared.lora("a"), weights_a)
+        shared.call("save_state", before=("b", str(tmp_path / "b")))
+        saved = load_file(str(tmp_path / "b" / ci.HF_ADAPTER_DIRNAME / ci.ADAPTER_WEIGHTS_FILE))
+        assert all(torch.equal(saved[peft_key(k)], init_b[k]) for k in init_b)
+        assert load_file(str(tmp_path / "b" / OPTIMIZER_DIRNAME / OPTIMIZER_FILE)) == {}, "b has not stepped"
+        assert shared.optim(ADAM, "b") == norm_b
+    finally:
+        shared.kill()
+
+
+def test_tenant_export_and_save_read_the_slot_without_swap(tmp_path):
+    """With A live, export_adapter(B) and save_state(B) write B's weights and
+    leave A live: A's next pass swaps nothing, B's next op does."""
+    from safetensors.torch import load_file
+
+    x, _ = requests()
+    bx = coalesce([x], 2)
+    shared = Group(2, 2, {"a": 1, "b": 2})   # b live
+    try:
+        shared.fwd_bwd(bx, tenant="a")
+        assert shared.last_swap > 0, "a came from its slot"
+        shared.call("export_adapter", before=("b", str(tmp_path / "export")))
+        shared.call("save_state", before=("b", str(tmp_path / "save")))
+        weights_b = shared.lora("b")
+        for path in (tmp_path / "export", tmp_path / "save" / ci.HF_ADAPTER_DIRNAME):
+            written = load_file(str(path / ci.ADAPTER_WEIGHTS_FILE))
+            assert all(torch.equal(written[peft_key(k)], weights_b[k]) for k in weights_b)
+        shared.fwd_bwd(bx, tenant="a")
+        assert shared.last_swap == 0, "a stayed live through b's export and save"
+        shared.optim(ADAM, "b")
+        assert shared.last_swap > 0
+    finally:
+        shared.kill()

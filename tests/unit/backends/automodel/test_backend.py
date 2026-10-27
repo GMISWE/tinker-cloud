@@ -31,45 +31,64 @@ run = asyncio.run
 
 class Ranks:
     """TrainingGroup stand-in: every real position scores logprob -1 and term
-    +1, so a row's loss is its length; optim_step reports the lr as the norm,
-    or raises `fault` once; export_adapter writes a marker file; save_state
-    writes the three checkpoint files (waiting on `hold_save` when set) and
-    load_state records its arguments, or raises `fault` once."""
+    +1, so a row's loss is its length; optim_step reports the lr as the norm
+    (waiting on `hold_step` when set), or raises `fault` once; so do
+    add_tenant, remove_tenant and load_state; export_adapter writes a marker
+    file; save_state writes the three checkpoint files (waiting on
+    `hold_save` when set). `ops` records every call with its tenant."""
     num_ranks = 2
 
     def __init__(self):
         self.passes = []        # (kind, rows per rank, clip)
+        self.ops = []           # (method, tenant), in call order
         self.fault = None
         self.stopped = False
         self.exports = []
         self.saves = []
         self.loads = []         # (adapter_dir, optimizer_dir)
         self.hold_save = None   # asyncio.Event a save waits for
+        self.hold_step = None   # asyncio.Event a step waits for
+        self.swap_seconds = 0.0
 
-    async def export_adapter(self, dest):
+    def _maybe_fault(self):
+        if self.fault is not None:
+            fault, self.fault = self.fault, None
+            raise fault
+
+    async def add_tenant(self, tenant, seed):
+        self.ops.append(("add_tenant", tenant))
+        self._maybe_fault()
+
+    async def remove_tenant(self, tenant):
+        self.ops.append(("remove_tenant", tenant))
+        self._maybe_fault()
+
+    async def export_adapter(self, tenant, dest):
+        self.ops.append(("export_adapter", tenant))
         dest.mkdir(parents=True, exist_ok=True)   # a version is re-exported when its load failed
         (dest / "adapter_model.safetensors").write_bytes(b"")
         self.exports.append(dest)
 
-    async def save_state(self, root):
+    async def save_state(self, tenant, root):
+        self.ops.append(("save_state", tenant))
         if self.hold_save is not None:
             await self.hold_save.wait()
         write_root(root)
         self.saves.append(root)
 
-    async def load_state(self, adapter_dir, optimizer_dir):
-        if self.fault is not None:
-            fault, self.fault = self.fault, None
-            raise fault
+    async def load_state(self, tenant, adapter_dir, optimizer_dir):
+        self.ops.append(("load_state", tenant))
+        self._maybe_fault()
         self.loads.append((adapter_dir, optimizer_dir))
 
-    async def forward_backward(self, shards, clip):
-        return self._run("forward_backward", shards, clip)
+    async def forward_backward(self, tenant, shards, clip):
+        return self._run("forward_backward", tenant, shards, clip)
 
-    async def forward(self, shards, clip):
-        return self._run("forward", shards, clip)
+    async def forward(self, tenant, shards, clip):
+        return self._run("forward", tenant, shards, clip)
 
-    def _run(self, kind, shards, clip):
+    def _run(self, kind, tenant, shards, clip):
+        self.ops.append((kind, tenant))
         self.passes.append((kind, [s.num_rows for s in shards], clip))
         outs = []
         for s in shards:
@@ -79,14 +98,16 @@ class Ranks:
                 "logprobs": -valid.float(),
                 "elementwise": valid.float(),
                 "clamped": torch.zeros(s.num_rows),
+                "swap_seconds": self.swap_seconds,
             })
         return outs
 
-    async def optim_step(self, adam):
-        if self.fault is not None:
-            fault, self.fault = self.fault, None
-            raise fault
-        return [{"grad_norm": adam.learning_rate}] * self.num_ranks
+    async def optim_step(self, tenant, adam):
+        self.ops.append(("optim_step", tenant))
+        if self.hold_step is not None:
+            await self.hold_step.wait()
+        self._maybe_fault()
+        return [{"grad_norm": adam.learning_rate, "swap_seconds": self.swap_seconds}] * self.num_ranks
 
     async def stop(self):
         self.stopped = True
@@ -161,14 +182,16 @@ def files_under(path):
     return {p.relative_to(path).as_posix() for p in path.rglob("*") if p.is_file()}
 
 
-def wired(tmp_path=None, vllm=None, tenants=("m",)):
-    """A backend with one group "g" serving model "m" on a Ranks stand-in and,
-    given tmp_path, a sampler "s" for its base on a Vllm stand-in (routed for
-    "m"). Call inside a running loop: the scheduler starts its worker task."""
+def wired(tmp_path=None, vllm=None, tenants=("m",), group_tenants=("m",)):
+    """A backend with one group "g" serving `group_tenants` on a Ranks stand-in
+    and, given tmp_path, a sampler "s" for their base, serving `tenants`, on a
+    Vllm stand-in. Returns the handle of "m" (route it with `routed` before a
+    sample); `tenant_handle` makes the others. Call inside a running loop:
+    the scheduler starts its worker task."""
     backend = AutomodelBackend(overrides=CONFIG)
     ranks = Ranks()
     scheduler = GroupScheduler("g", lambda pk, payloads: backend._run_pass("g", pk, payloads))
-    backend._groups["g"] = _Group("g", ranks, scheduler, {"m"})
+    backend._groups["g"] = _Group("g", ranks, scheduler, set(group_tenants))
     handle = AutomodelHandle(model_id="m", base_model="b", lora=LORA, group_key="g")
     if tmp_path is not None:
         vllm = vllm or Vllm()
@@ -176,6 +199,53 @@ def wired(tmp_path=None, vllm=None, tenants=("m",)):
         backend._samplers["s"] = _Sampler("s", Host(), VLLM, set(tenants))
         handle.sampler_key, handle.native_root, handle.tokenizer = "s", tmp_path, Tokenizer()
     return backend, ranks, handle
+
+
+def tenant_handle(handle, model_id):
+    """Another tenant of `handle`'s group and sampler, with its own native root."""
+    root = None if handle.native_root is None else handle.native_root / model_id
+    return AutomodelHandle(model_id=model_id, base_model=handle.base_model, lora=handle.lora, group_key=handle.group_key,
+                           sampler_key=handle.sampler_key, native_root=root, tokenizer=handle.tokenizer)
+
+
+def creatable(monkeypatch):
+    """A backend whose create_model runs on stand-ins: every TrainingGroup it
+    starts is a Ranks (collected in the returned list), the sampler is a host
+    that answers with VLLM's URL, the HF config read and the tokenizer are
+    constants. The Ray sweep is skipped."""
+    import sys
+    import types
+
+    from tinkercloud.training.backends.automodel import backend as mod
+
+    started = []
+
+    class Group(Ranks):
+        def __init__(self, key, num_ranks):
+            super().__init__()
+            self.key = key
+            started.append(self)
+
+        async def start(self, base_model, lora, micro_batch_rows):
+            return 42
+
+    class Sampler(Host):
+        def __init__(self, key):
+            super().__init__()
+            self.key = key
+
+        async def start(self, base_model, max_model_len, config):
+            return VLLM
+
+    monkeypatch.setattr(mod, "TrainingGroup", Group)
+    monkeypatch.setattr(mod, "SamplerGroup", Sampler)
+    monkeypatch.setattr(mod, "sweep_leftovers", lambda: 0)
+    monkeypatch.setattr(mod, "read_raw_hf_config", lambda base_model: {})
+    monkeypatch.setattr(mod, "classification_spec", lambda raw: None)
+    monkeypatch.setattr(mod, "model_context_length", lambda raw: 2048)
+    tokenizers = types.SimpleNamespace(from_pretrained=lambda base_model: Tokenizer())
+    monkeypatch.setitem(sys.modules, "transformers", types.SimpleNamespace(AutoTokenizer=tokenizers))
+    return AutomodelBackend(overrides=CONFIG), started
 
 
 @pytest.fixture
@@ -202,7 +272,7 @@ def test_pass_results_are_split_per_request():
         )
         assert a["loss"] == 8.0 and b["loss"] == 2.0
         assert a["loss_fn_output_type"] == LossFn.CROSS_ENTROPY.value
-        assert a["metrics"] == {"loss:sum": 8.0, "clamped_positions:sum": 0}
+        assert a["metrics"] == {"loss:sum": 8.0, "clamped_positions:sum": 0, "swap_seconds:max": 0.0}
         assert [o["logprobs"]["shape"] for o in a["loss_fn_outputs"]] == [[3], [5]]
         assert a["loss_fn_outputs"][1]["logprobs"]["data"] == [-1.0] * 5
         assert a["loss_fn_outputs"][0]["elementwise_loss"]["data"] == [1.0] * 3
@@ -225,8 +295,11 @@ def test_nonfinite_step_fails_the_request_and_keeps_the_group(tmp_path):
         with pytest.raises(BackendError, match="grad norm is inf"):
             await backend.apply_optimizer_step(handle, 0.5, ADAM)
         assert not ranks.stopped and handle.weight_version == 0
+        ranks.swap_seconds = 0.25
         result = await backend.apply_optimizer_step(handle, 0.5, ADAM)
         assert result["grad_norm"] == 0.5 and result["weight_version"] == 1
+        assert result["swap_seconds"] == 0.25 and result["metrics"] == {"swap_seconds": 0.25}
+        assert (await backend.forward(handle, [ce_datum([1, 2])], "cross_entropy"))["metrics"]["swap_seconds:max"] == 0.25
         await backend.close()
     run(go())
 
@@ -270,6 +343,99 @@ def test_delete_closes_the_scheduler_and_stops_the_ranks():
         assert ranks.stopped and "g" not in backend._groups
         with pytest.raises(BackendError, match="deleted"):
             await backend.forward(handle, [ce_datum([1, 2])], "cross_entropy")
+    run(go())
+
+
+# --- tenants of one group ----------------------------------------------------
+
+LORA_A = {"rank": 8, "alpha": 16}
+
+
+def test_tenant_create_joins_the_group_or_opens_its_own_group(monkeypatch, tmp_path):
+    backend, started = creatable(monkeypatch)
+
+    async def go():
+        a = await backend.create_model("a", "r1", "base", 2, lora_config=LORA_A, native_root=tmp_path / "a")
+        b = await backend.create_model("b", "r2", "base", 2, lora_config=LORA_A, native_root=tmp_path / "b")
+        assert a.group_key == b.group_key and len(started) == 1, "the same signature joins the group"
+        assert backend._groups[a.group_key].tenants == {"a", "b"}
+        assert started[0].ops == [("add_tenant", "a"), ("add_tenant", "b")]
+        c = await backend.create_model("c", "r3", "base", 2, lora_config={**LORA_A, "alpha": 32}, native_root=tmp_path / "c")
+        assert c.group_key != a.group_key and len(started) == 2, "another signature opens its own group"
+        assert started[1].ops == [("add_tenant", "c")] and backend._groups[c.group_key].tenants == {"c"}
+        assert a.sampler_key == b.sampler_key == c.sampler_key, "one vLLM per base model"
+        # every pass names its tenant to the one group
+        await backend.forward_backward(a, [ce_datum([1, 2])], "cross_entropy")
+        assert (await backend.forward_backward(b, [ce_datum([1, 2, 3])], "cross_entropy"))["loss"] == 3.0
+        assert started[0].ops[2:] == [("forward_backward", "a"), ("forward_backward", "b")]
+        await backend.close()
+    run(go())
+
+
+def test_tenant_failed_joins_leave_the_group_untouched(monkeypatch, tmp_path):
+    backend, started = creatable(monkeypatch)
+
+    async def go():
+        a = await backend.create_model("a", "r1", "base", 2, lora_config=LORA_A, native_root=tmp_path / "a")
+        started[0].fault = RuntimeError("pinned memory exhausted")
+        with pytest.raises(BackendError, match="model b could not join training group .*pinned memory exhausted"):
+            await backend.create_model("b", "r2", "base", 2, lora_config=LORA_A, native_root=tmp_path / "b")
+        group = backend._groups[a.group_key]
+        assert group.tenants == {"a"} and group.lost is None and not started[0].stopped
+        assert (await backend.forward(a, [ce_datum([1, 2])], "cross_entropy"))["loss"] == 2.0
+        await backend.close()
+    run(go())
+
+
+def test_tenant_delete_frees_the_slot_and_the_last_delete_stops_the_ranks(tmp_path):
+    async def go():
+        vllm = Vllm()
+        backend, ranks, m = wired(tmp_path, vllm, tenants=("m", "b"), group_tenants=("m", "b"))
+        b = tenant_handle(m, "b")
+        host = backend._samplers["s"].host
+        await backend.prepare_for_generation(m)
+        await backend.prepare_for_generation(b)
+        assert set(vllm.loaded) == {"m@v0", "b@v0"}
+
+        await backend.delete_model(m)
+        assert not ranks.stopped and ranks.ops[-1] == ("remove_tenant", "m")
+        group = backend._groups["g"]
+        assert group.tenants == {"b"} and group.lost is None
+        assert vllm.unloaded == ["m@v0"] and set(vllm.loaded) == {"b@v0"} and not host.stopped
+        assert (await backend.forward(b, [ce_datum([1, 2, 3])], "cross_entropy"))["loss"] == 3.0
+        with pytest.raises(BackendError, match="model m has no training group: the model was deleted"):
+            await backend.forward(m, [ce_datum([1, 2])], "cross_entropy")
+        assert ranks.ops[-1] == ("forward", "b"), "a deleted tenant's handle never reaches the ranks"
+
+        await backend.delete_model(b)
+        assert ranks.stopped and "g" not in backend._groups and host.stopped
+        await backend.close()
+    run(go())
+
+
+def test_tenant_fault_in_one_pass_fails_every_queued_tenant_and_names_the_cause_after():
+    async def go():
+        backend, ranks, a = wired(group_tenants=("a", "b"))
+        a.model_id = "a"
+        b = tenant_handle(a, "b")
+        ranks.hold_step = asyncio.Event()
+        ranks.fault = RuntimeError("CUDA error")
+        step_a = asyncio.create_task(backend.apply_optimizer_step(a, 0.5, ADAM))
+        await asyncio.sleep(0.02)
+        pass_b = asyncio.create_task(backend.forward_backward(b, [ce_datum([1, 2])], "cross_entropy"))
+        await asyncio.sleep(0.02)
+        assert ranks.passes == [], "b's pass waits behind a's step"
+        ranks.hold_step.set()
+        with pytest.raises(BackendError, match="released"):
+            await step_a
+        with pytest.raises(BackendError, match="CUDA error"):
+            await pass_b
+        await until_stopped(ranks)
+        assert ranks.passes == [], "the queued pass never ran"
+        for handle in (a, b):
+            with pytest.raises(BackendError, match="CUDA error"):
+                await backend.forward(handle, [ce_datum([1, 2])], "cross_entropy")
+        await backend.close()
     run(go())
 
 
