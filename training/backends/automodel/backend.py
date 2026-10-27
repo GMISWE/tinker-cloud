@@ -132,7 +132,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         super().__init__(overrides)
         self.config = AutomodelConfig.from_env(overrides)
         self._groups: Dict[str, _Group] = {}
-        self._lost: Dict[str, str] = {}      # group key -> why it was torn down
+        self._lost_tenants: Dict[str, str] = {}   # model id -> why its group was torn down, until it is deleted
         self._samplers: Dict[str, _Sampler] = {}
         self._sampler_boots: Dict[str, asyncio.Lock] = {}   # one vLLM boot per base model at a time
         self._membership: Dict[str, asyncio.Lock] = {}      # per group key: who opens, joins, leaves, releases
@@ -230,9 +230,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
             raise
         scheduler = GroupScheduler(key, lambda pk, payloads: self._run_pass(key, pk, payloads))
         group = _Group(key, ranks, scheduler, {model_id})
-        self._groups[key] = group
-        if key in self._lost:
-            del self._lost[key]
+        self._groups[key] = group   # replaces a group lost under this key; its tenants keep their cause (_lost_tenants)
         logger.info("[%s] training group %s up: LoRA %d elements", request_id, key, lora_numel)
         return group
 
@@ -304,6 +302,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
 
     async def delete_model(self, handle: AutomodelHandle) -> None:
         await self._drop_tenant(handle.group_key, handle.model_id, "delete_model", f"model {handle.model_id} was deleted")
+        self._lost_tenants.pop(handle.model_id, None)   # from here on the model is deleted, whatever its group's fate was
         if handle.sampler_key in self._samplers:
             sampler = self._samplers[handle.sampler_key]
             sampler.tenants.discard(handle.model_id)
@@ -517,17 +516,19 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
 
     # --- faults ----------------------------------------------------------
     def _live_group(self, handle: AutomodelHandle, op: str) -> _Group:
-        """The handle's group, if it is up; otherwise the error names why it is not."""
-        key = handle.group_key
-        if key in self._groups and self._groups[key].lost is None:
-            group = self._groups[key]
-            if handle.model_id in group.tenants:
-                return group
-            # a stale handle must not reach the ranks: they would refuse the tenant, and a refusal is a fault
-            raise BackendError(f"model {handle.model_id} has no training group: the model was deleted",
+        """The handle's group, if it is up; otherwise the error names why it is
+        not: the fault that took the group, until the model is deleted, else
+        the deletion. A stale handle must not reach the ranks (they would
+        refuse the tenant, and a refusal is a fault), nor the group that
+        reopened under its key after the fault."""
+        if handle.model_id in self._lost_tenants:
+            raise BackendError(f"model {handle.model_id} has no training group: {self._lost_tenants[handle.model_id]}",
                                backend=BACKEND, operation=op)
-        why = self._lost[key] if key in self._lost else "the model was deleted"
-        raise BackendError(f"model {handle.model_id} has no training group: {why}", backend=BACKEND, operation=op)
+        key = handle.group_key
+        if key in self._groups and self._groups[key].lost is None and handle.model_id in self._groups[key].tenants:
+            return self._groups[key]
+        raise BackendError(f"model {handle.model_id} has no training group: the model was deleted",
+                           backend=BACKEND, operation=op)
 
     def _mark_lost(self, group: _Group, reason: str) -> None:
         """Runs inside the group's scheduler. The queue is abandoned here, at
@@ -537,7 +538,8 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         if group.lost is not None:
             return
         group.lost = reason
-        self._lost[group.key] = reason
+        for model_id in group.tenants:
+            self._lost_tenants[model_id] = reason
         logger.error("training group %s is lost: %s", group.key, reason)
         group.scheduler.abandon(reason)
         task = asyncio.create_task(self._release(group, reason))
