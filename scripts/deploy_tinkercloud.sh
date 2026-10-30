@@ -327,7 +327,7 @@ tar -C "$SRC" -czf "$TMP/code.tar.gz" \
   --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
   --exclude='.venv' --exclude='tinker-cookbook/attic' \
   tinker-cloud/training tinker-cloud/tests tinker-cloud/gates tinker-cloud/pyproject.toml \
-  tinker-cloud/scripts/evo2 tinker-cloud/scripts/automodel \
+  tinker-cloud/scripts/evo2 tinker-cloud/scripts/automodel tinker-cloud/scripts/gates \
   RL/nemo_rl \
   tinker_gmi/src tinker_gmi/pyproject.toml tinker_gmi/README.md \
   tinker-cookbook/tinker_cookbook tinker-cookbook/pyproject.toml tinker-cookbook/README.md \

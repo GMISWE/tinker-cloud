@@ -30,6 +30,7 @@ mv /tmp/tinker-cloud/tests /app/tests
 [ -d /tmp/tinker-cloud/gates ] && mv /tmp/tinker-cloud/gates /app/gates
 [ -d /tmp/tinker-cloud/scripts/evo2 ] && { mkdir -p /app/scripts; mv /tmp/tinker-cloud/scripts/evo2 /app/scripts/evo2; }
 [ -d /tmp/tinker-cloud/scripts/automodel ] && { mkdir -p /app/scripts; mv /tmp/tinker-cloud/scripts/automodel /app/scripts/automodel; }
+[ -d /tmp/tinker-cloud/scripts/gates ] && { mkdir -p /app/scripts; mv /tmp/tinker-cloud/scripts/gates /app/scripts/gates; }
 
 if [ "$PROFILE" = automodel ]; then
   /opt/venv/bin/python -c 'import nemo_automodel, torch, ray; print("training env OK: torch", torch.__version__, "ray", ray.__version__)'
