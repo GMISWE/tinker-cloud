@@ -13,7 +13,8 @@
 #
 # GPU suites (tests/gpu/...) take minutes per test and pytest prints the
 # tracebacks only at the end, so a tests/gpu path adds -x unless -x or
-# --maxfail is given; rerun one test with -k <name>. They start their own Ray
+# --maxfail is given; rerun one test with -k <name>. Their kubectl timeout
+# defaults to 1800 s instead of 600 (KX_TIMEOUT overrides). They start their own Ray
 # instance, which Ray refuses while a head runs on the pod, so the run stops
 # before the push when one does.
 #
@@ -30,6 +31,8 @@ GPU_RUN=0
 case " $* " in
   *" tests/gpu"*) GPU_RUN=1; case " $* " in *" -x "*|*" --maxfail"*) ;; *) set -- "$@" -x ;; esac ;;
 esac
+# kubectl calls time out at KX_TIMEOUT seconds; a GPU suite needs the long default
+KX_TIMEOUT="${KX_TIMEOUT:-$([ "$GPU_RUN" = 1 ] && echo 1800 || echo 600)}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REMOTE="/tmp/pytest-${USER:-u}"
 LOG="$HOME/.cache/tinkercloud/pod_pytest.log"; mkdir -p "$(dirname "$LOG")"
@@ -47,7 +50,7 @@ require_tunnel
 
 kx() { # retry kubectl on control-plane drops (pod-ops §12)
   local i; for i in 1 2 3 4; do
-    if timeout "${KX_TIMEOUT:-600}" kubectl -n "$NS" "$@"; then return 0; fi
+    if timeout "$KX_TIMEOUT" kubectl -n "$NS" "$@"; then return 0; fi
     echo "  kubectl retry $i" >&2; sleep 5
   done; return 1
 }
@@ -75,7 +78,7 @@ echo "==> $POD:$REMOTE/app (sha $SHA)"
 # not retried: a non-zero exit here is pytest's verdict, not a dropped connection
 # SDK_PYTHONPATH: a candidate tinker SDK (src dir, plus its deps) to shadow the pod's installed one
 RC=0
-timeout "${KX_TIMEOUT:-600}" kubectl -n "$NS" exec "$POD" -- bash -c "cd '$REMOTE/app' && env -u TINKERCLOUD_BACKEND -u RAY_ADDRESS PYTHONPATH='${SDK_PYTHONPATH:+$SDK_PYTHONPATH:}$REMOTE' python -m pytest $(printf '%q ' "$@")" \
+timeout "$KX_TIMEOUT" kubectl -n "$NS" exec "$POD" -- bash -c "cd '$REMOTE/app' && env -u TINKERCLOUD_BACKEND -u RAY_ADDRESS PYTHONPATH='${SDK_PYTHONPATH:+$SDK_PYTHONPATH:}$REMOTE' python -m pytest $(printf '%q ' "$@")" \
   | tee "$TMP/run.log" || RC=$?
 # the verdict is pytest's summary line ("N passed, M skipped in ...", "N tests collected", "no tests ran", "ERROR: ...")
 VERDICT="$(grep -E '^(=+ )?([0-9]+ (passed|failed|errors?|skipped|tests? collected|deselected)|no tests ran|ERROR)' "$TMP/run.log" | tail -1 | tr -d '=' | sed 's/^ *//;s/ *$//')"
