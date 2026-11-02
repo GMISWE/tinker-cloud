@@ -16,3 +16,17 @@ require_tunnel() {
   esac
   return 0
 }
+
+# kubectl helpers every pod script shares (pod-ops: every exec is droppable).
+# kx: any kubectl verb, retried on control-plane drops; each try is bounded by
+# KX_TIMEOUT seconds (default 600). EX: one exec of a bash string on $POD, no
+# retry (a launch retried on rc double-launches); EX_TIMEOUT bounds that exec
+# and treats the timeout as no verdict. Callers set POD before the first call.
+kx() {
+  local i; for i in 1 2 3 4; do
+    if timeout "${KX_TIMEOUT:-600}" kubectl -n "$NS" "$@"; then return 0; fi
+    echo "  kubectl retry $i" >&2; sleep 5
+  done; return 1
+}
+EX() { kubectl -n "$NS" exec "$POD" -- bash -c "$1"; }
+EX_TIMEOUT() { timeout "$1" kubectl -n "$NS" exec "$POD" -- bash -c "$2" || true; }

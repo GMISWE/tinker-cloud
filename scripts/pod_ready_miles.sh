@@ -18,7 +18,7 @@ set -euo pipefail
 MODEL="${1:-Qwen2.5-0.5B}"
 HF_ID="${HF_ID:-Qwen/$MODEL}"
 # shellcheck source=scripts/lib/cluster.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE, EX
 require_tunnel
 POD="${POD:-tinkercloud-miles}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,7 +27,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # compares the deployed copies against the same siblings.
 SRC_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-EX() { kubectl -n "$NS" exec "$POD" -- bash -c "$1"; }
 
 echo "==> [1/6] pod alive + GPUs visible"
 EX "nvidia-smi --query-gpu=index,memory.used --format=csv,noheader"

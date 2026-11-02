@@ -22,7 +22,7 @@
 # also one that stops before pytest (tunnel down, push failed, Ray head up).
 set -euo pipefail
 # shellcheck source=scripts/lib/cluster.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE, kx
 POD="${1:-tinkercloud-nemorl}"; shift || true
 if [ $# -eq 0 ]; then
   set -- tests/unit tests/conformance -q -p no:cacheprovider
@@ -47,13 +47,6 @@ on_exit() {
 }
 trap on_exit EXIT
 require_tunnel
-
-kx() { # retry kubectl on control-plane drops (pod-ops §12)
-  local i; for i in 1 2 3 4; do
-    if timeout "$KX_TIMEOUT" kubectl -n "$NS" "$@"; then return 0; fi
-    echo "  kubectl retry $i" >&2; sleep 5
-  done; return 1
-}
 
 # one shot, not kx: a dropped connection here means "unknown" and the run goes on.
 # `ray stop` leaves <defunct> raylets behind, so only a non-zombie state counts.
