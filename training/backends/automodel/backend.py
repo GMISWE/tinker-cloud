@@ -47,6 +47,7 @@ import httpx
 import torch
 
 from ...checkpoints.interchange import ADAPTER_CONFIG_FILE, ADAPTER_WEIGHTS_FILE, HF_ADAPTER_DIRNAME, find_hf_adapter, read_adapter_config
+from ...core.fault_injection import hang_point
 from ...core.loss_registry import clip_thresholds
 from ...models.requests import AdamParams, Datum, LoraConfig
 from ...utils.model_config import model_context_length, read_raw_hf_config
@@ -355,6 +356,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         adam = AdamParams(learning_rate=learning_rate, **adam_params)
 
         async def step() -> Dict[str, Any]:
+            await hang_point("automodel.apply_optimizer_step")   # test-only; a no-op unless configured
             try:
                 outs = await group.ranks.optim_step(handle.model_id, adam)
             except NonFiniteGradNorm as e:
