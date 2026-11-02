@@ -18,15 +18,13 @@ shift
 EXTRA_ENV=("$@")
 
 # shellcheck source=scripts/lib/cluster.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE, EX, EX_TIMEOUT
 require_tunnel
 POD="${POD:-tinkercloud-miles}"
 GPUS="${GPUS:-4}"
 BACKEND="${BACKEND:-miles}"
 SERVER_LOG="/data/${LOG_NAME}.log"
 
-EX() { kubectl -n "$NS" exec "$POD" -- bash -c "$1"; }
-EX_TIMEOUT() { timeout "$1" kubectl -n "$NS" exec "$POD" -- bash -c "$2" || true; }
 
 # 1. kill the server (own exec; launch-flag-agnostic bracketed pattern)
 echo "==> killing server"
