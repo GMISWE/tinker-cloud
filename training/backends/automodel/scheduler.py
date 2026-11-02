@@ -88,9 +88,12 @@ class GroupScheduler(Generic[P, R]):
         self._wakeup.set()
 
     async def close(self, reason: str) -> None:
-        """abandon(reason), then wait for the op in progress."""
+        """abandon(reason), then wait for the op in progress. A worker that
+        already ended (cancelled through an earlier close, or dead) is not
+        awaited again: its CancelledError is not this caller's."""
         self.abandon(reason)
-        await self._worker
+        if not self._worker.done():
+            await self._worker
 
     def _new_future(self) -> asyncio.Future:
         if self._closed is not None:

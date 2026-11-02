@@ -25,6 +25,7 @@ from .storage.futures import DuplicateSeqId
 from .config import get_config, TrainingConfig
 from .utils import APIKeyAuth
 from .core.runtime_state import TrainingRuntimeState
+from .services.reaper import ModelReaper
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -168,13 +169,18 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
         logger.info("✅ Dependency providers registered on app state")
 
         # Session reaper: a session silent longer than session_timeout_s is
-        # expired and its models freed (the SDK heartbeats every 10 s).
+        # expired and its models freed (the SDK heartbeats every 10 s), each
+        # in its own task, so one stuck delete holds no other tenant's GPUs.
+        reaper = ModelReaper(lambda model_id, reason: _free_model(application, model_id, reason))
+        application.state.model_reaper = reaper
         application.state.session_reaper = None
         if config_obj.session_timeout_s >= 0:
-            application.state.session_reaper = asyncio.create_task(
-                _reap_sessions_forever(application, config_obj.session_timeout_s,
-                                       config_obj.session_reap_interval_s)
-            )
+            session_service = application.state.session_service
+            application.state.session_reaper = asyncio.create_task(reaper.run_forever(
+                config_obj.session_reap_interval_s,
+                lambda: session_service.reap_stale_sessions(config_obj.session_timeout_s),
+                lambda: application.state.runtime.training_clients,
+            ))
             logger.info("Session reaper enabled: timeout=%ss interval=%ss",
                         config_obj.session_timeout_s, config_obj.session_reap_interval_s)
 
@@ -205,8 +211,8 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
             reaper.cancel()
         application.state.sample_futures_sweeper.cancel()
         runtime: TrainingRuntimeState = application.state.runtime
-        for model_id in list(runtime.training_clients):
-            await _free_model(application, model_id, reason="shutdown")
+        # a free stuck on a hung op is cancelled first, then every live model is freed at once
+        await application.state.model_reaper.shutdown(list(runtime.training_clients))
         await application.state.backend.close()
         if ray.is_initialized():
             ray.shutdown()
@@ -271,21 +277,6 @@ async def _free_model(application: FastAPI, model_id: str, reason: str) -> None:
         application.state.session_service.remove_model(model_id)
     except Exception:  # pylint: disable=broad-except
         logger.exception("Failed to unlink model %s from its session", model_id)
-
-
-async def _reap_sessions_forever(application: FastAPI, timeout_s: float, interval_s: float) -> None:
-    session_service = application.state.session_service
-    while True:
-        await asyncio.sleep(interval_s)
-        try:
-            for session_id, model_ids in session_service.reap_stale_sessions(timeout_s):
-                logger.warning("Session %s silent > %ss: expired, freeing %d model(s)",
-                               session_id, timeout_s, len(model_ids))
-                for model_id in model_ids:
-                    if model_id in application.state.runtime.training_clients:
-                        await _free_model(application, model_id, reason=f"session {session_id} expired")
-        except Exception:  # pylint: disable=broad-except
-            logger.exception("Session reaper tick failed")
 
 
 app = create_app()

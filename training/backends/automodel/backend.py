@@ -260,8 +260,8 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
             if group.tenants - {model_id}:
                 await self._leave(group, model_id, op)
             else:
+                await self._release(group, reason)   # a release cut short keeps the tenant: the next delete frees for real
                 group.tenants.discard(model_id)
-                await self._release(group, reason)
 
     async def _leave(self, group: _Group, model_id: str, op: str) -> None:
         """Free the tenant's state on every rank, as a barrier; the group stays
