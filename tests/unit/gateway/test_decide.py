@@ -1,4 +1,4 @@
-"""The decision returns a destination or a status, never bytes, and never awaits (D22)."""
+"""The decision returns a destination or a status, never bytes, and never awaits."""
 import asyncio
 
 import orjson

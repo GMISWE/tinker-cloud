@@ -162,7 +162,7 @@ class SessionStore:
     # ------------------------------------------------------------------ models
 
     def add_model(self, session_id: str, model_id: str, model_seq_id: int, base_model: str, engine: str) -> None:
-        """Record a model at submit (R8.11); a create that fails later leaves the row until its delete."""
+        """Record a model at submit; a create that fails later leaves the row until its delete."""
         self._write("INSERT OR REPLACE INTO session_models (session_id, model_id, model_seq_id, base_model, created_at, engine) VALUES (?, ?, ?, ?, ?, ?)",
                     (session_id, model_id, model_seq_id, base_model, _now(), engine))
 

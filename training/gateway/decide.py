@@ -31,7 +31,7 @@ _PINNED_HEADER = PINNED_VERSION_HEADER.lower().encode()
 
 @dataclass(frozen=True)
 class ModelRecord:
-    """A model to record at submit (R8.11): the engine that gets it, the session that owns it."""
+    """A model to record at submit: the engine that gets it, the session that owns it."""
     model_id: str
     session_id: str
     model_seq_id: int
@@ -113,7 +113,7 @@ class Decider:
         return Route(engine, [])
 
     def _sampling(self, engine: EngineRow, sid: object) -> Union[Route, Reject]:
-        """A sampler names its model and the version it pinned; both travel as headers (R8.20).
+        """A sampler names its model and the version it pinned; both travel as headers.
         A request that names no sampler (model_path, base_model) is the engine's to resolve."""
         if not isinstance(sid, str) or not sid:
             return Route(engine, [])

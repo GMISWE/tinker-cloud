@@ -1,4 +1,4 @@
-"""The model registry is written at submit (R8.11): the gateway mints the id, records the model under its
+"""The model registry is written at submit: the gateway mints the id, records the model under its
 session before the engine answers, and drops the row when the engine has deleted the model or never had it."""
 import re
 
