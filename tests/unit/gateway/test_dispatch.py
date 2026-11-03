@@ -1,8 +1,10 @@
 """The two listeners are told apart by the scope's server address, in both shapes uvicorn has used; a request without Host is refused."""
 import orjson
+from fastapi import FastAPI
 
 from training.gateway.app import build_app, is_unix_listener
 from training.gateway.registry import Registry
+from training.gateway.sessions import SessionStore
 
 from .support import API_KEY, config, run
 
@@ -23,12 +25,14 @@ def _scripted(messages):
 
 
 def _scope(server, path="/engines", method="GET", headers=()):
-    return {"type": "http", "method": method, "path": path, "query_string": b"", "headers": list(headers), "server": server}
+    return {"type": "http", "method": method, "path": path, "query_string": b"", "headers": list(headers), "server": server,
+            "scheme": "http", "http_version": "1.1", "client": ("client", 1)}
 
 
-def test_both_unix_scope_shapes_reach_the_engines_face():
+def test_the_app_is_fastapi_and_both_unix_scope_shapes_reach_the_engines_face():
     async def main():
-        app = build_app(config("asgi", "h11"), Registry())
+        app = build_app(config(), Registry(), SessionStore(None))
+        assert isinstance(app, FastAPI)
         for server in (None, ("/tmp/gateway.sock", None)):
             sent = []
 
@@ -41,7 +45,7 @@ def test_both_unix_scope_shapes_reach_the_engines_face():
 
 def test_a_request_without_host_is_400_at_the_gateway():
     async def main():
-        app = build_app(config("asgi", "h11"), Registry())
+        app = build_app(config(), Registry(), SessionStore(None))
         sent = []
 
         async def send(m):

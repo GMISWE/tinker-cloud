@@ -29,10 +29,22 @@ def set_engine_name(name: str) -> None:
     _ENGINE_NAME = valid_engine_name(name)
 
 
+def mint_id(kind: str, engine: str) -> str:
+    """`<kind>_<engine>_<hex16>`: the shape `engine_name_of` reads back."""
+    return f"{kind}_{engine}_{uuid.uuid4().hex[:16]}"
+
+
+def engine_name() -> str:
+    """This process's engine name (set_engine_name was called at app creation)."""
+    if _ENGINE_NAME is None:
+        raise RuntimeError("set_engine_name was not called: ids are minted by a named engine")
+    return _ENGINE_NAME
+
+
 def _mint(kind: str) -> str:
     if _ENGINE_NAME is None:
         raise RuntimeError("set_engine_name was not called: ids are minted by a named engine")
-    return f"{kind}_{_ENGINE_NAME}_{uuid.uuid4().hex[:16]}"
+    return mint_id(kind, _ENGINE_NAME)
 
 
 def generate_request_id() -> str:
@@ -43,6 +55,15 @@ def generate_request_id() -> str:
 def generate_model_id() -> str:
     """`model_<engine>_<hex16>`."""
     return _mint("model")
+
+
+BASE_MODEL_SAMPLING_UNSUPPORTED = (
+    "base-model sampling is not supported by this deployment; create a model "
+    "and a sampler from it (save_weights_and_get_sampling_client) instead"
+)
+# the sampling target travels gateway -> engine in these two headers; the body bytes stay untouched
+MODEL_ID_HEADER = "X-Model-Id"
+PINNED_VERSION_HEADER = "X-Pinned-Version"
 
 
 def engine_name_of(id_: str) -> Optional[str]:

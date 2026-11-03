@@ -28,7 +28,6 @@ from ..core.dependencies import (
     get_futures_storage, 
     get_poll_tracking,
     get_sample_futures,
-    get_session_service,
 )
 from ..core.task_manager import TaskManager
 from ..proto.wire import PROTO_CONTENT_TYPE, PROTO_RESULT_OPERATIONS, serialize_result
@@ -213,18 +212,16 @@ async def retrieve_futures(
     request: SessionFuturesPollRequest,
     _: None = Depends(verify_api_key_dep),
     sample_futures: SampleFutureStore = Depends(get_sample_futures),
-    session_service = Depends(get_session_service),
 ):
     """Per session completion poll (SDK >= 0.25 with sample_use_retrieve_futures).
     
     Returns every sample of the (sampling session, cloned sampler) that finished
     or failed at or after `prev_cursor`, holding until the first one arrives or the
     hold expires. Entries below `prev_cursor` are treated as acked and dropped. 
-    The result payload is fetched seperately with retrieve_future.
+    The result payload is fetched seperately with retrieve_future. An unknown
+    sampling session is the gateway's 404; here it is a session with nothing in it.
     """
     target = request.target 
-    if session_service.get_sampler(target.sampling_session_id) is None:
-        raise HTTPException(status_code=404, detail=f"Unknown sampling_session_id: {target.sampling_session_id}")
     hold = RETRIEVE_FUTURES_HOLD_S if request.timeout is None else request.timeout
     entries, cursor = await sample_futures.poll(
         (target.sampling_session_id, target.cloned_sampler_id),

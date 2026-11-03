@@ -10,12 +10,11 @@ Endpoints:
 - GET /api/v1/training_runs/{model_id} - Get training run metadata
 """
 import logging
-from typing import Dict
+from typing import Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
 from ..services.model_service import ModelService
-from ..services.session_service import SessionService
 from ..core.task_manager import TaskManager
 from ..core.dependencies import (
     verify_api_key_dep,
@@ -24,7 +23,6 @@ from ..core.dependencies import (
     get_futures_storage, 
     get_training_clients,
     get_training_runs_metadata, 
-    get_session_service,
 )
 from ..storage import MetadataStorage, FuturesStorage
 from ..models.requests import (
@@ -44,7 +42,8 @@ from ..models.responses import (
     TokenizerInfo,
     SpecialTokens,
 )
-from ..utils import generate_request_id, generate_model_id
+from ..utils import generate_request_id
+from ..utils.helpers import MODEL_ID_HEADER, engine_name, engine_name_of
 
 logger = logging.getLogger(__name__)
 
@@ -64,20 +63,28 @@ def get_task_manager(
 @router.post("/api/v1/create_model", response_model=AsyncOperationResponse)
 async def create_model(
     request: CreateModelRequest,
+    http_request: Request,
     _: None = Depends(verify_api_key_dep),
     service: ModelService = Depends(get_model_service),
     task_manager: TaskManager = Depends(get_task_manager),
     metadata_storage: MetadataStorage = Depends(get_metadata_storage),
     training_clients: Dict = Depends(get_training_clients),
     training_runs_metadata: Dict = Depends(get_training_runs_metadata),
-    session_service: SessionService = Depends(get_session_service)
+    x_model_id: Optional[str] = Header(None, alias=MODEL_ID_HEADER),
 ):
     """
     Create a new training model with Ray actors and GPU resources.
     This operation is asynchronous - use retrieve_future to check status.
+
+    The gateway mints the model id and records the model under its session before the
+    request reaches here; the engine creates the model under that id.
     """
     request_id = generate_request_id()
-    model_id = generate_model_id()
+    if not x_model_id:
+        raise HTTPException(status_code=400, detail=f"{MODEL_ID_HEADER} is required: model ids are minted by the gateway")
+    if engine_name_of(x_model_id) != engine_name():
+        raise HTTPException(status_code=400, detail=f"{MODEL_ID_HEADER} {x_model_id!r} does not name this engine ({engine_name()})")
+    model_id = x_model_id
 
     # API-CONTRACT: only AdamW is served; a Dimuon run must fail here, not
     # train under AdamW with its learning rate ignored.
@@ -88,34 +95,24 @@ async def create_model(
                    f"on this server; only {SERVED_OPTIMIZER!r} is",
         )
 
-    # Validate session exists (fail fast)
-    if not session_service.session_exists(request.session_id):
-        raise HTTPException(
-            status_code=404,
-            detail=f"Session not found: {request.session_id}"
-        )
-
     async def execute():
-        result = await service.create_model(
-            model_id=model_id,
-            request_id=request_id,
-            base_model=request.base_model,
-            lora_config=request.lora_config.dict() if request.lora_config else None,
-            parallelism_config=request.parallelism_config.dict() if request.parallelism_config else None,
-            metadata_storage=metadata_storage,
-            training_clients=training_clients,
-            training_runs_metadata=training_runs_metadata,
-        )
-        # Link only once the backend holds the model, so a failed create
-        # leaves no dangling session->model entry.
-        session_service.add_model(
-            session_id=request.session_id,
-            model_id=model_id,
-            model_seq_id=request.model_seq_id,
-            base_model=request.base_model,
-        )
-        logger.info(f"Model {model_id} (seq={request.model_seq_id}) linked to session {request.session_id}")
-        return result
+        try:
+            return await service.create_model(
+                model_id=model_id,
+                request_id=request_id,
+                base_model=request.base_model,
+                lora_config=request.lora_config.dict() if request.lora_config else None,
+                parallelism_config=request.parallelism_config.dict() if request.parallelism_config else None,
+                metadata_storage=metadata_storage,
+                training_clients=training_clients,
+                training_runs_metadata=training_runs_metadata,
+            )
+        except Exception:
+            # the gateway recorded the model at submit; a create that fails is reported before the future is
+            gateway = http_request.app.state.gateway_client
+            if gateway is not None:   # None: an engine with no gateway
+                await gateway.model_failed(model_id)
+            raise
 
     # Create async task
     task_manager.create_task(
@@ -139,7 +136,6 @@ async def delete_model(
     service: ModelService = Depends(get_model_service),
     metadata_storage: MetadataStorage = Depends(get_metadata_storage),
     training_clients: Dict = Depends(get_training_clients),
-    session_service: SessionService = Depends(get_session_service)
 ):
     """Delete training client and release GPU resources."""
     try:
@@ -148,10 +144,6 @@ async def delete_model(
             training_clients=training_clients,
             metadata_storage=metadata_storage
         )
-
-        # Remove model from its session
-        session_service.remove_model(request.model_id)
-
         return DeleteModelResponse(**result)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -165,7 +157,6 @@ async def unload_model(
     task_manager: TaskManager = Depends(get_task_manager),
     metadata_storage: MetadataStorage = Depends(get_metadata_storage),
     training_clients: Dict = Depends(get_training_clients),
-    session_service: SessionService = Depends(get_session_service)
 ):
     """Unload model and release GPU resources (Tinker SDK compatible).
 
@@ -182,8 +173,6 @@ async def unload_model(
             training_clients=training_clients,
             metadata_storage=metadata_storage
         )
-        # Remove model from its session
-        session_service.remove_model(model_id)
         # Return UnloadModelResponse format for retrieve_future
         return UnloadModelResponse(model_id=model_id).dict()
 

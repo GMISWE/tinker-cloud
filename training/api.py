@@ -19,13 +19,13 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 # Import modules
-from .storage import FuturesStorage, MetadataStorage, SampleFutureStore, SessionStorage
+from .storage import FuturesStorage, MetadataStorage, SampleFutureStore
 from .checkpoints import CheckpointError, CheckpointStore
 from .storage.futures import DuplicateSeqId
 from .config import get_config, TrainingConfig
 from .utils import APIKeyAuth
 from .core.runtime_state import TrainingRuntimeState
-from .services.reaper import ModelReaper
+from .gateway.reaper import ModelReaper
 from .utils.helpers import set_engine_name
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -37,6 +37,8 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
     # Store config/runtime scaffolding for later use
     application.state.config = config or get_config()
     application.state.runtime = TrainingRuntimeState()
+    # the engine's client to its gateway (register, heartbeat, samplers); None until the entry point sets it
+    application.state.gateway_client = None
     # ids carry the engine name; the single process is the engine named after its backend
     cfg: TrainingConfig = application.state.config
     set_engine_name(cfg.engine.name if cfg.engine.name is not None else cfg.backend.backend_type)
@@ -48,7 +50,6 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
     from .routers import models as models_router_module
     from .routers import checkpoints as checkpoints_router_module
     from .routers import sampling as sampling_router_module
-    from .routers import session as session_router_module
     from .routers import billing as billing_router_module
 
     # Include all routers
@@ -58,9 +59,8 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
     application.include_router(models_router_module.router)
     application.include_router(checkpoints_router_module.router)
     application.include_router(sampling_router_module.router)
-    application.include_router(session_router_module.router)
     application.include_router(billing_router_module.router)
-    logger.info("✅ Modular routers integrated: training, health, futures, models, checkpoints, sampling, session, billing")
+    logger.info("✅ Modular routers integrated: training, health, futures, models, checkpoints, sampling, billing")
 
     @application.on_event("startup")
     async def startup_event():
@@ -101,11 +101,7 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
             logger.warning("Marked %d checkpoint save(s) interrupted by the last shutdown as failed", swept)
         logger.info("Checkpoint base: %s", config_obj.storage.checkpoint_base)
 
-        # Initialize session storage (separate DB file for sessions/samplers)
-        session_db_path = config_obj.storage.metadata_dir / "sessions.db"
-        session_storage = SessionStorage(session_db_path)
-        logger.info("Initialized storage modules - DB: %s, Sessions: %s",
-                    config_obj.storage.futures_db_path, session_db_path)
+        logger.info("Initialized storage modules - DB: %s", config_obj.storage.futures_db_path)
 
         # Clean up stale futures from previous runs (all async tasks are lost on restart)
         removed_count = futures_storage.cleanup_old_futures(max_age_hours=0)
@@ -116,11 +112,6 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
         sample_futures = SampleFutureStore()
         application.state.sample_futures = sample_futures
         application.state.sample_futures_sweeper = asyncio.create_task(sample_futures.sweep_forever())
-
-        # Clean up stale sessions BEFORE loading into SessionService
-        removed_sessions, removed_session_ids = session_storage.cleanup_stale_sessions(max_age_hours=24)
-        if removed_sessions > 0:
-            logger.info("Cleaned up %s stale sessions before loading", removed_sessions)
 
         # Initialize backend
         backend_type = config_obj.backend.backend_type
@@ -148,7 +139,6 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
         application.state.futures_storage = futures_storage
         application.state.metadata_storage = metadata_storage
         application.state.checkpoint_store = checkpoint_store
-        application.state.session_storage = session_storage
         application.state.auth = auth
         application.state.backend = backend
         application.state.backend_type = backend_type
@@ -158,7 +148,6 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
         from .services.training_service import TrainingService
         from .services.checkpoint_service import CheckpointService
         from .services.sampling_service import SamplingService
-        from .services.session_service import SessionService
 
         application.state.model_service = ModelService(
             backend=backend, store=checkpoint_store, sample_futures=sample_futures,
@@ -167,26 +156,12 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
         application.state.training_service = TrainingService(backend=backend)
         application.state.checkpoint_service = CheckpointService(backend=backend, store=checkpoint_store)
         application.state.sampling_service = SamplingService(backend=backend)
-        # Initialize SessionService with storage for persistence
-        application.state.session_service = SessionService(storage=session_storage)
 
         logger.info("✅ Dependency providers registered on app state")
 
-        # Session reaper: a session silent longer than session_timeout_s is
-        # expired and its models freed (the SDK heartbeats every 10 s), each
-        # in its own task, so one stuck delete holds no other tenant's GPUs.
-        reaper = ModelReaper(lambda model_id, reason: _free_model(application, model_id, reason))
-        application.state.model_reaper = reaper
-        application.state.session_reaper = None
-        if config_obj.session_timeout_s >= 0:
-            session_service = application.state.session_service
-            application.state.session_reaper = asyncio.create_task(reaper.run_forever(
-                config_obj.session_reap_interval_s,
-                lambda: session_service.reap_stale_sessions(config_obj.session_timeout_s),
-                lambda: application.state.runtime.training_clients,
-            ))
-            logger.info("Session reaper enabled: timeout=%ss interval=%ss",
-                        config_obj.session_timeout_s, config_obj.session_reap_interval_s)
+        # Sessions and their reaper live in the gateway; this engine frees a model on the
+        # gateway's delete, and every live model at shutdown, each in its own task.
+        application.state.model_reaper = ModelReaper(lambda model_id, reason: _free_model(application, model_id, reason))
 
         # Initialize Ray
         if not backend.needs_ray:
@@ -222,9 +197,6 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
     @application.on_event("shutdown")
     async def shutdown_event():
         """Free every live model (actors, placement groups) before the process exits."""
-        reaper = application.state.session_reaper
-        if reaper is not None:
-            reaper.cancel()
         application.state.sample_futures_sweeper.cancel()
         runtime: TrainingRuntimeState = application.state.runtime
         # a free stuck on a hung op is cancelled first, then every live model is freed at once
@@ -278,7 +250,7 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
 
 
 async def _free_model(application: FastAPI, model_id: str, reason: str) -> None:
-    """Release one model's backend resources and its session link; never raises."""
+    """Release one model's backend resources; never raises."""
     runtime: TrainingRuntimeState = application.state.runtime
     try:
         logger.info("Freeing model %s (%s)", model_id, reason)
@@ -289,10 +261,6 @@ async def _free_model(application: FastAPI, model_id: str, reason: str) -> None:
         )
     except Exception:  # pylint: disable=broad-except
         logger.exception("Failed to free model %s (%s)", model_id, reason)
-    try:
-        application.state.session_service.remove_model(model_id)
-    except Exception:  # pylint: disable=broad-except
-        logger.exception("Failed to unlink model %s from its session", model_id)
 
 
 app = create_app()

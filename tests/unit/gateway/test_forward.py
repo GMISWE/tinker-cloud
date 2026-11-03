@@ -1,4 +1,4 @@
-"""Pass-through fidelity, prefix routing and an engine that is not there, for both forwarder variants."""
+"""Pass-through fidelity, prefix routing and an engine that is not there, for both engine clients (aiohttp, and the httpx baseline)."""
 import asyncio
 import os
 import time
@@ -15,9 +15,9 @@ MODEL = f"model_fake_{HEX}"
 OTHER = f"model_other_{HEX}"
 
 
-@pytest.fixture(params=VARIANTS, ids=["+".join(v) for v in VARIANTS])
+@pytest.fixture(params=VARIANTS, ids=VARIANTS)
 def harness(tmp_path, request):
-    return Harness(str(tmp_path), *request.param)
+    return Harness(str(tmp_path), request.param)
 
 
 def test_status_body_and_content_type_pass_through_unchanged(harness):
@@ -214,19 +214,25 @@ def test_an_engine_dying_mid_response_is_503_not_a_truncated_200(harness):
     run(main())
 
 
-def test_h11_client_reuses_an_idle_connection(tmp_path):
+def test_the_aiohttp_client_adds_no_headers_of_its_own(tmp_path):
+    """The engine sees what the SDK sent plus the hop's own framing: nothing of the client's
+    (its User-Agent, Accept, Accept-Encoding), and a response body as the engine wrote it."""
     async def main():
-        h = Harness(str(tmp_path), "asgi", "h11")
+        h = Harness(str(tmp_path), "aiohttp")
         try:
             async with serve_uds(h.engine, h.engine_socket):
                 await h.register()
-                for _ in range(3):
-                    assert (await h.post("/api/v1/echo", b"x")).status_code == 200
-                client = h.app._forwarder._clients["fake"]
-                assert len(client._idle) == 1
-                client._idle[0].idle_since -= h.cfg.gateway.keepalive_s + 1   # idle past the keep-alive: dropped, not reused
-                assert (await h.post("/api/v1/echo", b"x")).status_code == 200
-                assert len(client._idle) == 1
+                sent = {"host": "sdk:8000", "x-api-key": API_KEY, "content-type": "application/json",
+                        "accept": "*/*", "accept-encoding": "identity", "user-agent": "sdk-test/1"}
+                r = await h.sdk.post("/api/v1/echo", content=b'{"a": 1}', headers=sent)
+                assert r.status_code == 200 and r.content == b'{"a": 1}'
+                seen = {k.lower(): v for k, v in h.engine.requests[-1]["headers"].items()}
+                extra = set(seen) - set(sent) - {"content-length", "transfer-encoding", "connection"}   # the hop's own framing
+                assert extra == set(), {k: seen[k] for k in extra}
+                assert all(seen[k] == v for k, v in sent.items()), seen
+                r = await h.sdk.post("/api/v1/echo", content=b"\x1f\x8bnot-really-gzip",
+                                     headers={"X-API-Key": API_KEY, "content-type": "application/octet-stream", "content-encoding": "gzip"})
+                assert r.status_code == 200 and r.content == b"\x1f\x8bnot-really-gzip"   # bytes through, not inflated
         finally:
             await h.close()
     run(main())

@@ -14,7 +14,6 @@ from ..config import TrainingConfig
 from ..services.checkpoint_service import CheckpointService
 from ..services.model_service import ModelService
 from ..services.sampling_service import SamplingService
-from ..services.session_service import SessionService
 from ..services.training_service import TrainingService
 from ..storage.futures import FuturesStorage
 from ..storage.sample_futures import SampleFutureStore
@@ -74,10 +73,6 @@ def get_checkpoint_service(request: Request) -> CheckpointService:
 
 def get_sampling_service(request: Request) -> SamplingService:
     return request.app.state.sampling_service
-
-
-def get_session_service(request: Request) -> SessionService:
-    return request.app.state.session_service
 
 
 async def verify_api_key_dep(

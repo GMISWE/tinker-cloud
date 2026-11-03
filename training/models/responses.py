@@ -57,6 +57,14 @@ class HealthResponse(BaseModel):
     active_training_clients: Optional[int] = Field(default=None, description="Number of active training clients")
     model_ids: Optional[List[str]] = Field(default=None, description="List of active model IDs")
     futures_count: Optional[int] = Field(default=None, description="Number of pending async operations")
+    engines: Optional[List[Dict[str, Any]]] = Field(default=None, description="Gateway only: the engines it knows, {name, state}")
+
+
+class ResolveSamplerTargetResponse(BaseModel):
+    """What a sampler is bound to: its model and the weight version its path pinned (None: live)."""
+    model_id: str
+    pinned_version: Optional[int] = None
+    base_model: Optional[str] = None
 
 
 class ClientConfigResponse(BaseModel):

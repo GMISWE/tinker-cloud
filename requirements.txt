@@ -12,6 +12,7 @@ ray==2.52.0
 # FastAPI server
 fastapi[standard]
 uvicorn[standard]
+aiohttp
 python-multipart
 
 # API utilities
