@@ -4,6 +4,7 @@ Helper utilities for the training API.
 This module provides common helper functions used across the training API.
 """
 import logging
+import re
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -11,30 +12,43 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
-def generate_request_id(prefix: str = "req") -> str:
-    """
-    Generate a unique request ID.
-
-    Args:
-        prefix: Prefix for the request ID
-
-    Returns:
-        Unique request ID in format: prefix_<hex16>
-    """
-    return f"{prefix}_{uuid.uuid4().hex[:16]}"
+_ENGINE_NAME: Optional[str] = None
+_ENGINE_ID = re.compile(r"^(?:req|model)_(?P<engine>[a-z0-9_]+)_[0-9a-f]{16}$")
 
 
-def generate_model_id(prefix: str = "model") -> str:
-    """
-    Generate a unique model ID.
+def valid_engine_name(name: str) -> str:
+    """`name` if it can live inside an id (lowercase letters, digits, underscores; not empty), else ValueError."""
+    if not re.fullmatch(r"[a-z0-9_]+", name):
+        raise ValueError(f"engine name {name!r}: lowercase letters, digits and underscores only")
+    return name
 
-    Args:
-        prefix: Prefix for the model ID
 
-    Returns:
-        Unique model ID in format: prefix_<hex16>
-    """
-    return f"{prefix}_{uuid.uuid4().hex[:16]}"
+def set_engine_name(name: str) -> None:
+    """Name every id this process mints after its engine; the gateway routes an id by that name."""
+    global _ENGINE_NAME
+    _ENGINE_NAME = valid_engine_name(name)
+
+
+def _mint(kind: str) -> str:
+    if _ENGINE_NAME is None:
+        raise RuntimeError("set_engine_name was not called: ids are minted by a named engine")
+    return f"{kind}_{_ENGINE_NAME}_{uuid.uuid4().hex[:16]}"
+
+
+def generate_request_id() -> str:
+    """`req_<engine>_<hex16>`."""
+    return _mint("req")
+
+
+def generate_model_id() -> str:
+    """`model_<engine>_<hex16>`."""
+    return _mint("model")
+
+
+def engine_name_of(id_: str) -> Optional[str]:
+    """The engine an id names; None for an id in another shape (the engine answers for it)."""
+    m = _ENGINE_ID.match(id_)
+    return m.group("engine") if m else None
 
 
 def format_timestamp(timestamp: Optional[datetime] = None) -> str:

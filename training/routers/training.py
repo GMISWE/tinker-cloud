@@ -10,7 +10,6 @@ Thin HTTP layer that:
 No business logic here - just HTTP concerns.
 """
 import logging
-import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
@@ -24,6 +23,7 @@ from ..core.dependencies import verify_api_key_dep, get_training_clients, get_fu
 from ..core import loss_registry
 from ..proto.wire import PROTO_CONTENT_TYPE, WireError, decompress_zstd, parse_forward_backward_request
 from ..storage import FuturesStorage
+from ..utils.helpers import generate_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +32,6 @@ router = APIRouter(
     tags=["training"],
     responses={404: {"description": "Model not found"}}
 )
-
-
-def generate_request_id() -> str:
-    """Generate unique request ID"""
-    return f"req_{uuid.uuid4().hex[:16]}"
 
 
 def get_task_manager(

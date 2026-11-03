@@ -9,7 +9,7 @@ import logging
 import os
 import secrets
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, validator
 
@@ -258,8 +258,56 @@ class BackendConfig(BaseModel):
         return v
 
 
+class EngineConfig(BaseModel):
+    """This process as an engine: its name, its unix socket, and the gateway it registers with.
+
+    `python -m training` (one process, today's deployments) leaves everything unset and the
+    engine is named after the backend; `python -m training.engine` fills it in.
+    """
+
+    name: Optional[str] = Field(
+        default_factory=lambda: os.getenv("TINKERCLOUD_ENGINE_NAME"),
+        description="Engine name; every request and model id carries it"
+    )
+    socket: Optional[str] = Field(
+        default_factory=lambda: os.getenv("TINKERCLOUD_ENGINE_SOCKET"),
+        description="Unix socket the engine serves on"
+    )
+    gateway_socket: Optional[str] = Field(
+        default_factory=lambda: os.getenv("TINKERCLOUD_GATEWAY_SOCKET"),
+        description="The gateway's engines socket to register with; unset = no gateway"
+    )
+    heartbeat_interval_s: float = Field(
+        default_factory=lambda: float(os.getenv("TINKERCLOUD_HEARTBEAT_INTERVAL_S", "5")),
+        description="Seconds between heartbeats to the gateway"
+    )
+    # An engine is its own Ray head (the head dies with the process and takes every actor
+    # with it); the single process connects to a shared head as before.
+    ray_local: bool = Field(default=False, description="Start a Ray head in-process instead of connecting")
+    num_gpus: Optional[int] = Field(default=None, description="GPUs the in-process head owns; unset = Ray detects")
+    gpus: Optional[List[int]] = Field(default=None, description="GPU indices stated in the registration; unset = not stated")
+    ray_temp_dir: Optional[str] = Field(default=None, description="Temp dir of the in-process head (one per engine)")
+
+
+class GatewayConfig(BaseModel):
+    """The gateway's engines socket and its forwarder."""
+
+    engines_socket: str = Field(
+        default_factory=lambda: os.getenv("TINKERCLOUD_ENGINES_SOCKET", "/run/tinkercloud/gateway.sock"),
+        description="Unix socket engines register on"
+    )
+    # Engine connections per gateway worker: below the in-flight count, requests queue in the gateway.
+    pool_size: int = Field(default=4096, description="Max connections to one engine")
+    connect_timeout_s: float = Field(default=1.0, description="Connect timeout to an engine socket")
+    # Shorter than the engines' 300 s keep-alive, so the gateway retires an idle connection first.
+    keepalive_s: float = Field(default=250.0, description="Idle time after which a pooled engine connection is dropped")
+    server: Literal["asgi", "fastapi"] = Field(default="asgi", description="SDK-facing server adapter")
+    client: Literal["h11", "httpx"] = Field(default="h11", description="Engine-facing HTTP client")
+
+
 class TrainingConfig(BaseModel):
     """Main training API configuration."""
+
 
     server: ServerConfig = Field(
         default_factory=ServerConfig,
@@ -281,6 +329,8 @@ class TrainingConfig(BaseModel):
         default_factory=BackendConfig,
         description="Backend selection and configuration"
     )
+    engine: EngineConfig = Field(default_factory=EngineConfig, description="This process as an engine")
+    gateway: GatewayConfig = Field(default_factory=GatewayConfig, description="Gateway process settings")
     external_weights: ExternalWeightsConfig = Field(
         default_factory=ExternalWeightsConfig,
         description="Signed download URLs for external weights"

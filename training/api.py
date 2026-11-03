@@ -26,6 +26,7 @@ from .config import get_config, TrainingConfig
 from .utils import APIKeyAuth
 from .core.runtime_state import TrainingRuntimeState
 from .services.reaper import ModelReaper
+from .utils.helpers import set_engine_name
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,9 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
     # Store config/runtime scaffolding for later use
     application.state.config = config or get_config()
     application.state.runtime = TrainingRuntimeState()
+    # ids carry the engine name; the single process is the engine named after its backend
+    cfg: TrainingConfig = application.state.config
+    set_engine_name(cfg.engine.name if cfg.engine.name is not None else cfg.backend.backend_type)
 
     # Import routers lazily to avoid circular imports during module load
     from .routers import training as training_router_module
@@ -188,17 +192,29 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
         if not backend.needs_ray:
             logger.info("Backend %s does not use Ray; skipping ray.init", backend_type)
         elif not ray.is_initialized():
-            logger.info("Initializing Ray with address=%s", config_obj.ray.address)
             # ray.init installs a SIGTERM handler that sys.exit()s, pre-empting
             # uvicorn's graceful shutdown (and with it the model teardown above).
             prev_sigterm = signal.getsignal(signal.SIGTERM)
             try:
-                ray.init(
-                    address=config_obj.ray.address,
-                    namespace=config_obj.ray.namespace,
-                    ignore_reinit_error=True,
-                )
-                logger.info("Ray initialized successfully")
+                if config_obj.engine.ray_local:
+                    # "local" starts a head here even when RAY_ADDRESS names a shared one
+                    ctx = ray.init(
+                        address="local",
+                        namespace=config_obj.ray.namespace,
+                        num_gpus=config_obj.engine.num_gpus,
+                        _temp_dir=config_obj.engine.ray_temp_dir,
+                        ignore_reinit_error=True,
+                    )
+                    logger.info("Ray head started in-process: gcs=%s temp_dir=%s",
+                                ctx.address_info["gcs_address"], config_obj.engine.ray_temp_dir)
+                else:
+                    logger.info("Initializing Ray with address=%s", config_obj.ray.address)
+                    ray.init(
+                        address=config_obj.ray.address,
+                        namespace=config_obj.ray.namespace,
+                        ignore_reinit_error=True,
+                    )
+                    logger.info("Ray initialized successfully")
             finally:
                 if signal.getsignal(signal.SIGTERM) is not prev_sigterm:
                     signal.signal(signal.SIGTERM, prev_sigterm)
