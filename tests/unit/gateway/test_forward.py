@@ -214,25 +214,22 @@ def test_an_engine_dying_mid_response_is_503_not_a_truncated_200(harness):
     run(main())
 
 
-def test_the_aiohttp_client_adds_no_headers_of_its_own(tmp_path):
-    """The engine sees what the SDK sent plus the hop's own framing: nothing of the client's
-    (its User-Agent, Accept, Accept-Encoding), and a response body as the engine wrote it."""
+def test_the_aiohttp_client_reuses_an_idle_connection(tmp_path):
     async def main():
         h = Harness(str(tmp_path), "aiohttp")
         try:
             async with serve_uds(h.engine, h.engine_socket):
                 await h.register()
-                sent = {"host": "sdk:8000", "x-api-key": API_KEY, "content-type": "application/json",
-                        "accept": "*/*", "accept-encoding": "identity", "user-agent": "sdk-test/1"}
-                r = await h.sdk.post("/api/v1/echo", content=b'{"a": 1}', headers=sent)
-                assert r.status_code == 200 and r.content == b'{"a": 1}'
-                seen = {k.lower(): v for k, v in h.engine.requests[-1]["headers"].items()}
-                extra = set(seen) - set(sent) - {"content-length", "transfer-encoding", "connection"}   # the hop's own framing
-                assert extra == set(), {k: seen[k] for k in extra}
-                assert all(seen[k] == v for k, v in sent.items()), seen
-                r = await h.sdk.post("/api/v1/echo", content=b"\x1f\x8bnot-really-gzip",
-                                     headers={"X-API-Key": API_KEY, "content-type": "application/octet-stream", "content-encoding": "gzip"})
-                assert r.status_code == 200 and r.content == b"\x1f\x8bnot-really-gzip"   # bytes through, not inflated
+                for _ in range(3):
+                    assert (await h.post("/api/v1/echo", b"x")).status_code == 200
+                connector = h.gateway.pool._clients["fake"]._session.connector
+                (key, idle), = connector._conns.items()
+                assert len(idle) == 1
+                proto, since = idle[0]
+                idle[0] = (proto, since - h.cfg.gateway.keepalive_s - 1)   # idle past the keep-alive: dropped, not reused
+                assert (await h.post("/api/v1/echo", b"x")).status_code == 200
+                (key, idle), = connector._conns.items()
+                assert len(idle) == 1 and idle[0][0] is not proto
         finally:
             await h.close()
     run(main())

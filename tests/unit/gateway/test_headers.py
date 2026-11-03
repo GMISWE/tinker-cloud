@@ -38,11 +38,21 @@ def test_a_sampler_travels_as_the_two_headers_with_the_body_untouched(tmp_path):
                     await h.post_json("/api/v1/asample", body)
                     seen = h.engine.requests[-1]
                     assert "x-model-id" not in seen["headers"] and "x-pinned-version" not in seen["headers"]
-                # a sampler the SDK forged in the headers is replaced by the gateway's answer
+                # the two headers an SDK forges are dropped; the engine sees the gateway's once, never a second copy
                 await h.post("/api/v1/asample", orjson.dumps({**PROMPT, "sampling_session_id": "s_1_abc"}),
-                             **{"content-type": "application/json", "X-Model-Id": "model_fake_ffffffffffffffff"})
-                hdrs = [(k.lower(), v) for k, v in h.engine.requests[-1]["headers"].items()]
-                assert [v for k, v in hdrs if k == "x-model-id"] == [MODEL], hdrs
+                             **{"content-type": "application/json", "X-Model-Id": "model_fake_ffffffffffffffff", "X-Pinned-Version": "99"})
+                raw = h.engine.requests[-1]["raw_headers"]
+                assert [v for k, v in raw if k == "x-model-id"] == [MODEL], raw
+                assert [v for k, v in raw if k == "x-pinned-version"] == ["3"], raw
+                await h.post("/api/v1/asample", orjson.dumps({**PROMPT, "sampling_session_id": "s_1_live"}),
+                             **{"content-type": "application/json", "X-Pinned-Version": "99"})
+                raw = h.engine.requests[-1]["raw_headers"]
+                assert [v for k, v in raw if k == "x-model-id"] == [MODEL] and "x-pinned-version" not in dict(raw), raw
+                # a request that names no sampler carries neither header, whatever the SDK sent
+                await h.post("/api/v1/asample", orjson.dumps({**PROMPT, "model_path": f"tinker://{MODEL}/weights/s"}),
+                             **{"content-type": "application/json", "X-Model-Id": "model_fake_ffffffffffffffff", "X-Pinned-Version": "99"})
+                raw = h.engine.requests[-1]["raw_headers"]
+                assert "x-model-id" not in dict(raw) and "x-pinned-version" not in dict(raw), raw
         finally:
             await h.close()
     run(main())

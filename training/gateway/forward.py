@@ -21,6 +21,7 @@ import aiohttp
 import httpx
 
 from ..config import GatewayConfig
+from ..utils.helpers import MODEL_ID_HEADER, PINNED_VERSION_HEADER
 from .registry import EngineRow, Registry
 
 logger = logging.getLogger(__name__)
@@ -30,7 +31,9 @@ Body = Union[bytes, AsyncIterator[bytes]]
 
 # each hop frames its own messages; date and server are uvicorn's own on the way back. Host stays:
 # the engine builds the download URLs it hands out from it, and the SDK must be able to reach them.
-REQUEST_DROP = frozenset({b"connection", b"keep-alive", b"content-length", b"transfer-encoding"})
+# hop-by-hop framing, and the two headers only the gateway sets: an SDK's copy is dropped, never forwarded
+REQUEST_DROP = frozenset({b"connection", b"keep-alive", b"content-length", b"transfer-encoding",
+                          MODEL_ID_HEADER.lower().encode(), PINNED_VERSION_HEADER.lower().encode()})
 RESPONSE_DROP = frozenset({b"connection", b"keep-alive", b"transfer-encoding", b"date", b"server"})
 # aiohttp would add these on its own; the engine sees only what the SDK sent
 AUTO_HEADERS = ("User-Agent", "Accept", "Accept-Encoding", "Content-Type")
