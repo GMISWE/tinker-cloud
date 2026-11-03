@@ -10,7 +10,6 @@ from .futures import router as futures_router
 from .models import router as models_router
 from .checkpoints import router as checkpoints_router
 from .sampling import router as sampling_router
-from .session import router as session_router
 
 __all__ = [
     "training_router",
@@ -19,5 +18,4 @@ __all__ = [
     "models_router",
     "checkpoints_router",
     "sampling_router",
-    "session_router"
 ]

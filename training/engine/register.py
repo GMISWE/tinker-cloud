@@ -56,6 +56,22 @@ class RegisterClient:
                 return
             r.raise_for_status()
 
+    async def sampler_created(self, sampler_id: str, model_id: str, pinned_version: Optional[int],
+                              model_path: Optional[str], base_model: Optional[str]) -> None:
+        """Record an ephemeral sampler (save_weights_for_sampler) with the gateway before its id
+        reaches the SDK. A gateway that refuses it raises: a sampler the gateway cannot route is
+        no sampler."""
+        r = await self._client.post(f"/engines/{self._name}/samplers", json={
+            "sampler_id": sampler_id, "model_id": model_id, "pinned_version": pinned_version,
+            "model_path": model_path, "base_model": base_model})
+        r.raise_for_status()
+
+    async def model_failed(self, model_id: str) -> None:
+        """A create the gateway recorded at submit is not coming: its row goes now, not at the next delete."""
+        r = await self._client.delete(f"/engines/{self._name}/models/{model_id}")
+        if r.status_code != 404:   # no row: the gateway already dropped it
+            r.raise_for_status()
+
     async def close(self) -> None:
         """Unregister. Idempotent; a gateway that is already gone is logged, not raised."""
         if self._task is not None:

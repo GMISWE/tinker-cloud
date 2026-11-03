@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import signal
 import sys
+from typing import List, Optional
 
 import uvicorn
 
@@ -73,17 +74,24 @@ def main(argv=None) -> None:
     asyncio.run(serve(config, sock))
 
 
-async def serve(config: TrainingConfig, sock) -> None:
+async def serve(config: TrainingConfig, sock, also_stop: Optional[List[uvicorn.Server]] = None) -> None:
+    """Serve the engine until SIGTERM/SIGINT; then unregister, stop, and flag the servers in
+    `also_stop` (a gateway sharing this process) to stop after it."""
     name, socket_path = config.engine.name, config.engine.socket
     if name is None or socket_path is None:
         raise RuntimeError("an engine needs a name and a socket")
+    app = create_app(config)
+    register: Optional[RegisterClient] = None
+    if config.engine.gateway_socket:
+        register = RegisterClient(config.engine.gateway_socket, name, config.backend.backend_type,
+                                  config.engine.gpus, socket_path, config.engine.heartbeat_interval_s)
+    app.state.gateway_client = register   # the routers announce the samplers they mint through it
     server = uvicorn.Server(uvicorn.Config(
-        create_app(config), uds=socket_path, log_level=config.server.log_level.lower(),
+        app, uds=socket_path, log_level=config.server.log_level.lower(),
         access_log=config.server.access_log, timeout_keep_alive=KEEPALIVE_S,
     ))
     serving = asyncio.create_task(server.serve(sockets=[sock]))
     await asyncio.sleep(0)   # serve() has begun: uvicorn installed its signal handlers; ours go on top of them
-    register = None
     stopping = False
 
     async def stop() -> None:
@@ -105,13 +113,13 @@ async def serve(config: TrainingConfig, sock) -> None:
     if serving.done():      # startup failed, or a signal came first; serve() carries any error
         await serving
         return
-    if config.engine.gateway_socket and not stopping:   # the socket accepts: now the gateway may route to us
-        register = RegisterClient(config.engine.gateway_socket, name, config.backend.backend_type,
-                                  config.engine.gpus, socket_path, config.engine.heartbeat_interval_s)
+    if register is not None and not stopping:   # the socket accepts: now the gateway may route to us
         register.start()
     await serving
     if register is not None:
         await register.close()
+    for other in also_stop or ():
+        other.should_exit = True
 
 
 if __name__ == "__main__":

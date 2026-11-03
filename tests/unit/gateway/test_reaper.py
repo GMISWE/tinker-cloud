@@ -5,7 +5,7 @@ import asyncio
 
 import pytest
 
-from tinkercloud.training.services.reaper import ModelReaper
+from tinkercloud.training.gateway.reaper import ModelReaper
 
 T = 0.2          # seconds one free takes in the shutdown test
 INTERVAL = 1.0   # the reap interval the tick must beat

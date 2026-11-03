@@ -35,7 +35,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       # server deps pinned to the pod image (scripts/pod_state.sh prints them); keep in step
-      - run: pip install pytest pytest-timeout uvicorn==0.38.0 fastapi==0.141.1 pydantic==2.12.3 httpx==0.27.2 safetensors numpy orjson ray torch
+      - run: pip install pytest pytest-timeout uvicorn==0.38.0 fastapi==0.141.1 pydantic==2.12.3 httpx==0.27.2 aiohttp==3.14.3 safetensors numpy orjson ray torch
                  --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
       # the tests import the tree as the `tinkercloud` package (as pod_pytest.sh aliases it)
       - run: mkdir -p /tmp/ns && ln -s "$PWD" /tmp/ns/tinkercloud

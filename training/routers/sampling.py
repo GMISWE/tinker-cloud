@@ -10,7 +10,7 @@ Endpoints:
 import logging
 from typing import Dict, Optional, List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 
 from ..services.sampling_service import SamplingService
 from ..core.sample_tasks import start_sample_task
@@ -22,7 +22,6 @@ from ..core.dependencies import (
     get_futures_storage,
     get_sample_futures,
     get_training_clients,
-    get_session_service,
 )
 from ..checkpoints import CheckpointRef, CheckpointStore
 from ..storage import FuturesStorage, SampleFutureStore
@@ -30,14 +29,17 @@ from ..models.requests import (
     ASampleRequest,
     SampleRequest,
     CreateSamplingClientRequest,
+    ResolveSamplerTargetRequest,
 )
 from ..models.responses import (
     AsyncOperationResponse,
+    ResolveSamplerTargetResponse,
     SampleResult,
     SamplingSequence,
     CreateSamplingClientResult,
 )
 from ..utils import generate_request_id
+from ..utils.helpers import BASE_MODEL_SAMPLING_UNSUPPORTED, MODEL_ID_HEADER, PINNED_VERSION_HEADER
 
 logger = logging.getLogger(__name__)
 
@@ -56,43 +58,42 @@ def get_task_manager(
 # ============================================================================
 
 
-BASE_MODEL_SAMPLING_UNSUPPORTED = (
-    "base-model sampling is not supported by this deployment; create a model "
-    "and a sampler from it (save_weights_and_get_sampling_client) instead"
-)
 
 
 def resolve_target_model(
     training_clients: Dict,
-    session_service,
     sampling_session_id: Optional[str] = None,
     model_path: Optional[str] = None,
     base_model: Optional[str] = None,
     store: Optional[CheckpointStore] = None,
+    model_id_header: Optional[str] = None,
+    pinned_version_header: Optional[str] = None,
 ) -> tuple:
     """Return (model_id, pinned_version) for a sampling request, or raise.
 
-    A sampler names its owning model (registered at save_weights_for_sampler /
-    create_sampling_session); a checkpoint model_path names it through the
-    store. There is no fallback to "some model": under a multi-tenant pool
-    that serves a co-tenant's adapter, and a bare base_model has no engine
-    behind it.
+    A sampler names its owning model and the weight version it pinned; the gateway, which
+    holds the samplers, puts both in the request headers (`X-Model-Id`, `X-Pinned-Version`).
+    A checkpoint model_path names its model through the store. There is no fallback to
+    "some model": under a multi-tenant pool that serves a co-tenant's adapter, and a bare
+    base_model has no engine behind it.
     """
     if sampling_session_id:
-        info = session_service.get_sampler(sampling_session_id)
-        if info is None:
+        if not model_id_header:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{MODEL_ID_HEADER} is required with a sampling_session_id: samplers are resolved by the gateway",
+            )
+        if model_id_header not in training_clients:
             raise HTTPException(
                 status_code=404,
-                detail=f"Unknown sampling_session_id: {sampling_session_id}",
+                detail=f"Sampler {sampling_session_id}'s model {model_id_header} no longer exists",
             )
-        if not info.model_id:
-            raise HTTPException(status_code=400, detail=BASE_MODEL_SAMPLING_UNSUPPORTED)
-        if info.model_id not in training_clients:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Sampler {sampling_session_id}'s model {info.model_id} no longer exists",
-            )
-        return info.model_id, info.pinned_version
+        if pinned_version_header is None:
+            return model_id_header, None
+        try:
+            return model_id_header, int(pinned_version_header)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"{PINNED_VERSION_HEADER} {pinned_version_header!r} is not an integer") from None
     if model_path:
         # A checkpoint path names its model AND the weight version it was
         # saved at: the sampler is pinned there, not served the live weights.
@@ -149,8 +150,9 @@ async def asample(
     service: SamplingService = Depends(get_sampling_service),
     sample_futures: SampleFutureStore = Depends(get_sample_futures),
     training_clients: Dict = Depends(get_training_clients),
-    session_service=Depends(get_session_service),
     store: CheckpointStore = Depends(get_checkpoint_store),
+    x_model_id: Optional[str] = Header(None, alias=MODEL_ID_HEADER),
+    x_pinned_version: Optional[str] = Header(None, alias=PINNED_VERSION_HEADER),
 ):
     """
     Async sampling.
@@ -169,11 +171,12 @@ async def asample(
     # would serve a co-tenant's adapter.
     model_id, pinned_version = resolve_target_model(
         training_clients,
-        session_service,
         sampling_session_id=request.sampling_session_id,
         model_path=request.model_path,
         base_model=request.base_model,
         store=store,
+        model_id_header=x_model_id,
+        pinned_version_header=x_pinned_version,
     )
 
     owner = sample_futures.register(
@@ -230,8 +233,9 @@ async def sample(
     service: SamplingService = Depends(get_sampling_service),
     sample_futures: SampleFutureStore = Depends(get_sample_futures),
     training_clients: Dict = Depends(get_training_clients),
-    session_service=Depends(get_session_service),
     store: CheckpointStore = Depends(get_checkpoint_store),
+    x_model_id: Optional[str] = Header(None, alias=MODEL_ID_HEADER),
+    x_pinned_version: Optional[str] = Header(None, alias=PINNED_VERSION_HEADER),
 ):
     """
     Synchronous sampling.
@@ -241,11 +245,12 @@ async def sample(
 
     model_id, _ = resolve_target_model(
         training_clients,
-        session_service,
         sampling_session_id=request.sampling_session_id,
         model_path=request.model_path,
         base_model=request.base_model,
         store=store,
+        model_id_header=x_model_id,
+        pinned_version_header=x_pinned_version,
     )
     n_seq = len(request.prompts) * request.num_samples
 
@@ -286,6 +291,23 @@ async def sample(
     )
 
 
+@router.post("/api/v1/resolve_sampler_target", response_model=ResolveSamplerTargetResponse)
+async def resolve_sampler_target(
+    request: ResolveSamplerTargetRequest,
+    _: None = Depends(verify_api_key_dep),
+    training_clients: Dict = Depends(get_training_clients),
+    store: CheckpointStore = Depends(get_checkpoint_store),
+):
+    """The gateway's question at create_sampling_session: which model does this path name, and at
+    which weight version. The store's verdict on the path (404, 425, 400) is the answer."""
+    model_id, pinned_version = resolve_target_model(
+        training_clients, model_path=request.model_path, base_model=request.base_model, store=store,
+    )
+    return ResolveSamplerTargetResponse(
+        model_id=model_id, pinned_version=pinned_version, base_model=training_clients[model_id]["base_model"],
+    )
+
+
 @router.post("/api/v1/create_sampling_client", response_model=AsyncOperationResponse)
 async def create_sampling_client(
     request: CreateSamplingClientRequest,
@@ -293,7 +315,6 @@ async def create_sampling_client(
     service: SamplingService = Depends(get_sampling_service),
     task_manager: TaskManager = Depends(get_task_manager),
     training_clients: Dict = Depends(get_training_clients),
-    session_service=Depends(get_session_service),
     store: CheckpointStore = Depends(get_checkpoint_store),
 ):
     """
@@ -304,7 +325,6 @@ async def create_sampling_client(
 
     model_id, _ = resolve_target_model(
         training_clients,
-        session_service,
         model_path=request.model_path,
         base_model=request.base_model,
         store=store,

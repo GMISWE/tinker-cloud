@@ -74,7 +74,7 @@ class Server:
         )
         self.proc = subprocess.Popen(
             [sys.executable, "-m", "training.gateway", "--host", "127.0.0.1", "--port", str(self.port),
-             "--engines-socket", str(gateway_sock)],
+             "--engines-socket", str(gateway_sock), "--workers", "2"],
             cwd=str(REPO_ROOT), env=env, stdout=self.log, stderr=subprocess.STDOUT,
         )
 

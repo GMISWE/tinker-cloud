@@ -453,6 +453,12 @@ class SessionHeartbeatRequest(BaseModel):
     type: str = Field(default="session_heartbeat", description="Request type")
 
 
+class ResolveSamplerTargetRequest(BaseModel):
+    """The gateway asks the engine which model a sampler's path names (create_sampling_session)."""
+    model_path: Optional[str] = Field(default=None, description="Tinker path to model weights")
+    base_model: Optional[str] = Field(default=None, description="Base model for sampling")
+
+
 class CreateSamplingSessionRequest(BaseModel):
     """Request to create a sampling session."""
     session_id: str = Field(..., description="Parent session ID")

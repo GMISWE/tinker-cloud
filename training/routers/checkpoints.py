@@ -21,7 +21,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 
 from ..services.checkpoint_service import CheckpointService
-from ..services.session_service import SessionService
 from ..core.task_manager import TaskManager
 from ..config import TrainingConfig
 from ..core.dependencies import (
@@ -32,7 +31,6 @@ from ..core.dependencies import (
     get_metadata_storage, 
     get_futures_storage, 
     get_training_clients,
-    get_session_service,
 )
 from ..checkpoints import CheckpointKind, CheckpointRef, CheckpointStore
 from ..storage import MetadataStorage, FuturesStorage
@@ -114,12 +112,12 @@ async def save_weights(
 @router.post("/api/v1/save_weights_for_sampler", response_model=AsyncOperationResponse)
 async def save_weights_for_sampler(
     request: SaveWeightsForSamplerRequest,
+    http_request: Request,
     _: None = Depends(verify_api_key_dep),
     service: CheckpointService = Depends(get_checkpoint_service),
     task_manager: TaskManager = Depends(get_task_manager),
     metadata_storage: MetadataStorage = Depends(get_metadata_storage),
     training_clients: Dict = Depends(get_training_clients),
-    session_service: SessionService = Depends(get_session_service)
 ):
     """
     Save weights for SGLang sampler.
@@ -145,18 +143,15 @@ async def save_weights_for_sampler(
             sampling_session_seq_id=request.sampling_session_seq_id
         )
 
-        # Register ephemeral sampler with session if sampling_session_id was created
+        # An ephemeral sampler is the gateway's to route: it learns of it before the SDK does.
+        # BUG-015: the weight version is pinned at save time so pinned logprob reads are not
+        # served from the live (refit-every-step) engine.
         sampling_session_id = result.get("sampling_session_id")
-        if sampling_session_id:
-            # BUG-015: pin the weight version at save time so pinned logprob
-            # reads are not served from the live (refit-every-step) engine.
-            pinned_version = client_info["backend_handle"].weight_version
-            session_service.register_ephemeral_sampler(
-                sampler_id=sampling_session_id,
-                model_id=request.model_id,
-                base_model=base_model,
-                model_path=result.get("uri"),
-                pinned_version=pinned_version,
+        gateway = http_request.app.state.gateway_client
+        if sampling_session_id and gateway is not None:   # None: an engine with no gateway, whose samplers nothing routes to
+            await gateway.sampler_created(
+                sampling_session_id, request.model_id, client_info["backend_handle"].weight_version,
+                result.get("uri"), base_model,
             )
 
         return SaveWeightsForSamplerResult(**result)

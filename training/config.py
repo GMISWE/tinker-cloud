@@ -301,8 +301,14 @@ class GatewayConfig(BaseModel):
     connect_timeout_s: float = Field(default=1.0, description="Connect timeout to an engine socket")
     # Shorter than the engines' 300 s keep-alive, so the gateway retires an idle connection first.
     keepalive_s: float = Field(default=250.0, description="Idle time after which a pooled engine connection is dropped")
-    server: Literal["asgi", "fastapi"] = Field(default="asgi", description="SDK-facing server adapter")
-    client: Literal["h11", "httpx"] = Field(default="h11", description="Engine-facing HTTP client")
+    client: Literal["aiohttp", "httpx"] = Field(default="aiohttp", description="Engine-facing HTTP client (httpx: the measurement baseline)")
+    workers: int = Field(
+        default_factory=lambda: int(os.getenv("TINKERCLOUD_GATEWAY_WORKERS", "1")),
+        description="Gateway worker processes sharing the listening sockets"
+    )
+    # Every worker serves every engine; a registration lands on one worker and the others read it
+    # from the shared registry on this period, so the hot path never touches it.
+    registry_refresh_s: float = Field(default=0.5, description="How often a worker re-reads the shared engine registry")
 
 
 class TrainingConfig(BaseModel):

@@ -1,14 +1,18 @@
-"""The gateway process: `python -m training.gateway [--host H] [--port P] [--engines-socket S] [--server asgi|fastapi] [--client h11|httpx]`.
+"""The gateway process: `python -m training.gateway [--host H] [--port P] [--engines-socket S] [--workers N] [--client aiohttp|httpx]`.
 
-One uvicorn server on two listeners: the SDK's TCP port and the engines' unix socket.
+One uvicorn server per worker on two shared listeners: the SDK's TCP port and the engines'
+unix socket. With N workers the parent binds the sockets, forks N children that each serve
+them, forwards SIGTERM and SIGINT to the children, and exits when they have.
 """
 import argparse
 import os
+import signal
 import sys
+from typing import List
 
 import uvicorn
 
-from ..config import get_config, set_config
+from ..config import TrainingConfig, get_config, set_config
 from .app import build_app
 from .sockets import SocketBusy, bind_tcp_socket, bind_unix_socket
 
@@ -28,9 +32,9 @@ def main(argv=None) -> None:
     parser.add_argument("--host", default=None, help="bind host (default: TRAINING_HOST or 0.0.0.0)")
     parser.add_argument("--port", type=int, default=None, help="bind port (default: TRAINING_PORT or 8000)")
     parser.add_argument("--engines-socket", default=None, help="unix socket engines register on (default: TINKERCLOUD_ENGINES_SOCKET)")
-    parser.add_argument("--server", choices=["asgi", "fastapi"], default=None, help="SDK-facing server adapter")
-    parser.add_argument("--client", choices=["h11", "httpx"], default=None, help="engine-facing HTTP client")
-    parser.add_argument("--pool", type=_positive, default=None, help="max connections to one engine")
+    parser.add_argument("--workers", type=_positive, default=None, help="worker processes (default: TINKERCLOUD_GATEWAY_WORKERS or 1)")
+    parser.add_argument("--client", choices=["aiohttp", "httpx"], default=None, help="engine-facing HTTP client (httpx: the measurement baseline)")
+    parser.add_argument("--pool", type=_positive, default=None, help="max connections to one engine, per worker")
     args = parser.parse_args(argv)
 
     config = get_config()
@@ -41,8 +45,8 @@ def main(argv=None) -> None:
     if args.engines_socket is not None:
         config.gateway.engines_socket = args.engines_socket
     config.gateway.engines_socket = os.path.abspath(config.gateway.engines_socket)   # the listener is told apart by its path
-    if args.server is not None:
-        config.gateway.server = args.server
+    if args.workers is not None:
+        config.gateway.workers = args.workers
     if args.client is not None:
         config.gateway.client = args.client
     if args.pool is not None:
@@ -55,11 +59,51 @@ def main(argv=None) -> None:
         print(f"gateway: {exc}", file=sys.stderr)
         sys.exit(1)
     sdk = bind_tcp_socket(config.server.host, config.server.port)
+    if config.gateway.workers == 1:
+        serve(config, [sdk, engines])
+        return
+    supervise(config, [sdk, engines])
+
+
+def serve(config: TrainingConfig, sockets: List) -> None:
+    """One worker: the app is built here, after any fork, so each worker owns its connections."""
     server = uvicorn.Server(uvicorn.Config(
         build_app(config), log_level=config.server.log_level.lower(), access_log=config.server.access_log,
         timeout_keep_alive=KEEPALIVE_S,
     ))
-    server.run(sockets=[sdk, engines])
+    server.run(sockets=sockets)
+
+
+def supervise(config: TrainingConfig, sockets: List) -> None:
+    """Fork `workers` children over the bound sockets; pass SIGTERM/SIGINT on; return when all have exited."""
+    children: List[int] = []
+    for _ in range(config.gateway.workers):
+        pid = os.fork()
+        if pid == 0:
+            try:
+                serve(config, sockets)
+            finally:
+                os._exit(0)
+        children.append(pid)
+
+    def relay(signum, _) -> None:
+        for pid in children:
+            try:
+                os.kill(pid, signum)
+            except ProcessLookupError:
+                pass
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, relay)
+    for pid in children:
+        while True:
+            try:
+                os.waitpid(pid, 0)
+                break
+            except InterruptedError:
+                continue
+            except ChildProcessError:
+                break
 
 
 if __name__ == "__main__":
