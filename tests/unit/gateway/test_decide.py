@@ -3,13 +3,17 @@ import asyncio
 
 import orjson
 
+from fastapi import FastAPI
+
+from training.config import GatewayConfig
 from training.gateway import forward
+from training.gateway.app import build_app
 from training.gateway.decide import Decider, Reject, Route
 from training.gateway.registry import Registry
 from training.gateway.sessions import SamplerCache, SessionStore
 from training.proto import tinker_public_pb2 as pb
 
-from .support import API_KEY, MODEL
+from .support import API_KEY, MODEL, config
 
 HEADERS = [(b"host", b"sdk:8000"), (b"x-api-key", API_KEY.encode()), (b"content-type", b"application/json")]
 
@@ -44,6 +48,11 @@ def test_decide_is_synchronous_and_covers_every_shape():
     assert r.add_headers == [(b"x-model-id", r.record.model_id.encode())]
     r = d.decide("/api/v1/retrieve_future/req_fake_0123456789abcdef", b"", HEADERS, None)
     assert isinstance(r, Route) and r.add_headers == []
+
+
+def test_the_sdk_face_is_one_fastapi_app_and_the_config_names_no_server():
+    assert isinstance(build_app(config(), Registry(), SessionStore(None)), FastAPI)
+    assert "server" not in GatewayConfig.model_fields
 
 
 def test_only_forward_opens_engine_connections():

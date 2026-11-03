@@ -56,6 +56,14 @@ def test_engine_routes_without_sessions(tmp_path):
             assert r.status_code == 400 and "X-Pinned-Version" in r.json()["error"], r.text
             r = c.post("/api/v1/asample", json={**prompt, "sampling_session_id": "s_1"}, headers={"X-Model-Id": "model_t_0123456789abcdef"})
             assert r.status_code == 200, r.text
+            # create_sampling_client naming a sampler reads the same headers
+            r = c.post("/api/v1/create_sampling_client", json={"sampling_session_id": "s_1"})
+            assert r.status_code == 400 and "X-Model-Id" in r.json()["error"], r.text
+            r = c.post("/api/v1/create_sampling_client", json={"sampling_session_id": "s_1"}, headers={"X-Model-Id": "model_t_0123456789abcdef", "X-Pinned-Version": "0"})
+            assert r.status_code == 200, r.text
+            rid = r.json()["request_id"]
+            created = c.post(f"/api/v1/retrieve_future/{rid}", json={"request_id": rid})
+            assert created.status_code == 200 and created.json()["model_path"] == "tinker://model_t_0123456789abcdef", created.text
             r = c.post("/api/v1/resolve_sampler_target", json={"base_model": "fake/tiny"})
             assert r.status_code == 400 and "base-model sampling" in r.json()["error"]
             r = c.post("/api/v1/resolve_sampler_target", json={"model_path": "tinker://model_gone/weights/x"})

@@ -432,6 +432,7 @@ class SampleRequest(BaseModel):
 
 class CreateSamplingClientRequest(BaseModel):
     """Create sampling client request (new format)."""
+    sampling_session_id: Optional[str] = Field(default=None, description="A sampler the gateway holds; its model arrives in the headers")
     model_path: Optional[str] = Field(default=None, description="Tinker URI path")
     base_model: Optional[str] = Field(default=None, description="HuggingFace model path")
     sampling_params: Optional[SamplingParams] = Field(default=None, description="Default sampling parameters")
