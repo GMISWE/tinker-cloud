@@ -47,7 +47,7 @@ from .sessions import SamplerCache, SessionStore
 
 logger = logging.getLogger(__name__)
 
-HEALTH_TIMEOUT_S = 2.0
+HEALTH_TIMEOUT_S = 1.5   # the 503 for an engine that hangs lands inside the 2 s the face promises
 
 
 class _Everything:

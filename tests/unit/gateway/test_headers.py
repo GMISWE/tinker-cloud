@@ -21,7 +21,8 @@ def test_a_sampler_travels_as_the_two_headers_with_the_body_untouched(tmp_path):
                 sid = await h.create_session()
                 _sampler(h, sid)
                 for path, body in (("/api/v1/asample", {**PROMPT, "sampling_session_id": "s_1_abc", "seq_id": 7}),
-                                   ("/api/v1/sample", {"prompts": [[1]], "num_samples": 1, "sampling_session_id": "s_1_abc"})):
+                                   ("/api/v1/sample", {"prompts": [[1]], "num_samples": 1, "sampling_session_id": "s_1_abc"}),
+                                   ("/api/v1/create_sampling_client", {"sampling_session_id": "s_1_abc"})):
                     raw = orjson.dumps(body)
                     r = await h.post(path, raw, **{"content-type": "application/json"})
                     assert r.status_code == 200, r.text

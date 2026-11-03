@@ -1,5 +1,6 @@
 """/health asks the engine: its model list is the engine's, the engines the gateway knows are listed,
 and an engine that does not answer makes the gateway say so within 2 s."""
+import asyncio
 import time
 
 from .support import Harness, run, serve_uds
@@ -27,5 +28,31 @@ def test_health_reports_the_engines_models_and_the_registry(tmp_path):
             assert r.status_code == 503 and time.monotonic() - t0 < 2.0
             assert r.json()["error"].startswith("engine fake unreachable"), r.text
         finally:
+            await h.close()
+    run(main())
+
+
+def test_an_engine_that_accepts_and_never_answers_is_503_naming_it_within_two_seconds(tmp_path):
+    async def main():
+        h = Harness(str(tmp_path))
+        hung = []
+
+        async def never(reader, writer):
+            hung.append(writer)
+            await asyncio.Event().wait()
+
+        server = await asyncio.start_unix_server(never, path=h.engine_socket)
+        try:
+            await h.register()
+            t0 = time.monotonic()
+            r = await h.sdk.get("/health")
+            took = time.monotonic() - t0
+            assert r.status_code == 503 and took < 2.0, (r.text, took)
+            assert r.json()["error"].startswith("engine fake unreachable"), r.text
+        finally:
+            for w in hung:
+                w.close()
+            server.close()
+            await server.wait_closed()
             await h.close()
     run(main())
