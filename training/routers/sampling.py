@@ -316,18 +316,23 @@ async def create_sampling_client(
     task_manager: TaskManager = Depends(get_task_manager),
     training_clients: Dict = Depends(get_training_clients),
     store: CheckpointStore = Depends(get_checkpoint_store),
+    x_model_id: Optional[str] = Header(None, alias=MODEL_ID_HEADER),
+    x_pinned_version: Optional[str] = Header(None, alias=PINNED_VERSION_HEADER),
 ):
     """
-    Create sampling client bound to the model named by model_path.
+    Create sampling client bound to the model named by model_path, or by the sampler's headers.
     This operation is asynchronous - use retrieve_future to check status.
     """
     request_id = generate_request_id()
 
     model_id, _ = resolve_target_model(
         training_clients,
+        sampling_session_id=request.sampling_session_id,
         model_path=request.model_path,
         base_model=request.base_model,
         store=store,
+        model_id_header=x_model_id,
+        pinned_version_header=x_pinned_version,
     )
 
     async def execute():
