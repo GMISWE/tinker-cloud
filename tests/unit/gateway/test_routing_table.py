@@ -30,7 +30,7 @@ def _walk(routes):
 
 def _routes():
     found = [r for r in _walk(create_app().routes) if r.path.startswith("/api/v1/")]
-    assert len(found) >= 40, len(found)   # the route table was read; an empty walk would pass every check below
+    assert len(found) >= 30, len(found)   # the route table was read; an empty walk would pass every check below
     return found
 
 

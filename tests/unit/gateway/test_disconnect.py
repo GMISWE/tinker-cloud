@@ -4,8 +4,9 @@ import asyncio
 import orjson
 import pytest
 
-from training.gateway.app import ClientDisconnected, _read_all, asgi_sdk_face, build_app
+from training.gateway.app import ClientDisconnected, _read_all, build_app
 from training.gateway.registry import Registry
+from training.gateway.sessions import SessionStore
 
 from .support import API_KEY, config, run
 
@@ -30,10 +31,10 @@ def test_read_all_raises_on_a_disconnect_mid_body():
     run(main())
 
 
-def test_the_sdk_face_sends_nothing_and_the_engine_gets_a_cut_off_body(tmp_path):
+def test_the_sdk_face_answers_nobody_and_the_engine_gets_a_cut_off_body(tmp_path):
     async def main():
         registry = Registry()
-        app = build_app(config("asgi", "h11"), registry)
+        app = build_app(config(), registry, SessionStore(None))
         sock = str(tmp_path / "e.sock")
         seen = []
 
@@ -54,19 +55,21 @@ def test_the_sdk_face_sends_nothing_and_the_engine_gets_a_cut_off_body(tmp_path)
         async def send(message):
             sent.append(message)
 
-        body = orjson.dumps({"session_id": "s"})
-        scope = {"type": "http", "method": "POST", "path": "/api/v1/create_model", "query_string": b"",
+        # a route the gateway streams (no id in its body): the engine is reading while the SDK leaves
+        body = orjson.dumps({"request_ids": ["req_fake_0123456789abcdef"]})
+        scope = {"type": "http", "method": "POST", "path": "/api/v1/cleanup_futures", "query_string": b"", "scheme": "http",
+                 "http_version": "1.1", "client": ("sdk", 1), "server": ("sdk", 80),
                  "headers": [(b"host", b"sdk:8000"), (b"x-api-key", API_KEY.encode()), (b"content-type", b"application/json"),
-                             (b"content-length", str(len(body) * 2).encode())], "server": ("sdk", 80)}
+                             (b"content-length", str(len(body) * 2).encode())]}
         receive = _scripted([{"type": "http.request", "body": body, "more_body": True}, {"type": "http.disconnect"}])
         try:
-            await asgi_sdk_face(app._forwarder)(scope, receive, send)
-            assert sent == []                                   # nobody is left to answer
+            await app(scope, receive, send)
+            assert sent and sent[0]["status"] == 499, sent              # nobody is left to answer; no 2xx or 503 is invented
             await asyncio.sleep(0.1)
-            assert len(seen) == 1 and body in seen[0]
+            assert len(seen) == 1 and body in seen[0], seen
             assert not seen[0].endswith(b"0\r\n\r\n")         # no terminating chunk: the engine knows it was cut off
         finally:
             server.close()
             await server.wait_closed()
-            await app._forwarder.aclose()
+            await app.state.gateway.stop()
     run(main())
