@@ -193,7 +193,7 @@ class Gateway:
         self.store.remove_model(model_id)
 
     async def health(self, path: str) -> Reply:
-        """The engine's own health, with the engines the gateway knows; 503 while none answers (R8.11)."""
+        """The engine's own health, with the engines the gateway knows; 503 while none answers."""
         engine = self.registry.only()
         if engine is None:
             self.registry.refresh()

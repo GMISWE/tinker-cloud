@@ -1,4 +1,4 @@
-"""R8.20: a sampling request naming a sampler reaches the engine with X-Model-Id and X-Pinned-Version and
+"""A sampling request naming a sampler reaches the engine with X-Model-Id and X-Pinned-Version and
 its body untouched; a request naming no sampler carries neither; a sampler the gateway does not know is 404."""
 import orjson
 

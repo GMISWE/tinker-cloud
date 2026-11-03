@@ -1,4 +1,4 @@
-"""/health asks the engine (R8.11): its model list is the engine's, the engines the gateway knows are listed,
+"""/health asks the engine: its model list is the engine's, the engines the gateway knows are listed,
 and an engine that does not answer makes the gateway say so within 2 s."""
 import time
 
