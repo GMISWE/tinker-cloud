@@ -25,7 +25,7 @@ PUBLIC_PATHS = frozenset({
 })
 PUBLIC_PREFIXES = ("/api/v1/external_weights/",)   # signed URLs carry their own token
 CREATE_MODEL = "/api/v1/create_model"
-SAMPLE_OPS = frozenset({"/api/v1/asample", "/api/v1/sample"})
+SAMPLE_OPS = frozenset({"/api/v1/asample", "/api/v1/sample", "/api/v1/create_sampling_client"})
 RETRIEVE_FUTURES = "/api/v1/retrieve_futures"
 DROP_MODEL_OPS = frozenset({"/api/v1/delete_model", "/api/v1/unload_model"})
 _MODEL_ID_HEADER = MODEL_ID_HEADER.lower().encode()
