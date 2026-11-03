@@ -37,6 +37,7 @@ for pod in "${PODS[@]}"; do
     ps -eo pid,etime,args | grep "m trainin[g]$" | sed "s/^/  proc:    /"
     echo "  ray:     $(ray status 2>/dev/null | grep -Eo "[0-9.]+/[0-9.]+ GPU" | head -1 || echo "no head")"
     echo "  actors:  $(ray list actors --filter state=ALIVE 2>/dev/null | grep -c ALIVE) alive"
+    echo "  pypi:    $(python3 -c "import importlib.metadata as m,sys; print(*(p+\"=\"+m.version(p) for p in sys.argv[1:]))" uvicorn fastapi pydantic httpx 2>/dev/null)"
     echo "  /app:    training/ tree $(cd /app && find training -name "*.py" 2>/dev/null | sort | xargs sha256sum 2>/dev/null | cut -d" " -f1 | sha256sum | cut -c1-12) (local: '"$LOCAL_TREE"')"
   ' 2>/dev/null || echo "  (exec dropped: state unknown)"
 done
