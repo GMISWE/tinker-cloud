@@ -32,7 +32,8 @@ def config(client: str = "aiohttp", **gateway: Any) -> TrainingConfig:
 
 
 class RecordingEngine:
-    """An ASGI app standing in for an engine. `/api/v1/echo` returns the body; `/api/v1/status/<n>` answers n
+    """An ASGI app standing in for an engine; each request is recorded with its headers folded to a dict and as
+    the raw list (`raw_headers`, a duplicate name shows there). `/api/v1/echo` returns the body; `/api/v1/status/<n>` answers n
     with a JSON error body; `/api/v1/stream/<mb>` streams that many MB; `/health` reports `model_ids`;
     `resolve_sampler_target` answers `target`; `create_model` echoes the id header; `delete_model` of an
     id in `gone` is 404; anything else answers 200 JSON. `on_request` runs before each answer."""
@@ -54,10 +55,11 @@ class RecordingEngine:
             body += m.get("body", b"")
             if not m.get("more_body", False):
                 break
-        headers = {k.decode(): v.decode("latin-1") for k, v in scope["headers"]}
+        raw = [(k.decode().lower(), v.decode("latin-1")) for k, v in scope["headers"]]
+        headers = dict(raw)
         path = scope["path"]
         self.requests.append({"method": scope["method"], "path": path, "query": scope["query_string"].decode(),
-                              "headers": headers, "body": body})
+                              "headers": headers, "raw_headers": raw, "body": body})
         if self.on_request is not None:
             self.on_request(self.requests[-1])
         if path.startswith("/api/v1/status/") or path in self.answers:

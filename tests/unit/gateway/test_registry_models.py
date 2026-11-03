@@ -70,6 +70,47 @@ def test_the_model_is_recorded_before_the_engine_answers_and_dropped_on_its_404(
     run(main())
 
 
+def test_a_forged_model_id_header_is_dropped_and_the_minted_id_is_the_one_recorded(tmp_path):
+    async def main():
+        h = Harness(str(tmp_path))
+        try:
+            async with serve_uds(h.engine, h.engine_socket):
+                await h.register()
+                sid = await h.create_session()
+                r = await h.post("/api/v1/create_model", orjson.dumps(_create(sid)),
+                                 **{"content-type": "application/json", "X-Model-Id": "model_fake_feedfacefeedface"})
+                assert r.status_code == 200, r.text
+                minted = r.json()["model_id"]
+                assert ID.match(minted) and minted != "model_fake_feedfacefeedface"
+                raw = h.engine.requests[-1]["raw_headers"]
+                assert [v for k, v in raw if k == "x-model-id"] == [minted], raw
+                assert (await h.get(f"/api/v1/sessions/{sid}")).json()["training_run_ids"] == [minted]
+        finally:
+            await h.close()
+    run(main())
+
+
+def test_the_gateway_reads_the_body_as_the_engine_would(tmp_path):
+    """`model_seq_id: "0"` is an int to the engine's request model, so it is to the gateway: the session
+    is checked and the model recorded, exactly as for `0`."""
+    async def main():
+        h = Harness(str(tmp_path))
+        try:
+            async with serve_uds(h.engine, h.engine_socket):
+                await h.register()
+                r = await h.post_json("/api/v1/create_model", {**_create("nope"), "model_seq_id": "0"})
+                assert r.status_code == 404 and r.json()["error"] == "Session not found: nope", r.text
+                assert h.engine.requests == []
+                sid = await h.create_session()
+                r = await h.post_json("/api/v1/create_model", {**_create(sid), "model_seq_id": "0"})
+                assert r.status_code == 200, r.text
+                assert h.engine.requests[-1]["headers"]["x-model-id"] == r.json()["model_id"]
+                assert (await h.get(f"/api/v1/sessions/{sid}")).json()["training_run_ids"] == [r.json()["model_id"]]
+        finally:
+            await h.close()
+    run(main())
+
+
 def test_a_create_without_session_fields_is_the_engines_422(tmp_path):
     async def main():
         h = Harness(str(tmp_path))

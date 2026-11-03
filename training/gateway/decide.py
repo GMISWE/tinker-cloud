@@ -9,6 +9,9 @@ message). It never awaits; the store it touches is the control path's (sessions 
 from dataclasses import dataclass
 from typing import List, Optional, Set, Tuple, Union
 
+from pydantic import ValidationError
+
+from ..models.requests import CreateModelRequest
 from ..utils.helpers import BASE_MODEL_SAMPLING_UNSUPPORTED, MODEL_ID_HEADER, PINNED_VERSION_HEADER, mint_id
 from . import routing
 from .registry import EngineRow, Registry
@@ -129,12 +132,14 @@ class Decider:
 
     def _create_model(self, engine: EngineRow, doc: dict) -> Union[Route, Reject]:
         """The gateway mints the model id and records the model before the engine sees the request;
-        the engine creates the model under that id. A body without the session fields is the
-        engine's 422, as today."""
-        session_id, seq, base_model = doc.get("session_id"), doc.get("model_seq_id"), doc.get("base_model")
-        if not isinstance(session_id, str) or not isinstance(seq, int) or not isinstance(base_model, str):
+        the engine creates the model under that id. The body is read with the engine's own request
+        model, so what the engine would accept is recorded and what it would refuse is its 422, as today."""
+        try:
+            req = CreateModelRequest.model_validate(doc)
+        except ValidationError:
             return Route(engine, [])
-        if not self._sessions.exists(session_id):
-            return Reject(404, f"Session not found: {session_id}")
+        if not self._sessions.exists(req.session_id):
+            return Reject(404, f"Session not found: {req.session_id}")
         model_id = mint_id("model", engine.name)
-        return Route(engine, [(_MODEL_ID_HEADER, model_id.encode())], record=ModelRecord(model_id, session_id, seq, base_model))
+        return Route(engine, [(_MODEL_ID_HEADER, model_id.encode())],
+                     record=ModelRecord(model_id, req.session_id, req.model_seq_id, req.base_model))
