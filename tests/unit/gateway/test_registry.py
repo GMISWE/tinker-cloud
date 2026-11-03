@@ -1,0 +1,99 @@
+"""Register, heartbeat, unregister on the engines face; the SDK face answers 503 while no engine is registered."""
+import asyncio
+import time
+
+import httpx
+import orjson
+
+from training.gateway.app import engines_face
+from training.gateway.registry import Registry, RegistryConflict
+
+from .support import Harness, run, serve_uds
+
+
+def _engines(registry: Registry) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=engines_face(registry)), base_url="http://gateway")
+
+
+ROW = {"name": "fake", "backend": "fake", "gpus": [0, 1], "socket": "/tmp/fake.sock", "pid": 7}
+
+
+def test_register_list_heartbeat_unregister():
+    async def main():
+        registry = Registry()
+        async with _engines(registry) as c:
+            assert (await c.get("/engines")).json() == {"engines": []}
+            r = await c.post("/engines/register", json=ROW)
+            assert r.status_code == 200 and r.json() == {"state": "UP"}
+            rows = (await c.get("/engines")).json()["engines"]
+            assert len(rows) == 1 and rows[0]["name"] == "fake" and rows[0]["state"] == "UP"
+            assert rows[0]["pid"] == 7 and rows[0]["gpus"] == [0, 1] and rows[0]["socket"] == "/tmp/fake.sock"
+            assert rows[0]["heartbeat_age_s"] < 1.0
+            registry.get("fake").last_heartbeat -= 10
+            assert (await c.get("/engines")).json()["engines"][0]["heartbeat_age_s"] >= 10
+            assert (await c.post("/engines/fake/heartbeat")).status_code == 200
+            assert (await c.get("/engines")).json()["engines"][0]["heartbeat_age_s"] < 1.0
+            assert (await c.post("/engines/ghost/heartbeat")).status_code == 404
+            assert (await c.delete("/engines/fake")).status_code == 204
+            assert (await c.get("/engines")).json() == {"engines": []}
+            assert (await c.delete("/engines/fake")).status_code == 404
+            assert (await c.get("/engines/fake")).status_code == 404
+    run(main())
+
+
+def test_second_engine_is_refused_and_a_new_pid_replaces_the_old_row():
+    dropped = []
+    registry = Registry()
+    registry.on_drop(dropped.append)
+    registry.register(**ROW)
+    try:
+        registry.register(**{**ROW, "name": "other"})
+    except RegistryConflict as exc:
+        assert "fake" in str(exc)
+    else:
+        raise AssertionError("a second engine registered")
+    row = registry.register(**{**ROW, "pid": 8})
+    assert row.pid == 8 and [r.pid for r in dropped] == [7]
+    assert registry.only() is row
+    registry.unregister("fake")
+    assert [r.pid for r in dropped] == [7, 8] and registry.only() is None
+
+
+def test_bad_registration_is_400():
+    async def main():
+        async with _engines(Registry()) as c:
+            assert (await c.post("/engines/register", content=b"nope")).status_code == 400
+            assert (await c.post("/engines/register", json={"name": "fake"})).status_code == 400
+            assert (await c.post("/engines/register", json={**ROW, "gpus": "0,1"})).status_code == 400
+            assert (await c.post("/engines/register", json={**ROW, "gpus": ["0"]})).status_code == 400
+            r = await c.post("/engines/register", json={**ROW, "gpus": None})   # not stated
+            assert r.status_code == 200 and (await c.get("/engines")).json()["engines"][0]["gpus"] is None
+            assert (await c.delete("/engines/fake")).status_code == 204
+            r = await c.post("/engines/register", json={**ROW, "name": "other"})
+            assert r.status_code == 200
+            assert (await c.post("/engines/register", json=ROW)).status_code == 409
+    run(main())
+
+
+def test_sdk_face_is_503_until_an_engine_registers_and_again_after_it_leaves(tmp_path):
+    async def main():
+        h = Harness(str(tmp_path), "asgi", "h11")
+        try:
+            r = await h.post("/api/v1/create_model", orjson.dumps({"session_id": "s"}))
+            assert r.status_code == 503 and r.json()["error"] == "no engine registered", r.text
+            assert r.json()["path"] == "/api/v1/create_model"
+            assert (await h.sdk.get("/health")).status_code == 503
+            async with serve_uds(h.engine, h.engine_socket):
+                assert (await h.register()).status_code == 200
+                t0 = time.monotonic()
+                r = await h.post("/api/v1/create_model", orjson.dumps({"session_id": "s"}))
+                assert r.status_code == 200 and time.monotonic() - t0 < 1.0
+                assert (await h.sdk.get("/health")).status_code == 200
+                assert (await h.engines.delete("/engines/fake")).status_code == 204
+                t0 = time.monotonic()
+                r = await h.post("/api/v1/create_model", orjson.dumps({"session_id": "s"}))
+                assert r.status_code == 503 and time.monotonic() - t0 < 1.0
+                await asyncio.sleep(0)   # the dropped engine's client closes in its own task
+        finally:
+            await h.close()
+    run(main())

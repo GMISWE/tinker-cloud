@@ -5,6 +5,9 @@ Authentication, backend-agnostic model helpers, and common helpers.
 """
 from .auth import APIKeyAuth, verify_api_key
 from .helpers import (
+    set_engine_name,
+    valid_engine_name,
+    engine_name_of,
     generate_request_id,
     generate_model_id,
     format_timestamp,
@@ -24,6 +27,9 @@ __all__ = [
     "APIKeyAuth",
     "verify_api_key",
     # Helpers
+    "set_engine_name",
+    "valid_engine_name",
+    "engine_name_of",
     "generate_request_id",
     "generate_model_id",
     "format_timestamp",

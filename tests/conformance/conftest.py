@@ -28,13 +28,17 @@ def _free_port() -> int:
 
 
 class Server:
-    def __init__(self, tmp: Path):
+    """`single`: today's one process. `split`: an engine on a unix socket behind the gateway on TCP."""
+
+    def __init__(self, tmp: Path, mode: str = "single"):
+        self.mode = mode
         self.port = _free_port()
         self.base_url = f"http://127.0.0.1:{self.port}"
         self.metadata_dir = tmp / "metadata"
         self.checkpoint_base = tmp / "checkpoints"
         self.trace_path = tmp / "trace.jsonl"
         self.log_path = tmp / "server.log"
+        self.engine_log_path = tmp / "engine.log"
         for d in (self.metadata_dir, self.checkpoint_base):
             d.mkdir(parents=True, exist_ok=True)
         env = {
@@ -52,33 +56,55 @@ class Server:
             "RAY_DISABLE_AUTO_INIT": "1",
         }
         self.log = open(self.log_path, "w")
+        self.engine_log = None
+        self.engine = None
+        if mode == "single":
+            self.proc = subprocess.Popen(
+                [sys.executable, "-m", "training.api", "--backend", "fake",
+                 "--host", "127.0.0.1", "--port", str(self.port)],
+                cwd=str(REPO_ROOT), env=env, stdout=self.log, stderr=subprocess.STDOUT,
+            )
+            return
+        engine_sock, gateway_sock = tmp / "fake.sock", tmp / "gateway.sock"
+        self.engine_log = open(self.engine_log_path, "w")
+        self.engine = subprocess.Popen(
+            [sys.executable, "-m", "training.engine", "--name", "fake", "--backend", "fake",
+             "--socket", str(engine_sock), "--gateway-socket", str(gateway_sock), "--heartbeat-interval", "1"],
+            cwd=str(REPO_ROOT), env=env, stdout=self.engine_log, stderr=subprocess.STDOUT,
+        )
         self.proc = subprocess.Popen(
-            [sys.executable, "-m", "training.api", "--backend", "fake",
-             "--host", "127.0.0.1", "--port", str(self.port)],
+            [sys.executable, "-m", "training.gateway", "--host", "127.0.0.1", "--port", str(self.port),
+             "--engines-socket", str(gateway_sock)],
             cwd=str(REPO_ROOT), env=env, stdout=self.log, stderr=subprocess.STDOUT,
         )
 
     def wait_healthy(self, timeout_s: float = 60.0) -> None:
         deadline = time.time() + timeout_s
         while time.time() < deadline:
-            if self.proc.poll() is not None:
-                raise RuntimeError(f"server exited early; log:\n{self.log_path.read_text()[-4000:]}")
+            for proc, log in ((self.proc, self.log_path), (self.engine, self.engine_log_path)):
+                if proc is not None and proc.poll() is not None:
+                    raise RuntimeError(f"{log.name} process exited early; log:\n{log.read_text()[-4000:]}")
             try:
                 if requests.get(self.base_url + "/health", timeout=2).status_code == 200:
                     return
             except requests.RequestException:
                 pass
             time.sleep(0.25)
-        raise RuntimeError(f"server not healthy in {timeout_s}s; log:\n{self.log_path.read_text()[-4000:]}")
+        logs = self.log_path.read_text()[-4000:] + (self.engine_log_path.read_text()[-4000:] if self.engine else "")
+        raise RuntimeError(f"server not healthy in {timeout_s}s; logs:\n{logs}")
 
     def stop(self) -> None:
-        if self.proc.poll() is None:
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
+        # the gateway first, then the engine: the engine's exit unregisters and frees its models
+        for proc in (self.proc, self.engine):
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
         self.log.close()
+        if self.engine_log is not None:
+            self.engine_log.close()
 
     def trace(self):
         if not self.trace_path.exists():
@@ -95,9 +121,9 @@ class Server:
         return requests.post(self.base_url + path, json=body, headers=headers, timeout=kw.pop("timeout", 30))
 
 
-@pytest.fixture(scope="session")
-def server(tmp_path_factory):
-    srv = Server(tmp_path_factory.mktemp("protocol"))
+@pytest.fixture(scope="session", params=["single", "split"])
+def server(request, tmp_path_factory):
+    srv = Server(tmp_path_factory.mktemp("protocol"), request.param)
     try:
         srv.wait_healthy()
         yield srv
