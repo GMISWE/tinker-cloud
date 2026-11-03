@@ -154,6 +154,8 @@ class Gateway:
         try:
             resp = await forward(self.pool.client_for(decision.engine), method, path, query, headers, decision.add_headers, body)
         except EngineUnreachable as exc:
+            if _caused_by(exc, ClientDisconnect):
+                raise                 # the SDK left mid-body: the engine is fine and nobody is left to answer
             logger.warning("Engine %s unreachable for %s %s: %s", decision.engine.name, method, path, exc)
             self.registry.refresh()   # a replaced or departed engine is seen now, not at the next period
             return _error(503, f"engine {decision.engine.name} unreachable: {exc}", path)
