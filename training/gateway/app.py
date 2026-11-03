@@ -142,6 +142,10 @@ class Gateway:
         else:
             body = b"" if method in ("GET", "HEAD") else stream_body()
         decision = self.decider.decide(path, query, headers, body if isinstance(body, bytes) else None)
+        if isinstance(decision, Reject) and decision.status == 503:
+            # this worker knows no engine: another worker may have taken the registration since its last refresh
+            self.registry.refresh()
+            decision = self.decider.decide(path, query, headers, body if isinstance(body, bytes) else None)
         if isinstance(decision, Reject):
             return _error(decision.status, decision.message, path)
         if decision.record is not None:
@@ -151,6 +155,7 @@ class Gateway:
             resp = await forward(self.pool.client_for(decision.engine), method, path, query, headers, decision.add_headers, body)
         except EngineUnreachable as exc:
             logger.warning("Engine %s unreachable for %s %s: %s", decision.engine.name, method, path, exc)
+            self.registry.refresh()   # a replaced or departed engine is seen now, not at the next period
             return _error(503, f"engine {decision.engine.name} unreachable: {exc}", path)
         if decision.drop_model is not None and (200 <= resp.status < 300 or resp.status == 404):
             self.store.remove_model(decision.drop_model)
@@ -188,6 +193,9 @@ class Gateway:
     async def health(self, path: str) -> Reply:
         """The engine's own health, with the engines the gateway knows; 503 while none answers (R8.11)."""
         engine = self.registry.only()
+        if engine is None:
+            self.registry.refresh()
+            engine = self.registry.only()
         if engine is None:
             return _error(503, "no engine registered", path)
         try:
