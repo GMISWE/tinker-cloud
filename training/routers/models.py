@@ -12,6 +12,7 @@ Endpoints:
 import logging
 from typing import Dict, Optional
 
+import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
 from ..services.model_service import ModelService
@@ -111,7 +112,10 @@ async def create_model(
             # the gateway recorded the model at submit; a create that fails is reported before the future is
             gateway = http_request.app.state.gateway_client
             if gateway is not None:   # None: an engine with no gateway
-                await gateway.model_failed(model_id)
+                try:
+                    await gateway.model_failed(model_id)
+                except httpx.HTTPError:   # the create's own error is the one to report; the row's fate is logged beside it
+                    logger.exception("Gateway did not drop the failed model %s", model_id)
             raise
 
     # Create async task
