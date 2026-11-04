@@ -48,7 +48,8 @@ def main(argv=None) -> None:
         raise ValueError(f"one engines listener: TINKERCLOUD_ENGINES_SOCKET {env_engines_socket} and the engine's gateway socket {config.engine.gateway_socket} differ")
     config.gateway.engines_socket = os.path.abspath(config.engine.gateway_socket or env_engines_socket or str(metadata_dir / "gateway.sock"))
     config.engine.gateway_socket = config.gateway.engines_socket
-    config.gateway.workers = 1
+    if config.gateway.workers != 1:   # one process, one worker: a count meant for `python -m training.gateway` is a mistake here
+        raise ValueError(f"the single process runs one gateway worker; TINKERCLOUD_GATEWAY_WORKERS={config.gateway.workers} is not honoured")
     set_config(config)
 
     try:
