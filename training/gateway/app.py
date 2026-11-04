@@ -242,8 +242,9 @@ def sdk_face(gateway: Gateway, engines) -> FastAPI:
             raise HTTPException(status_code=404, detail=f"Session not found: {request.session_id}")
         if touched is False:   # the SDK stops its heartbeat loop on 410
             session = store.get_session(request.session_id)
-            reason = session.finish_reason if session is not None else "unknown"
-            raise HTTPException(status_code=410, detail=f"Session finished ({reason}): {request.session_id}")
+            if session is None:   # finished, then reaped between the two reads
+                raise HTTPException(status_code=404, detail=f"Session not found: {request.session_id}")
+            raise HTTPException(status_code=410, detail=f"Session finished ({session.finish_reason}): {request.session_id}")
         return SessionHeartbeatResponse()
 
     @app.post("/api/v1/create_sampling_session", response_model=CreateSamplingSessionResponse)
