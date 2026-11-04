@@ -119,8 +119,8 @@ class SessionStore:
         r = rows[0]
         models = self._read("SELECT model_id FROM session_models WHERE session_id = ? ORDER BY model_seq_id ASC", (session_id,))
         samplers = self._read("SELECT sampler_id FROM samplers WHERE session_id = ? ORDER BY created_at ASC", (session_id,))
-        return Session(session_id=r[0], sdk_version=r[1] or "", tags=json.loads(r[2]) if r[2] else [],
-                       user_metadata=json.loads(r[3]) if r[3] else {}, created_at=r[4], last_heartbeat=r[5],
+        return Session(session_id=r[0], sdk_version=r[1], tags=json.loads(r[2]), user_metadata=json.loads(r[3]),
+                       created_at=r[4], last_heartbeat=r[5],
                        finished_at=r[6], finish_reason=r[7], finish_detail=r[8],
                        model_ids=[m[0] for m in models], sampler_ids=[s[0] for s in samplers])
 

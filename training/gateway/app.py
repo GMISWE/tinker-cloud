@@ -10,6 +10,7 @@ import contextlib
 import json
 import logging
 import re
+import sqlite3
 import time
 import uuid
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -130,7 +131,7 @@ class Gateway:
             await asyncio.sleep(self.config.gateway.registry_refresh_s)
             try:
                 self.registry.refresh()
-            except Exception:  # pylint: disable=broad-except
+            except sqlite3.Error:   # another worker holds the file (busy, locked): this period's rows stay, the next read retries
                 logger.exception("Registry refresh failed")
 
     # ------------------------------------------------------------ the forwarded path
