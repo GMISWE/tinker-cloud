@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
+from .dbfile import opened_alone
+
 logger = logging.getLogger(__name__)
 
 
@@ -56,9 +58,9 @@ class Registry:
     def __init__(self, path: Optional[Path] = None) -> None:
         self._conn = sqlite3.connect(str(path) if path is not None else ":memory:", check_same_thread=False,
                                      isolation_level=None, timeout=10.0)
-        if path is not None:
-            self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=10000")
+        if path is not None:
+            opened_alone(path, lambda: self._conn.execute("PRAGMA journal_mode=WAL"))
         self._conn.execute("""CREATE TABLE IF NOT EXISTS engines (
             name TEXT PRIMARY KEY, backend TEXT NOT NULL, gpus TEXT, socket TEXT NOT NULL, pid INTEGER NOT NULL,
             registered_at REAL NOT NULL, last_heartbeat REAL NOT NULL)""")
