@@ -19,6 +19,7 @@ from typing import AsyncIterator, Dict, List, Protocol, Tuple, Union
 
 import aiohttp
 import httpx
+import yarl
 
 from ..config import GatewayConfig
 from ..utils.helpers import MODEL_ID_HEADER, PINNED_VERSION_HEADER
@@ -69,7 +70,8 @@ class AiohttpClient:
         hdrs = [(k.decode("latin-1"), v.decode("latin-1")) for k, v in headers]
         data = body if isinstance(body, bytes) else _chunks(body)
         try:
-            async with self._session.request(method, "http://engine" + target, headers=hdrs, data=data) as r:
+            url = yarl.URL("http://engine" + target, encoded=True)   # the SDK's percent-encoding stays as sent
+            async with self._session.request(method, url, headers=hdrs, data=data) as r:
                 content = await r.read()
                 return EngineResponse(r.status, list(r.raw_headers), content)
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
