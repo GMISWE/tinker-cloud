@@ -56,6 +56,7 @@ class Registry:
     """`path=None` keeps the rows in memory (one process)."""
 
     def __init__(self, path: Optional[Path] = None) -> None:
+        self.path = path   # None: in memory, one process
         self._conn = sqlite3.connect(str(path) if path is not None else ":memory:", check_same_thread=False,
                                      isolation_level=None, timeout=10.0)
         self._conn.execute("PRAGMA busy_timeout=10000")
