@@ -63,7 +63,7 @@ def main(argv=None) -> None:
     if config.gateway.workers == 1:
         serve(config, [sdk, engines])
         return
-    supervise(config, [sdk, engines])
+    sys.exit(supervise(config, [sdk, engines]))
 
 
 def serve(config: TrainingConfig, sockets: List) -> None:
@@ -75,8 +75,9 @@ def serve(config: TrainingConfig, sockets: List) -> None:
     server.run(sockets=sockets)
 
 
-def supervise(config: TrainingConfig, sockets: List) -> None:
-    """Fork `workers` children over the bound sockets; pass SIGTERM/SIGINT on; return when all have exited."""
+def supervise(config: TrainingConfig, sockets: List) -> int:
+    """Fork `workers` children over the bound sockets; pass SIGTERM/SIGINT on; when all have exited,
+    return 0, or 1 when any worker did not exit 0 (each such worker is named on stderr)."""
     children: List[int] = []
     for _ in range(config.gateway.workers):
         pid = os.fork()
@@ -98,15 +99,13 @@ def supervise(config: TrainingConfig, sockets: List) -> None:
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, relay)
+    failed = 0
     for pid in children:
-        while True:
-            try:
-                os.waitpid(pid, 0)
-                break
-            except InterruptedError:
-                continue
-            except ChildProcessError:
-                break
+        code = os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1])   # negative: killed by that signal
+        if code != 0:
+            failed += 1
+            print(f"gateway worker {pid} exited {code}", file=sys.stderr)
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

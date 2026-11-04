@@ -303,7 +303,7 @@ class GatewayConfig(BaseModel):
     keepalive_s: float = Field(default=250.0, description="Idle time after which a pooled engine connection is dropped")
     client: Literal["aiohttp", "httpx"] = Field(default="aiohttp", description="Engine-facing HTTP client (httpx: the measurement baseline)")
     workers: int = Field(
-        default_factory=lambda: int(os.getenv("TINKERCLOUD_GATEWAY_WORKERS", "1")),
+        default_factory=lambda: int(os.getenv("TINKERCLOUD_GATEWAY_WORKERS", "1")), ge=1, validate_default=True,
         description="Gateway worker processes sharing the listening sockets"
     )
     # Every worker serves every engine; a registration lands on one worker and the others read it
