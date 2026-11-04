@@ -535,13 +535,13 @@ class ListenerSplit:
 
 def build_app(config: TrainingConfig, registry: Optional[Registry] = None, store: Optional[SessionStore] = None) -> FastAPI:
     """The gateway over the given registry and store, or over the shared files under METADATA_DIR.
+    A store not given lives where the registry lives: in memory beside an in-memory registry, else
+    `sessions.db` beside the registry's file (the two files are siblings by design).
     `app.state.gateway` is the `Gateway`; `app.state.engines` the engines face."""
     if registry is None:
         config.storage.metadata_dir.mkdir(parents=True, exist_ok=True)
         registry = Registry(config.storage.metadata_dir / "engines.db")
-    elif store is None:   # a caller with its own registry is one process (a test, an embedding): a store of its own
-        store = SessionStore(None)
     if store is None:
-        store = SessionStore(config.storage.metadata_dir / "sessions.db")
+        store = SessionStore(None if registry.path is None else registry.path.parent / "sessions.db")
     gateway = Gateway(config, registry, store)
     return sdk_face(gateway, gateway_engines_face(registry, gateway))
