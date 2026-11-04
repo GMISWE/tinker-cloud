@@ -13,6 +13,7 @@ import re
 import time
 import uuid
 from typing import Any, Awaitable, Callable, Dict, List, Optional
+from urllib.parse import quote
 
 import orjson
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -332,8 +333,12 @@ def sdk_face(gateway: Gateway, engines) -> FastAPI:
 
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
     async def forward_everything_else(path: str, request: Request):
+        # as the SDK encoded them: FastAPI's `path` is decoded, and `request.url` re-splits a decoded `?` into a query.
+        # ASGI makes raw_path optional (a server may not keep the bytes): then the decoded path is re-quoted.
+        raw = request.scope.get("raw_path")
+        raw_path, query = raw.decode("latin-1") if raw else quote(request.scope["path"]), request.scope["query_string"]
         try:
-            reply = await gateway.handle(request.method, "/" + path, request.url.query.encode(),
+            reply = await gateway.handle(request.method, raw_path, query,
                                          request.headers.raw, request.body, request.stream)
         except ClientDisconnect:
             return Response(status_code=499)   # nobody is left to read it
@@ -343,7 +348,7 @@ def sdk_face(gateway: Gateway, engines) -> FastAPI:
                 return Response(status_code=499)
             raise
         except RegistryUnavailable as exc:
-            return _response(_error(503, f"engine registry busy: {exc}", "/" + path))
+            return _response(_error(503, f"engine registry busy: {exc}", raw_path))
         return _response(reply)
 
     return app

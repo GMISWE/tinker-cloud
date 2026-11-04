@@ -54,3 +54,33 @@ def test_a_percent_encoded_query_reaches_the_engine_as_sent(tmp_path, client):
         finally:
             await h.close()
     run(main())
+
+
+@pytest.mark.parametrize("client", ["aiohttp", "httpx"])
+def test_a_percent_encoded_path_reaches_the_engine_as_sent(tmp_path, client):
+    """`a%3Fb` stays one path segment (not a query) and `a%20b` is a legal request line: the engine
+    decodes the same bytes the SDK encoded."""
+    async def main():
+        h = Harness(str(tmp_path), client)
+        try:
+            async with serve_uds(h.engine, h.engine_socket):
+                await h.register()
+                for raw, seen_path in ((b"/api/v1/echo/a%3Fb", "/api/v1/echo/a?b"), (b"/api/v1/echo/a%20b", "/api/v1/echo/a b")):
+                    sent = []
+
+                    async def receive():
+                        return {"type": "http.request", "body": b"", "more_body": False}
+
+                    async def send(message):
+                        sent.append(message)
+
+                    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "GET", "scheme": "http",
+                             "path": seen_path, "raw_path": raw, "query_string": b"", "root_path": "",
+                             "headers": [(b"host", b"sdk:8000"), (b"x-api-key", API_KEY.encode())],
+                             "server": ("127.0.0.1", 8000), "client": ("127.0.0.1", 1)}
+                    await h.app(scope, receive, send)
+                    assert sent[0]["status"] == 200, (raw, sent)
+                    assert (h.engine.requests[-1]["path"], h.engine.requests[-1]["query"]) == (seen_path, "")
+        finally:
+            await h.close()
+    run(main())

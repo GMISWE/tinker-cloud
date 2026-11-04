@@ -13,6 +13,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from .dbfile import opened_alone
+
 logger = logging.getLogger(__name__)
 
 SESSION_COLUMNS = "session_id, sdk_version, tags, user_metadata, created_at, last_heartbeat, finished_at, finish_reason, finish_detail"
@@ -55,11 +57,16 @@ class SessionStore:
     def __init__(self, path: Optional[Path]) -> None:
         self._conn = sqlite3.connect(str(path) if path is not None else ":memory:", check_same_thread=False,
                                      isolation_level=None, timeout=10.0)
-        if path is not None:
-            self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=10000")
         self.reads = 0    # statements that read; tests/unit/gateway/test_hot_path.py pins the warm path at zero
         self.writes = 0
+        if path is None:
+            self._init()
+        else:
+            opened_alone(path, self._open_file)
+
+    def _open_file(self) -> None:
+        self._conn.execute("PRAGMA journal_mode=WAL")
         self._init()
 
     def _init(self) -> None:

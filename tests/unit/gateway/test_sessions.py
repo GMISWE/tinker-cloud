@@ -1,6 +1,8 @@
 """Sessions and samplers live in the gateway: the eight routes are answered there and the engine sees none of them."""
 import orjson
 
+from training.gateway.sessions import SessionStore
+
 from .support import API_KEY, Harness, run, serve_uds
 
 SESSION_PATHS = ("/api/v1/create_session", "/api/v1/session_heartbeat", "/api/v1/create_sampling_session",
@@ -84,3 +86,28 @@ def test_the_engines_verdict_on_a_model_path_is_relayed(tmp_path):
         finally:
             await h.close()
     run(main())
+
+
+def test_many_workers_open_one_new_store_file_at_once(tmp_path):
+    """A cold start with N workers: every one creates and migrates the same file; none sees another's
+    half-done schema (a duplicate-column error) and all end up with the columns."""
+    import threading
+    path = tmp_path / "sessions.db"
+    errors = []
+    go = threading.Barrier(8)
+
+    def open_store():
+        try:
+            go.wait()
+            SessionStore(path).close()
+        except BaseException as exc:   # the failure under test: reported, not swallowed
+            errors.append(exc)
+    threads = [threading.Thread(target=open_store) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    store = SessionStore(path)
+    sid = store.create_session([], {}, "t")
+    assert store.get_session(sid) is not None
