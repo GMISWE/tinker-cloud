@@ -62,7 +62,7 @@ class AiohttpClient:
     def __init__(self, uds: str, pool: int, connect_timeout_s: float, keepalive_s: float) -> None:
         self._session = aiohttp.ClientSession(
             connector=aiohttp.UnixConnector(path=uds, limit=pool, keepalive_timeout=keepalive_s),
-            timeout=aiohttp.ClientTimeout(total=None, sock_connect=connect_timeout_s),   # a retrieve_future holds for minutes
+            timeout=aiohttp.ClientTimeout(total=None, sock_connect=connect_timeout_s),   # no total deadline: the engine's long polls (up to 40 s) bound a call
             auto_decompress=False, skip_auto_headers=AUTO_HEADERS,
         )
 

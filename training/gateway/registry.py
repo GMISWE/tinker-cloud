@@ -15,6 +15,10 @@ from typing import Callable, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+class RegistryUnavailable(Exception):
+    """The shared file could not be read this time (another worker holds it); the caller keeps its rows."""
+
+
 class RegistryConflict(Exception):
     """A registration the gateway cannot hold alongside the current one."""
 
@@ -34,6 +38,15 @@ class EngineRow:
             "name": self.name, "backend": self.backend, "gpus": self.gpus, "socket": self.socket,
             "pid": self.pid, "state": "UP", "heartbeat_age_s": round(now - self.last_heartbeat, 3),
         }
+
+
+_COLUMNS = "name, backend, gpus, socket, pid, registered_at, last_heartbeat"
+
+
+def _row(t: tuple) -> EngineRow:
+    name, backend, gpus, socket, pid, registered_at, last_heartbeat = t
+    return EngineRow(name, backend, None if gpus is None else json.loads(gpus), socket, int(pid),
+                     float(registered_at), float(last_heartbeat))
 
 
 class Registry:
@@ -89,20 +102,21 @@ class Registry:
         return True
 
     def unregister(self, name: str) -> Optional[EngineRow]:
-        if not self._conn.execute("DELETE FROM engines WHERE name = ?", (name,)).rowcount:
+        """The row as the file held it, or None when no such engine is registered (on any worker)."""
+        found = self._conn.execute(f"SELECT {_COLUMNS} FROM engines WHERE name = ?", (name,)).fetchall()
+        if not found or not self._conn.execute("DELETE FROM engines WHERE name = ?", (name,)).rowcount:
             return None
         logger.info("Engine %s unregistered", name)
-        row = self._rows.get(name)
         self.refresh()
-        return row
+        return _row(found[0])
 
     def refresh(self) -> None:
         """Re-read the table; a cached row that is gone or has a new pid is dropped (its callbacks run)."""
-        fresh: Dict[str, EngineRow] = {}
-        for name, backend, gpus, socket, pid, registered_at, last_heartbeat in self._conn.execute(
-                "SELECT name, backend, gpus, socket, pid, registered_at, last_heartbeat FROM engines").fetchall():
-            fresh[name] = EngineRow(name, backend, None if gpus is None else json.loads(gpus), socket, int(pid),
-                                    float(registered_at), float(last_heartbeat))
+        try:
+            found = self._conn.execute(f"SELECT {_COLUMNS} FROM engines").fetchall()
+        except sqlite3.OperationalError as exc:   # busy or locked past the timeout
+            raise RegistryUnavailable(str(exc)) from exc
+        fresh = {t[0]: _row(t) for t in found}
         for name, old in self._rows.items():
             new = fresh.get(name)
             if new is None or new.pid != old.pid or new.registered_at != old.registered_at:
