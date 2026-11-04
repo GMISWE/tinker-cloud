@@ -178,10 +178,6 @@ class SessionStore:
         rows = self._read("SELECT session_id FROM session_models WHERE model_id = ?", (model_id,))
         return rows[0][0] if rows else None
 
-    def base_model_of(self, model_id: str) -> Optional[str]:
-        rows = self._read("SELECT base_model FROM session_models WHERE model_id = ?", (model_id,))
-        return rows[0][0] if rows else None
-
     def model_ids(self) -> List[str]:
         return [r[0] for r in self._read("SELECT model_id FROM session_models")]
 

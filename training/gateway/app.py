@@ -463,7 +463,9 @@ def _sampler_created(gateway: Gateway, engine: str, body: bytes, path: str) -> R
         pinned = doc["pinned_version"]
         if pinned is not None and not isinstance(pinned, int):
             raise TypeError("pinned_version must be an int or null")
-        model_path, base_model = doc["model_path"], doc["base_model"] or gateway.store.base_model_of(model_id)
+        model_path, base_model = doc["model_path"], doc["base_model"]
+        if not isinstance(base_model, str):   # the engine knows its model's base model; a sampler without one is no sampler
+            raise TypeError("base_model must be a str")
     except (orjson.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         return _error(400, f"bad sampler: {type(exc).__name__}: {exc}", path)
     session_id = gateway.store.session_of_model(model_id)

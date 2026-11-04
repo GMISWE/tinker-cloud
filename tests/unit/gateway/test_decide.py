@@ -63,4 +63,4 @@ def test_only_forward_opens_engine_connections():
     src = inspect.getsource(decide_module)
     for word in ("aiohttp", "httpx", "socket", "open_unix_connection", "async def"):
         assert word not in src, word
-    assert hasattr(forward, "Pool") and hasattr(forward, "AiohttpClient")
+    assert inspect.isclass(forward.Pool) and inspect.isclass(forward.AiohttpClient)

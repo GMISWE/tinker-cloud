@@ -93,17 +93,18 @@ def test_an_engines_ephemeral_sampler_is_recorded_through_the_engines_face(tmp_p
                 sid = await h.create_session()
                 h.store.add_model(sid, MODEL, 0, "fake/tiny", "fake")
                 doc = {"sampler_id": f"{MODEL}_1_{HEX[:8]}", "model_id": MODEL, "pinned_version": 2,
-                       "model_path": f"tinker://{MODEL}/sampler_weights/e", "base_model": None}
+                       "model_path": f"tinker://{MODEL}/sampler_weights/e", "base_model": "fake/tiny"}
                 r = await h.engines.post("/engines/fake/samplers", json=doc)
                 assert r.status_code == 200 and r.json() == {"session_id": sid}, r.text
                 assert (await h.get(f"/api/v1/sessions/{sid}")).json()["sampler_ids"] == [doc["sampler_id"]]
-                assert (await h.get(f"/api/v1/samplers/{doc['sampler_id']}")).json()["base_model"] == "fake/tiny"   # from the model's row
+                assert (await h.get(f"/api/v1/samplers/{doc['sampler_id']}")).json()["base_model"] == "fake/tiny"
                 await h.post_json("/api/v1/asample", {**PROMPT, "sampling_session_id": doc["sampler_id"]})
                 assert h.engine.requests[-1]["headers"]["x-pinned-version"] == "2"
                 r = await h.engines.post("/engines/fake/samplers", json={**doc, "model_id": "model_fake_ffffffffffffffff"})
                 assert r.status_code == 404   # a model no session owns
                 assert (await h.engines.post("/engines/ghost/samplers", json=doc)).status_code == 404
                 assert (await h.engines.post("/engines/fake/samplers", content=b"{}")).status_code == 400
+                assert (await h.engines.post("/engines/fake/samplers", json={**doc, "base_model": None})).status_code == 400
         finally:
             await h.close()
     run(main())
