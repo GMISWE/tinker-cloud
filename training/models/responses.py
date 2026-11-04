@@ -64,7 +64,7 @@ class ResolveSamplerTargetResponse(BaseModel):
     """What a sampler is bound to: its model and the weight version its path pinned (None: live)."""
     model_id: str
     pinned_version: Optional[int] = None
-    base_model: Optional[str] = None
+    base_model: str
 
 
 class ClientConfigResponse(BaseModel):

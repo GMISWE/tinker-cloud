@@ -7,7 +7,7 @@ import argparse
 import asyncio
 import signal
 import sys
-from typing import List, Optional
+from typing import Optional, Sequence
 
 import uvicorn
 
@@ -74,7 +74,7 @@ def main(argv=None) -> None:
     asyncio.run(serve(config, sock))
 
 
-async def serve(config: TrainingConfig, sock, also_stop: Optional[List[uvicorn.Server]] = None) -> None:
+async def serve(config: TrainingConfig, sock, also_stop: Sequence[uvicorn.Server] = ()) -> None:
     """Serve the engine until SIGTERM/SIGINT; then unregister, stop, and flag the servers in
     `also_stop` (a gateway sharing this process) to stop after it."""
     name, socket_path = config.engine.name, config.engine.socket
@@ -118,7 +118,7 @@ async def serve(config: TrainingConfig, sock, also_stop: Optional[List[uvicorn.S
     await serving
     if register is not None:
         await register.close()
-    for other in also_stop or ():
+    for other in also_stop:
         other.should_exit = True
 
 

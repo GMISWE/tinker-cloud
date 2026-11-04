@@ -33,8 +33,10 @@ from ..models.responses import (
     FinishSessionResponse,
     GetSamplerResponse,
     GetSessionResponse,
+    HealthResponse,
     JoinSamplingSessionResponse,
     ListSessionsResponse,
+    ResolveSamplerTargetResponse,
     SessionHeartbeatResponse,
 )
 from ..utils.helpers import BASE_MODEL_SAMPLING_UNSUPPORTED, engine_name_of
@@ -96,7 +98,9 @@ class Gateway:
         self.samplers = SamplerCache(store)
         self.pool = Pool(config.gateway, registry)
         keys = {k.strip() for k in config.auth.api_key.split(",") if k.strip()} if config.auth.enabled else None
-        self._own_key = next(iter(sorted(keys))) if keys else None
+        if keys is not None and not keys:
+            raise ValueError("auth is enabled and the API key setting names no key")
+        self._own_key = next(iter(sorted(keys))) if keys is not None else None   # None: auth off, the engine takes bare calls
         self.decider = Decider(keys, config.auth.api_key_header, registry, self.samplers, store)
         self.reaper = ModelReaper(self.free_model)
         self._tasks: List[asyncio.Task] = []
@@ -206,9 +210,9 @@ class Gateway:
             return _error(503, f"engine {engine.name} unreachable: {exc}", path)
         if resp.status != 200:
             return _error(503, f"engine {engine.name} answered {resp.status} to /health", path)
-        doc = orjson.loads(resp.body)
-        doc["engines"] = [{"name": engine.name, "state": "UP"}]
-        return _json_reply(200, doc)
+        health = HealthResponse.model_validate(orjson.loads(resp.body))   # the engine's body, checked once here
+        health.engines = [{"name": engine.name, "state": "UP"}]
+        return _json_reply(200, health.model_dump())
 
 
 # ------------------------------------------------------------ the SDK face
@@ -266,13 +270,15 @@ def sdk_face(gateway: Gateway, engines) -> FastAPI:
             raise HTTPException(status_code=503, detail=f"engine {engine.name} unreachable: {exc}") from exc
         if resp.status != 200:   # the engine's verdict on the path: 404 unknown, 425 still saving, 400 malformed
             return Response(content=resp.body, status_code=resp.status, headers=_str_headers(resp.headers))
-        target = orjson.loads(resp.body)
+        target = ResolveSamplerTargetResponse.model_validate(orjson.loads(resp.body))   # the engine's reply, checked once here
+        if request.base_model and request.base_model != target.base_model:
+            raise HTTPException(status_code=400, detail=f"base_model {request.base_model!r} is not the model's ({target.base_model!r})")
         sampling_session_id = f"{request.session_id}_{request.sampling_session_seq_id}_{uuid.uuid4().hex[:8]}"
-        sampler = store.add_sampler(sampling_session_id, request.session_id, target["model_id"],
-                                    request.base_model or target["base_model"], request.model_path, target["pinned_version"])
+        sampler = store.add_sampler(sampling_session_id, request.session_id, target.model_id,
+                                    target.base_model, request.model_path, target.pinned_version)
         gateway.samplers.put(sampler)
         logger.info("Created sampling session %s (parent=%s, model=%s, pinned=%s)",
-                    sampling_session_id, request.session_id, target["model_id"], target["pinned_version"])
+                    sampling_session_id, request.session_id, target.model_id, target.pinned_version)
         return CreateSamplingSessionResponse(sampling_session_id=sampling_session_id)
 
     @app.post("/api/v1/join_sampling_session", response_model=JoinSamplingSessionResponse)
@@ -319,7 +325,10 @@ def sdk_face(gateway: Gateway, engines) -> FastAPI:
     @app.get("/health")
     @app.get("/api/v1/health")
     async def health(request: Request):
-        return _response(await gateway.health(request.url.path))
+        try:
+            return _response(await gateway.health(request.url.path))
+        except RegistryUnavailable as exc:
+            return _response(_error(503, f"engine registry busy: {exc}", request.url.path))
 
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
     async def forward_everything_else(path: str, request: Request):
@@ -333,6 +342,8 @@ def sdk_face(gateway: Gateway, engines) -> FastAPI:
             if _caused_by(exc, ClientDisconnect):
                 return Response(status_code=499)
             raise
+        except RegistryUnavailable as exc:
+            return _response(_error(503, f"engine registry busy: {exc}", "/" + path))
         return _response(reply)
 
     return app
@@ -460,13 +471,14 @@ def _sampler_created(gateway: Gateway, engine: str, body: bytes, path: str) -> R
         return _error(404, f"engine {engine!r} is not registered", path)
     try:
         doc = orjson.loads(body)
-        sampler_id, model_id = str(doc["sampler_id"]), str(doc["model_id"])
-        pinned = doc["pinned_version"]
+        sampler_id, model_id, pinned = doc["sampler_id"], doc["model_id"], doc["pinned_version"]
+        model_path, base_model = doc["model_path"], doc["base_model"]
+        if not isinstance(sampler_id, str) or not isinstance(model_id, str) or not isinstance(base_model, str):
+            raise TypeError("sampler_id, model_id and base_model must be strings")   # a sampler without a base model is no sampler
         if pinned is not None and not isinstance(pinned, int):
             raise TypeError("pinned_version must be an int or null")
-        model_path, base_model = doc["model_path"], doc["base_model"]
-        if not isinstance(base_model, str):   # the engine knows its model's base model; a sampler without one is no sampler
-            raise TypeError("base_model must be a str")
+        if model_path is not None and not isinstance(model_path, str):
+            raise TypeError("model_path must be a str or null")
     except (orjson.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         return _error(400, f"bad sampler: {type(exc).__name__}: {exc}", path)
     session_id = gateway.store.session_of_model(model_id)
@@ -522,8 +534,9 @@ def build_app(config: TrainingConfig, registry: Optional[Registry] = None, store
     if registry is None:
         config.storage.metadata_dir.mkdir(parents=True, exist_ok=True)
         registry = Registry(config.storage.metadata_dir / "engines.db")
+    elif store is None:   # a caller with its own registry is one process (a test, an embedding): a store of its own
+        store = SessionStore(None)
     if store is None:
-        config.storage.metadata_dir.mkdir(parents=True, exist_ok=True)
         store = SessionStore(config.storage.metadata_dir / "sessions.db")
     gateway = Gateway(config, registry, store)
     return sdk_face(gateway, gateway_engines_face(registry, gateway))

@@ -1,8 +1,9 @@
 """The engines the gateway knows: who registered, where its socket is, when it last heartbeat.
 
 The rows live in SQLite so every gateway worker sees a registration that landed on another
-worker; each worker keeps a copy and re-reads the table on a short period (`refresh`), so no
-request reads it. A row exists between register and unregister and is UP the whole time.
+worker; each worker keeps a copy and re-reads the table on a short period (`refresh`), so the
+sampling hot path never reads it; a request that finds no engine, or an unreachable one, refreshes
+on the spot. A row exists between register and unregister and is UP the whole time.
 """
 import json
 import logging
@@ -16,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class RegistryUnavailable(Exception):
-    """The shared file could not be read this time (another worker holds it); the caller keeps its rows."""
+    """The shared file was busy or locked past the timeout (another worker holds it); the rows are as before."""
 
 
 class RegistryConflict(Exception):
@@ -114,8 +115,10 @@ class Registry:
         """Re-read the table; a cached row that is gone or has a new pid is dropped (its callbacks run)."""
         try:
             found = self._conn.execute(f"SELECT {_COLUMNS} FROM engines").fetchall()
-        except sqlite3.OperationalError as exc:   # busy or locked past the timeout
-            raise RegistryUnavailable(str(exc)) from exc
+        except sqlite3.OperationalError as exc:
+            if exc.sqlite_errorcode not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                raise
+            raise RegistryUnavailable(str(exc)) from exc   # another worker holds the file past the timeout
         fresh = {t[0]: _row(t) for t in found}
         for name, old in self._rows.items():
             new = fresh.get(name)

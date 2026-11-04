@@ -43,7 +43,10 @@ def main(argv=None) -> None:
     metadata_dir.mkdir(parents=True, exist_ok=True)
     config.engine.name = config.engine.name or config.backend.backend_type
     config.engine.socket = os.path.abspath(config.engine.socket or str(metadata_dir / "engine.sock"))
-    config.gateway.engines_socket = os.path.abspath(config.engine.gateway_socket or str(metadata_dir / "gateway.sock"))
+    env_engines_socket = os.getenv("TINKERCLOUD_ENGINES_SOCKET")   # the gateway's own setting; the engine's --gateway-socket names the same listener
+    if env_engines_socket and config.engine.gateway_socket and os.path.abspath(env_engines_socket) != os.path.abspath(config.engine.gateway_socket):
+        raise ValueError(f"one engines listener: TINKERCLOUD_ENGINES_SOCKET {env_engines_socket} and the engine's gateway socket {config.engine.gateway_socket} differ")
+    config.gateway.engines_socket = os.path.abspath(config.engine.gateway_socket or env_engines_socket or str(metadata_dir / "gateway.sock"))
     config.engine.gateway_socket = config.gateway.engines_socket
     config.gateway.workers = 1
     set_config(config)
