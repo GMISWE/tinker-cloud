@@ -16,7 +16,7 @@ KEY = "k"
 def _env(tmp: Path) -> dict:
     return {**os.environ, "PYTHONPATH": str(REPO), "METADATA_DIR": str(tmp / "meta"),
             "TINKERCLOUD_CHECKPOINT_BASE": str(tmp / "ckpt"), "TINKER_API_KEY": KEY, "SESSION_TIMEOUT_S": "-1",
-            "RAY_DISABLE_AUTO_INIT": "1"}
+            "RAY_DISABLE_AUTO_INIT": "1", "NUM_GPUS": "1"}   # the fake backend takes any count; a runner without GPUs detects none
 
 
 def _fresh(port: int, method: str, path: str, **kw) -> httpx.Response:
