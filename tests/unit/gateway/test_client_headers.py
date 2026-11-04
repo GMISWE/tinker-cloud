@@ -1,4 +1,6 @@
 """The aiohttp client adds nothing of its own: the engine sees the SDK's headers and bytes, and the response bytes come back as written."""
+import pytest
+
 from .support import API_KEY, Harness, run, serve_uds
 
 
@@ -21,6 +23,34 @@ def test_the_aiohttp_client_adds_no_headers_of_its_own(tmp_path):
                 r = await h.sdk.post("/api/v1/echo", content=b"\x1f\x8bnot-really-gzip",
                                      headers={"X-API-Key": API_KEY, "content-type": "application/octet-stream", "content-encoding": "gzip"})
                 assert r.status_code == 200 and r.content == b"\x1f\x8bnot-really-gzip"   # bytes through, not inflated
+        finally:
+            await h.close()
+    run(main())
+
+
+@pytest.mark.parametrize("client", ["aiohttp", "httpx"])
+def test_a_percent_encoded_query_reaches_the_engine_as_sent(tmp_path, client):
+    """`%41`, `%2F` and `%7E` are not decoded or re-quoted on the hop: the engine sees the SDK's bytes."""
+    async def main():
+        h = Harness(str(tmp_path), client)
+        try:
+            async with serve_uds(h.engine, h.engine_socket):
+                await h.register()
+                sent = []
+
+                async def receive():
+                    return {"type": "http.request", "body": b"", "more_body": False}
+
+                async def send(message):
+                    sent.append(message)
+
+                scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "GET", "scheme": "http",
+                         "path": "/api/v1/echo", "raw_path": b"/api/v1/echo", "query_string": b"a=%41&c=%2F&d=%7E", "root_path": "",
+                         "headers": [(b"host", b"sdk:8000"), (b"x-api-key", API_KEY.encode())],
+                         "server": ("127.0.0.1", 8000), "client": ("127.0.0.1", 1)}
+                await h.app(scope, receive, send)
+                assert sent[0]["status"] == 200, sent
+                assert h.engine.requests[-1]["query"] == "a=%41&c=%2F&d=%7E"
         finally:
             await h.close()
     run(main())
