@@ -57,7 +57,7 @@ class RegisterClient:
             r.raise_for_status()
 
     async def sampler_created(self, sampler_id: str, model_id: str, pinned_version: Optional[int],
-                              model_path: Optional[str], base_model: Optional[str]) -> None:
+                              model_path: Optional[str], base_model: str) -> None:
         """Record an ephemeral sampler (save_weights_for_sampler) with the gateway before its id
         reaches the SDK. A gateway that refuses it raises: a sampler the gateway cannot route is
         no sampler."""
