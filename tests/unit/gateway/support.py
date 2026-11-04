@@ -82,7 +82,7 @@ class RecordingEngine:
         elif path == "/api/v1/resolve_sampler_target":
             await _json(send, 200, self.target)
         elif path == "/api/v1/create_model":
-            # the stand-in echoes the gateway's header; a create sent without one gets model_id null, which the test asserts
+            # the stand-in echoes the gateway's header back as the model id; a create sent without one echoes null
             await _json(send, 200, {"request_id": f"req_fake_{HEX}", "model_id": headers.get("x-model-id")})
         elif path == "/api/v1/delete_model":
             try:
