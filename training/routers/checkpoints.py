@@ -144,14 +144,14 @@ async def save_weights_for_sampler(
         )
 
         # An ephemeral sampler is the gateway's to route: it learns of it before the SDK does.
-        # BUG-015: the weight version is pinned at save time so pinned logprob reads are not
-        # served from the live (refit-every-step) engine.
+        # The weight version is pinned at save time so pinned logprob reads are not served
+        # from the live (refit-every-step) engine.
         sampling_session_id = result.get("sampling_session_id")
         gateway = http_request.app.state.gateway_client
         if sampling_session_id and gateway is not None:   # None: an engine with no gateway, whose samplers nothing routes to
             await gateway.sampler_created(
                 sampling_session_id, request.model_id, client_info["backend_handle"].weight_version,
-                result.get("uri"), base_model,
+                result["uri"], base_model,
             )
 
         return SaveWeightsForSamplerResult(**result)
