@@ -23,7 +23,7 @@ def _scripted(messages):
 
 
 def _scope(server, path="/engines", method="GET", headers=()):
-    return {"type": "http", "method": method, "path": path, "query_string": b"", "headers": list(headers), "server": server}
+    return {"type": "http", "method": method, "path": path, "query_string": b"", "raw_path": path.encode(), "headers": list(headers), "server": server}
 
 
 def test_both_unix_scope_shapes_reach_the_engines_face():

@@ -100,18 +100,19 @@ class Decider:
             return Reject(404, f"no engine named {named[1]!r} is registered for id {named[0]!r}")
         if doc is None:
             return Route(engine, [])
+        # `doc` is the SDK's body as sent; what a missing key means is each branch's to say
         if path in SAMPLE_OPS:
-            return self._sampling(engine, doc.get("sampling_session_id"))
+            return self._sampling(engine, doc.get("sampling_session_id"))   # absent: the engine resolves model_path or base_model itself
         if path == RETRIEVE_FUTURES:
-            target = doc.get("target")
-            sid = target.get("sampling_session_id") if isinstance(target, dict) else None
+            target = doc.get("target")   # absent: the engine's 422
+            sid = target.get("sampling_session_id") if isinstance(target, dict) else None   # absent: the engine's 422
             if isinstance(sid, str) and self._samplers.lookup(sid) is None:
                 return Reject(404, f"Unknown sampling_session_id: {sid}")
             return Route(engine, [])
         if path == CREATE_MODEL:
             return self._create_model(engine, doc)
         if path in DROP_MODEL_OPS:
-            model_id = doc.get("model_id")
+            model_id = doc.get("model_id")   # absent: the engine's 422, and no row is named
             return Route(engine, [], drop_model=model_id if isinstance(model_id, str) else None)
         return Route(engine, [])
 

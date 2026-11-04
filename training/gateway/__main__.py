@@ -81,10 +81,10 @@ def supervise(config: TrainingConfig, sockets: List) -> int:
     children: List[int] = []
     for _ in range(config.gateway.workers):
         pid = os.fork()
-        if pid == 0:   # the child never returns into the parent's loop: its status and traceback are what it leaves
+        if pid == 0:
             try:
                 serve(config, sockets)
-            except BaseException:
+            except BaseException:   # the child never returns into the parent's loop: its status and traceback are what it leaves
                 traceback.print_exc()
                 os._exit(1)
             os._exit(0)

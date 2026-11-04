@@ -13,7 +13,6 @@ import re
 import time
 import uuid
 from typing import Any, Awaitable, Callable, Dict, List, Optional
-from urllib.parse import quote
 
 import orjson
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -237,6 +236,7 @@ def sdk_face(gateway: Gateway, engines) -> FastAPI:
 
     @app.post("/api/v1/create_session", response_model=CreateSessionResponse)
     async def create_session(request: CreateSessionRequest, _: None = Depends(require_key)):
+        # the SDK may send no metadata; the session reads back {} (its dict shape), as before the split
         session_id = store.create_session(request.tags, request.user_metadata or {}, request.sdk_version)
         return CreateSessionResponse(session_id=session_id, info_message=None, warning_message=None, error_message=None)
 
@@ -333,10 +333,8 @@ def sdk_face(gateway: Gateway, engines) -> FastAPI:
 
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
     async def forward_everything_else(path: str, request: Request):
-        # as the SDK encoded them: FastAPI's `path` is decoded, and `request.url` re-splits a decoded `?` into a query.
-        # ASGI makes raw_path optional (a server may not keep the bytes): then the decoded path is re-quoted.
-        raw = request.scope.get("raw_path")
-        raw_path, query = raw.decode("latin-1") if raw else quote(request.scope["path"]), request.scope["query_string"]
+        # as the SDK encoded them: FastAPI's `path` is decoded, and `request.url` re-splits a decoded `?` into a query
+        raw_path, query = request.scope["raw_path"].decode("latin-1"), request.scope["query_string"]
         try:
             reply = await gateway.handle(request.method, raw_path, query,
                                          request.headers.raw, request.body, request.stream)
@@ -541,7 +539,7 @@ def build_app(config: TrainingConfig, registry: Optional[Registry] = None, store
     if registry is None:
         config.storage.metadata_dir.mkdir(parents=True, exist_ok=True)
         registry = Registry(config.storage.metadata_dir / "engines.db")
-    if store is None:
+    if store is None:   # the store lives where the registry lives (docstring)
         store = SessionStore(None if registry.path is None else registry.path.parent / "sessions.db")
     gateway = Gateway(config, registry, store)
     return sdk_face(gateway, gateway_engines_face(registry, gateway))

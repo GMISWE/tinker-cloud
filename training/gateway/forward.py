@@ -125,7 +125,7 @@ class Pool:
 
     def client_for(self, row: EngineRow) -> EngineClient:
         client = self._clients.get(row.name)
-        if client is None:
+        if client is None:   # this worker's first request since the engine's row appeared or was replaced
             client = make_client(self._gw.client, row.socket, self._gw.pool_size, self._gw.connect_timeout_s, self._gw.keepalive_s)
             self._clients[row.name] = client
         return client
