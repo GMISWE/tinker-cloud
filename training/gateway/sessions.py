@@ -161,7 +161,7 @@ class SessionStore:
                 self._write("DELETE FROM sessions WHERE session_id = ?", (session_id,))
                 claimed.append((session_id, models))
             self._conn.execute("COMMIT")
-        except BaseException:
+        except BaseException:   # the transaction's own rollback; the error goes on
             self._conn.execute("ROLLBACK")
             raise
         return claimed
@@ -169,7 +169,9 @@ class SessionStore:
     # ------------------------------------------------------------------ models
 
     def add_model(self, session_id: str, model_id: str, model_seq_id: int, base_model: str, engine: str) -> None:
-        """Record a model at submit; a create that fails later leaves the row until its delete."""
+        """Record a model at submit. A create the engine then fails is dropped when the engine reports
+        it (a report that itself fails leaves the row to its delete or the reaper); a delete of a model
+        the engine never had gets the engine's 404 and drops the row."""
         self._write("INSERT OR REPLACE INTO session_models (session_id, model_id, model_seq_id, base_model, created_at, engine) VALUES (?, ?, ?, ?, ?, ?)",
                     (session_id, model_id, model_seq_id, base_model, _now(), engine))
 
@@ -209,7 +211,7 @@ class SessionStore:
                 return None
             counter = self._read("SELECT client_counter FROM samplers WHERE sampler_id = ?", (sampler_id,))[0][0]
             self._conn.execute("COMMIT")
-        except BaseException:
+        except BaseException:   # the transaction's own rollback; the error goes on
             self._conn.execute("ROLLBACK")
             raise
         return int(counter)
@@ -227,7 +229,7 @@ class SamplerCache:
 
     def lookup(self, sampler_id: str) -> Optional[Sampler]:
         sampler = self._cache.get(sampler_id)
-        if sampler is None:
+        if sampler is None:   # the miss: one store read, cached when found (the warm path reads nothing)
             sampler = self._store.load_sampler(sampler_id)
             if sampler is not None:
                 self.put(sampler)

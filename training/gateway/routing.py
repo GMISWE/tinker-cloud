@@ -91,7 +91,7 @@ def named_engine(path: str, query: bytes, content_type: bytes, content_encoding:
         except DecodeError:
             return None   # the engine rejects it with 422
         return _named(route.model_id)
-    if doc is None:
+    if doc is None:   # no parsed body handed in (a direct caller); from decide, None means json_doc refused it and refuses again
         doc = json_doc(content_type, content_encoding, body)
         if doc is None:
             return None

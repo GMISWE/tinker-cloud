@@ -87,7 +87,7 @@ class Registry:
             self._conn.execute("INSERT OR REPLACE INTO engines (name, backend, gpus, socket, pid, registered_at, last_heartbeat) VALUES (?, ?, ?, ?, ?, ?, ?)",
                                (name, backend, None if gpus is None else json.dumps(list(gpus)), socket, pid, now, now))
             self._conn.execute("COMMIT")
-        except BaseException:
+        except BaseException:   # the transaction's own rollback; the error goes on
             self._conn.execute("ROLLBACK")
             raise
         if old is not None:

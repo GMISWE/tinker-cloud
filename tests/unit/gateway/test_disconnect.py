@@ -57,7 +57,7 @@ def test_the_sdk_face_answers_nobody_and_the_engine_gets_a_cut_off_body(tmp_path
 
         # a route the gateway streams (no id in its body): the engine is reading while the SDK leaves
         body = orjson.dumps({"request_ids": ["req_fake_0123456789abcdef"]})
-        scope = {"type": "http", "method": "POST", "path": "/api/v1/cleanup_futures", "query_string": b"", "scheme": "http",
+        scope = {"type": "http", "method": "POST", "path": "/api/v1/cleanup_futures", "raw_path": b"/api/v1/cleanup_futures", "query_string": b"", "scheme": "http",
                  "http_version": "1.1", "client": ("sdk", 1), "server": ("sdk", 80),
                  "headers": [(b"host", b"sdk:8000"), (b"x-api-key", API_KEY.encode()), (b"content-type", b"application/json"),
                              (b"content-length", str(len(body) * 2).encode())]}
