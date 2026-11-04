@@ -117,3 +117,14 @@ def test_sdk_face_is_503_until_an_engine_registers_and_again_after_it_leaves(tmp
         finally:
             await h.close()
     run(main())
+
+
+def test_unregister_on_a_worker_that_never_cached_the_row_returns_it(tmp_path):
+    """The DELETE takes effect in the file whichever worker serves it; the row comes from the file, not the cache."""
+    a, b = Registry(tmp_path / "engines.db"), Registry(tmp_path / "engines.db")
+    a.register(**ROW)
+    row = b.unregister("fake")
+    assert row is not None and row.pid == ROW["pid"] and row.gpus == ROW["gpus"]
+    assert a.unregister("fake") is None
+    a.refresh()
+    assert a.rows() == []

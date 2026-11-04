@@ -10,7 +10,6 @@ import contextlib
 import json
 import logging
 import re
-import sqlite3
 import time
 import uuid
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -43,7 +42,7 @@ from . import routing
 from .decide import Decider, Headers, Reject
 from .forward import EngineResponse, EngineUnreachable, Pool, forward
 from .reaper import ModelReaper
-from .registry import EngineRow, Registry, RegistryConflict
+from .registry import EngineRow, Registry, RegistryConflict, RegistryUnavailable
 from .sessions import SamplerCache, SessionStore
 
 logger = logging.getLogger(__name__)
@@ -131,7 +130,7 @@ class Gateway:
             await asyncio.sleep(self.config.gateway.registry_refresh_s)
             try:
                 self.registry.refresh()
-            except sqlite3.Error:   # another worker holds the file (busy, locked): this period's rows stay, the next read retries
+            except RegistryUnavailable:   # this period's rows stay; the next period reads again
                 logger.exception("Registry refresh failed")
 
     # ------------------------------------------------------------ the forwarded path
@@ -376,9 +375,8 @@ async def _send_reply(send, reply: Reply) -> None:
     await send({"type": "http.response.body", "body": reply.body})
 
 
-def engines_face(registry: Registry, gateway: Optional[Gateway] = None):
-    """register, heartbeat, unregister, list; `samplers` (an engine's ephemeral sampler) and `models/<id>`
-    (a create that failed) need the gateway's store."""
+def engines_face(registry: Registry):
+    """register, heartbeat, unregister, list: what an engine needs from the registry alone."""
     async def app(scope, receive, send) -> None:
         method, path = scope["method"], scope["path"]
         try:
@@ -396,15 +394,46 @@ def engines_face(registry: Registry, gateway: Optional[Gateway] = None):
                 reply = _error(404, f"no such route: {method} {path}", path)
             elif method == "POST" and m.group(2) == "/heartbeat":
                 reply = _json_reply(200, {}) if registry.heartbeat(m.group(1)) else _error(404, f"engine {m.group(1)!r} is not registered", path)
-            elif method == "POST" and m.group(2) == "/samplers" and gateway is not None:
-                reply = _sampler_created(gateway, m.group(1), body, path)
-            elif method == "DELETE" and m.group(3) and gateway is not None:   # a create that failed: the row goes
-                reply = Reply(204, [], b"") if gateway.store.remove_model(m.group(3)) else _error(404, f"model {m.group(3)!r} is not recorded", path)
             elif method == "DELETE" and not m.group(2):
                 reply = Reply(204, [], b"") if registry.unregister(m.group(1)) else _error(404, f"engine {m.group(1)!r} is not registered", path)
             else:
                 reply = _error(404, f"no such route: {method} {path}", path)
         await _send_reply(send, reply)
+    return app
+
+
+def _store_route(path: str) -> bool:
+    """`/engines/<n>/samplers` and `/engines/<n>/models/<id>` write the gateway's store; the rest is the registry's."""
+    m = _ENGINE_PATH.match(path)
+    return m is not None and (m.group(2) == "/samplers" or m.group(3) is not None)
+
+
+def store_face(gateway: Gateway):
+    """`samplers` (an engine's ephemeral sampler, recorded before its future completes) and `models/<id>`
+    (a create that failed: the row goes)."""
+    async def app(scope, receive, send) -> None:
+        method, path = scope["method"], scope["path"]
+        try:
+            body = await _read_all(receive)
+        except ClientDisconnected:
+            return
+        m = _ENGINE_PATH.match(path)
+        if m is not None and method == "POST" and m.group(2) == "/samplers":
+            reply = _sampler_created(gateway, m.group(1), body, path)
+        elif m is not None and method == "DELETE" and m.group(3) is not None:
+            reply = Reply(204, [], b"") if gateway.store.remove_model(m.group(3)) else _error(404, f"model {m.group(3)!r} is not recorded", path)
+        else:
+            reply = _error(404, f"no such route: {method} {path}", path)
+        await _send_reply(send, reply)
+    return app
+
+
+def gateway_engines_face(registry: Registry, gateway: Gateway):
+    """The engines listener: store routes to the store face, everything else to the registration face."""
+    registration, store = engines_face(registry), store_face(gateway)
+
+    async def app(scope, receive, send) -> None:
+        await (store if _store_route(scope["path"]) else registration)(scope, receive, send)
     return app
 
 
@@ -494,4 +523,4 @@ def build_app(config: TrainingConfig, registry: Optional[Registry] = None, store
         config.storage.metadata_dir.mkdir(parents=True, exist_ok=True)
         store = SessionStore(config.storage.metadata_dir / "sessions.db")
     gateway = Gateway(config, registry, store)
-    return sdk_face(gateway, engines_face(registry, gateway))
+    return sdk_face(gateway, gateway_engines_face(registry, gateway))

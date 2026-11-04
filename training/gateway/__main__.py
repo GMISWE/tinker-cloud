@@ -8,6 +8,7 @@ import argparse
 import os
 import signal
 import sys
+import traceback
 from typing import List
 
 import uvicorn
@@ -79,11 +80,13 @@ def supervise(config: TrainingConfig, sockets: List) -> None:
     children: List[int] = []
     for _ in range(config.gateway.workers):
         pid = os.fork()
-        if pid == 0:
+        if pid == 0:   # the child never returns into the parent's loop: its status and traceback are what it leaves
             try:
                 serve(config, sockets)
-            finally:
-                os._exit(0)
+            except BaseException:
+                traceback.print_exc()
+                os._exit(1)
+            os._exit(0)
         children.append(pid)
 
     def relay(signum, _) -> None:
