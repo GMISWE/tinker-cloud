@@ -12,7 +12,7 @@ and the seed are per tenant.
 """
 import hashlib
 from dataclasses import dataclass
-from typing import Literal, Optional, Tuple
+from typing import Optional, Tuple
 
 from ...models.requests import LoraConfig
 
@@ -28,7 +28,7 @@ class LoraSpec:
     alpha: int
     target_modules: Tuple[str, ...]   # module names, as PEFT and vLLM read them
     dropout: float
-    optimizer: Literal["adamw", "dimuon"] = "adamw"   # the backend sets it from the request; the default serves direct callers
+    optimizer: str = "adamw"   # "adamw" | "dimuon", one of the backend's SUPPORTED_OPTIMIZERS; the default serves direct callers
 
     @property
     def signature(self) -> Tuple[int, int, Tuple[str, ...]]:
