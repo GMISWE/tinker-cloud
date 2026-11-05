@@ -61,6 +61,12 @@ def test_configs_the_wire_does_not_define_are_400(server, config, detail):
     assert detail in r.json()["error"]
 
 
+@pytest.mark.parametrize("version", [True, "1", 1.0])
+def test_a_version_that_is_not_an_integer_is_a_type_error(server, version):
+    r = _create(server, _session(server), 1, {"type": "dimuon", "version": version})
+    assert r.status_code == 422 and "version" in r.text, (r.status_code, r.text)
+
+
 def test_a_step_of_the_other_family_is_400_naming_both(server, dimuon, adamw):
     r = _step(server, adamw.model_id, {"optimizer_params": {"type": "dimuon", "learning_rate": 1e-3}})
     assert r.status_code == 400, r.text

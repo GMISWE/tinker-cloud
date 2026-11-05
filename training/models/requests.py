@@ -6,7 +6,7 @@ providing validation and documentation.
 """
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, validator, model_validator
 
 # loss_fn_config values: numbers, or text on the keys core.loss_registry declares
 # as text (the SDK's loss_fn_config_v2 carries both).
@@ -45,7 +45,7 @@ class OptimizerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     type: str = Field(default="adamw", description="Optimizer family")
-    version: Optional[int] = Field(default=None, description="Family version; dimuon serves 1 only")
+    version: Optional[StrictInt] = Field(default=None, description="Family version; dimuon serves 1 only")
 
     def check(self) -> None:
         """Raises ValueError (a 400) for a family the wire does not define or a version it does not serve."""
