@@ -31,7 +31,7 @@ from tinkercloud.training.models.requests import AdamParams, LoraConfig  # noqa:
 from tests.datums import random_ce_datum  # noqa: E402
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
-LORA: LoraSpec = lora_spec(LoraConfig(rank=8, alpha=16))
+LORA: LoraSpec = lora_spec(LoraConfig(rank=8, alpha=16), "adamw")
 SEED = 1234
 
 
@@ -459,10 +459,9 @@ def test_dimuon_checkpoint_round_trip_and_family_mismatch(tmp_path):
     """save_state after one Muon step writes optimizer/dimuon.safetensors with
     exactly the momentum keys; a fresh Muon tenant that loads it reproduces the
     weights and momentum exactly and, in the same group, the next step exactly
-    and a fresh group (another process) reproduces it exactly too, which holds
-    only because the worker primes dion's compiled kernels at setup
-    (worker._prime_muon; without it this assertion failed on the A factors); an
-    AdamW tenant refuses the file, and a Muon tenant refuses an AdamW file."""
+    and a fresh group (another process) reproduces it exactly too (the worker
+    primes dion's compiled kernels at setup, worker._prime_muon); an AdamW
+    tenant refuses the file, and a Muon tenant refuses an AdamW file."""
     from safetensors.torch import load_file
 
     x, _ = requests()

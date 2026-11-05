@@ -12,6 +12,7 @@ import asyncio
 import pytest
 
 try:
+    from training.models.requests import AdamParams
     from training.services.training_service import TrainingService
 except ImportError:  # pragma: no cover
     TrainingService = None
@@ -32,7 +33,7 @@ class _StubBackend:
 
 def _step(result):
     svc = TrainingService(backend=_StubBackend(result))
-    return asyncio.run(svc.apply_optimizer_step("m1", {"backend_handle": object()}))
+    return asyncio.run(svc.apply_optimizer_step("m1", {"backend_handle": object()}, AdamParams(learning_rate=1e-4)))
 
 
 def test_grad_norm_mirrored_into_metrics():

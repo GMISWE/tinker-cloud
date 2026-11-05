@@ -73,7 +73,7 @@ def test_mask_prompt_prefix_leaves_only_the_last_n_scored():
 
 def _fake_model():
     b = FakeBackend()
-    return b, asyncio.run(b.create_model("m", "r", "fake/tiny", 0))
+    return b, asyncio.run(b.create_model("m", "r", "fake/tiny", 0, optimizer="adamw"))
 
 
 def test_service_caps_topk_at_the_engine_limit():

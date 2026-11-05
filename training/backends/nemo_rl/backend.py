@@ -139,7 +139,8 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         rl_config: Optional[Dict[str, Any]] = None,
         rollout_config: Optional[Dict[str, Any]] = None,
         native_root: Optional[Path] = None,
-        optimizer: str = "adamw",
+        *,
+        optimizer: str,
     ) -> NemoRLHandle:
         classification = classification_spec(await asyncio.to_thread(read_raw_hf_config, base_model))
         if classification is not None:
@@ -431,14 +432,14 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
     async def apply_optimizer_step(
         self,
         handle: NemoRLHandle,
-        optim_params: Optional[OptimParams] = None,
+        optim_params: OptimParams,
     ) -> Dict[str, Any]:
         """
         Execute single policy.train() call with all buffered data.
 
         1. Acquire buffer lock and drain buffer (concatenate + clear)
         2. Pad partial batch if needed (dp_size alignment)
-        3. Optionally set learning rate
+        3. Set the request's learning rate
         4. Call policy.train(all_data, loss_fn)
         5. Sync weights to inference engine (refit)
         6. Return real training metrics
@@ -509,12 +510,11 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                 num_buffered, handle.model_id,
             )
 
-            if optim_params is not None:
-                _set_learning_rate(handle.policy, optim_params.learning_rate)
-                # betas/eps are fixed at creation (builder defaults match the
-                # Tinker AdamParams contract: 0.9/0.95/1e-8); the worker exposes no
-                # setter, so warn loudly if a client requests different values.
-                _warn_on_adam_mismatch(handle, optim_params.model_dump())
+            _set_learning_rate(handle.policy, optim_params.learning_rate)
+            # betas/eps are fixed at creation by the builder; the worker
+            # exposes no setter, so warn loudly if a client requests
+            # different values.
+            _warn_on_adam_mismatch(handle, optim_params.model_dump())
 
             # Serialize GPU lifecycle: sleep vLLM → train → refit.
             # Pipelined SFT loops fire multiple optim_step calls concurrently;

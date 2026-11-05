@@ -111,7 +111,7 @@ class FakeBackend(TrainingBackend[FakeHandle]):
         self, model_id: str, request_id: str, base_model: str, num_gpus: int,
         lora_config: Optional[Dict[str, Any]] = None, parallelism: Optional[Dict[str, Any]] = None,
         rl_config: Optional[Dict[str, Any]] = None, rollout_config: Optional[Dict[str, Any]] = None,
-        native_root: Optional[Path] = None, optimizer: str = "adamw",
+        native_root: Optional[Path] = None, *, optimizer: str,
     ) -> FakeHandle:
         # A model directory is read like the GPU backends read theirs (head,
         # context window); a bare name ("fake/tiny") is the test double.
@@ -171,11 +171,9 @@ class FakeBackend(TrainingBackend[FakeHandle]):
         }
 
     async def apply_optimizer_step(
-        self, handle: FakeHandle, optim_params: Optional[OptimParams] = None,
+        self, handle: FakeHandle, optim_params: OptimParams,
     ) -> Dict[str, Any]:
         h = self._handle(handle, "apply_optimizer_step")
-        if optim_params is None:
-            raise BackendError("the request carries no optimizer parameters", backend="fake", operation="apply_optimizer_step")
         lr = optim_params.learning_rate
         h.step_count += 1
         h.w += lr * h.pending

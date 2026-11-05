@@ -87,7 +87,7 @@ class TestSigner:
 class TestExport:
     def _model(self, b, tmp_path, rank):
         return asyncio.run(b.create_model("m", "r", "fake/tiny", 0, lora_config={"rank": rank} if rank else None,
-                                          native_root=tmp_path / "native"))
+                                          native_root=tmp_path / "native", optimizer="adamw"))
 
     def test_lora_export_moves_the_adapter_to_the_root(self, tmp_path):
         b = FakeBackend()

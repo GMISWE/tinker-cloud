@@ -130,7 +130,7 @@ class MegatronBridgeWorker:
     def forward_backward(self, batch: dict) -> dict:
         return self._run(batch, forward_only=False)
 
-    def apply_optimizer_step(self, learning_rate=None) -> dict:
+    def apply_optimizer_step(self, learning_rate: float) -> dict:
         step_out = self.optimizer.step()
         grad_norm = step_out[1] if isinstance(step_out, (tuple, list)) and len(step_out) >= 2 else None
         self.scheduler.step(increment=1)

@@ -87,7 +87,7 @@ class TrainingService:
         self,
         model_id: str,
         client_info: Dict[str, Any],
-        optim_params: Optional[OptimParams] = None,
+        optim_params: OptimParams,
     ) -> Dict[str, Any]:
         """
         Apply optimizer step to update model weights. `optim_params` passed
@@ -96,8 +96,7 @@ class TrainingService:
         logger.info("Optimizer step for %s", model_id)
 
         handle = client_info["backend_handle"]
-        if optim_params is not None:
-            logger.info("Setting learning rate to %s for %s", optim_params.learning_rate, model_id)
+        logger.info("Setting learning rate to %s for %s", optim_params.learning_rate, model_id)
 
         result = await self.backend.apply_optimizer_step(handle, optim_params)
 

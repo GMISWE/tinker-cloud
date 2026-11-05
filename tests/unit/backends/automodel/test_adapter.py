@@ -11,7 +11,7 @@ from tinkercloud.training.backends.automodel import adapter as am
 from tinkercloud.training.backends.automodel.lora import LoraSpec
 from tinkercloud.training.checkpoints import interchange as ci
 
-LORA = LoraSpec(rank=4, alpha=8, target_modules=("q_proj",), dropout=0.0)
+LORA = LoraSpec(rank=4, alpha=8, target_modules=("q_proj",), dropout=0.0, optimizer="adamw")
 A = "model.layers.0.self_attn.q_proj.lora_A.weight"
 B = "model._orig_mod.layers.0.self_attn.q_proj.lora_B.weight"
 
