@@ -50,3 +50,22 @@ def test_wire_check_on_the_config():
         OptimizerConfig(type="muon").check()
     assert OptimizerConfig(type="dimuon", version=1).record() == {"type": "dimuon", "version": 1}
     assert OptimizerConfig().record() == {"type": "adamw"}
+
+
+def test_load_refuses_a_family_the_backend_lacks_naming_both(monkeypatch):
+    from tinkercloud.training.checkpoints import CheckpointRef
+    from tinkercloud.training.services.checkpoint_service import CheckpointService
+    monkeypatch.setattr(FakeBackend, "SUPPORTED_OPTIMIZERS", frozenset({"adamw"}))
+    service = CheckpointService(backend=FakeBackend(), store=None)
+    ref = CheckpointRef.parse("tinker://m/weights/c1")
+    client = {"optimizer_config": {"type": "adamw"}}
+    for optimizer in (False, True):
+        with pytest.raises(ValueError, match="dimuon.*FakeBackend|FakeBackend.*dimuon"):
+            service.require_load_family(client, ref, optimizer, OptimizerConfig(type="dimuon", version=1))
+
+
+def test_version_is_a_strict_integer():
+    from pydantic import ValidationError
+    for bad in (True, "1", 1.0):
+        with pytest.raises(ValidationError):
+            OptimizerConfig(type="dimuon", version=bad)

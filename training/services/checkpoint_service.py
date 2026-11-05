@@ -107,6 +107,10 @@ class CheckpointService:
         is not the model's, or optimizer state from a checkpoint of another
         family. A weights-only load crosses families freely."""
         family = client_info["optimizer_config"]["type"]
+        if optimizer_config is not None and optimizer_config.type not in self.backend.SUPPORTED_OPTIMIZERS:
+            raise ValueError(
+                f"optimizer family {optimizer_config.type!r} is not served by {type(self.backend).__name__}; "
+                f"{', '.join(sorted(self.backend.SUPPORTED_OPTIMIZERS))} are")
         if optimizer_config is not None and optimizer_config.type != family:
             raise ValueError(f"load_weights declares optimizer {optimizer_config.type} but the model's optimizer is {family}")
         if optimizer:
