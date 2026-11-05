@@ -25,7 +25,7 @@ from ray.exceptions import RayTaskError
 from ray.util.placement_group import placement_group, placement_group_table, remove_placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-from ...models.requests import AdamParams
+from ...models.requests import OptimParams
 from ..base import BackendError
 from .converter import Batch
 from .lora import LoraSpec
@@ -95,8 +95,8 @@ class TrainingGroup:
     async def forward(self, tenant: str, shards: Sequence[Batch], clip: Optional[Tuple[float, float]]) -> List[Dict[str, Any]]:
         return await self._all([w.forward.remote(tenant, ray.put(s), clip) for w, s in zip(self.ranks, shards)])
 
-    async def optim_step(self, tenant: str, adam: AdamParams) -> List[Dict[str, float]]:
-        return await self._all([w.optim_step.remote(tenant, adam) for w in self.ranks])
+    async def optim_step(self, tenant: str, params: OptimParams) -> List[Dict[str, float]]:
+        return await self._all([w.optim_step.remote(tenant, params) for w in self.ranks])
 
     async def export_adapter(self, tenant: str, dest: Path) -> None:
         """Rank 0 writes the tenant's HF PEFT adapter at `dest`; every rank joins the gather."""

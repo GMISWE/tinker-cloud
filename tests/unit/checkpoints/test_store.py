@@ -18,6 +18,8 @@ from tinkercloud.training.checkpoints import (
 )
 from tinkercloud.training.storage.metadata import MetadataStorage
 
+ADAMW = {"type": "adamw"}   # the family record every save carries
+
 W, S = CheckpointKind.WEIGHTS, CheckpointKind.SAMPLER_WEIGHTS
 
 
@@ -52,7 +54,7 @@ class TestLayout:
 
 class TestSaveLifecycle:
     def test_begin_creates_an_empty_root_and_a_pending_record(self, store):
-        t = store.begin_save("m", W, "c1", weight_version=4)
+        t = store.begin_save("m", W, "c1", weight_version=4, optimizer_config=ADAMW)
         assert t.root.is_dir() and not any(t.root.iterdir()) and t.step == 1
         rec = store.get(t.ref)
         assert rec["status"] == "pending" and rec["weight_version"] == 4 and rec["ephemeral"] is False
@@ -63,33 +65,33 @@ class TestSaveLifecycle:
         assert store.get(t.ref)["completed_at"]
 
     def test_failed_save_is_visible_as_failed(self, store):
-        t = store.begin_save("m", W, "c1")
+        t = store.begin_save("m", W, "c1", optimizer_config=ADAMW)
         store.fail(t.ref, "disk full")
         with pytest.raises(CheckpointFailed, match="disk full"):
             store.require(t.ref)
 
     def test_counter_is_monotonic_across_failures_deletes_and_overwrites(self, store):
-        a = store.begin_save("m", W, "a"); store.complete(a.ref)
-        b = store.begin_save("m", W, "b"); store.fail(b.ref, "x")
+        a = store.begin_save("m", W, "a", optimizer_config=ADAMW); store.complete(a.ref)
+        b = store.begin_save("m", W, "b", optimizer_config=ADAMW); store.fail(b.ref, "x")
         assert (a.step, b.step) == (1, 2)
         store.delete(a.ref)
-        c = store.begin_save("m", W, "c"); store.complete(c.ref)
+        c = store.begin_save("m", W, "c", optimizer_config=ADAMW); store.complete(c.ref)
         assert c.step == 3                      # deleted a's 1 and failed b's 2 are never reused
-        again = store.begin_save("m", W, "c")   # same name saved twice: new counter, old bytes gone
+        again = store.begin_save("m", W, "c", optimizer_config=ADAMW)   # same name saved twice: new counter, old bytes gone
         assert again.step == 4 and again.root == c.root and not any(again.root.iterdir())
-        s = store.begin_save("m", S, "c"); store.complete(s.ref)
+        s = store.begin_save("m", S, "c", optimizer_config=ADAMW); store.complete(s.ref)
         assert s.step == 5                      # one counter per model, both kinds
         assert store.next_step("other") == 1    # per model
 
     def test_begin_replaces_stale_bytes_under_the_same_name(self, store):
-        t = store.begin_save("m", W, "c1")
+        t = store.begin_save("m", W, "c1", optimizer_config=ADAMW)
         (t.root / "old").write_text("x")
         store.complete(t.ref)
-        t2 = store.begin_save("m", W, "c1")
+        t2 = store.begin_save("m", W, "c1", optimizer_config=ADAMW)
         assert not (t2.root / "old").exists()
 
     def test_ephemeral_save_has_no_step_no_root_and_is_not_listed(self, store):
-        t = store.begin_save("m", S, "m_1_abcd", persist=False, weight_version=2)
+        t = store.begin_save("m", S, "m_1_abcd", persist=False, weight_version=2, optimizer_config=ADAMW)
         assert t.step is None and not t.root.exists()
         store.complete(t.ref)
         assert store.get(t.ref)["ephemeral"] is True
@@ -99,7 +101,7 @@ class TestSaveLifecycle:
 
 class TestReads:
     def test_require_checks_kind(self, store):
-        t = store.begin_save("m", S, "s1"); store.complete(t.ref)
+        t = store.begin_save("m", S, "s1", optimizer_config=ADAMW); store.complete(t.ref)
         with pytest.raises(CheckpointKindMismatch):
             store.require(t.ref, kind=W)
         with pytest.raises(CheckpointKindMismatch):
@@ -112,10 +114,10 @@ class TestReads:
         assert store.delete(CheckpointRef.make("m", W, "nope")) is False
 
     def test_list_reports_uri_status_and_size(self, store):
-        t = store.begin_save("m", W, "c1")
+        t = store.begin_save("m", W, "c1", optimizer_config=ADAMW)
         (t.root / "blob").write_bytes(b"12345")
         store.complete(t.ref)
-        p = store.begin_save("m", W, "c2")      # still pending: listed, marked
+        p = store.begin_save("m", W, "c2", optimizer_config=ADAMW)      # still pending: listed, marked
         [c2, c1] = store.list("m")
         assert c1["uri"] == t.ref.uri and c1["size_bytes"] == 5 and c1["status"] == "completed"
         assert c2["uri"] == p.ref.uri and c2["status"] == "pending"
@@ -125,7 +127,7 @@ class TestDeletion:
     def test_delete_removes_record_and_bytes_but_not_native(self, store):
         native = store.native_root("m")
         (native / "iter_0000001").mkdir()
-        t = store.begin_save("m", W, "c1")
+        t = store.begin_save("m", W, "c1", optimizer_config=ADAMW)
         (t.root / "blob").write_text("x")
         store.complete(t.ref)
         assert store.delete(t.ref) is True
@@ -133,8 +135,8 @@ class TestDeletion:
         assert (native / "iter_0000001").is_dir()
 
     def test_release_model_drops_only_ephemeral_records(self, store):
-        keep = store.begin_save("m", W, "c1"); store.complete(keep.ref)
-        eph = store.begin_save("m", S, "m_1_x", persist=False); store.complete(eph.ref)
+        keep = store.begin_save("m", W, "c1", optimizer_config=ADAMW); store.complete(keep.ref)
+        eph = store.begin_save("m", S, "m_1_x", persist=False, optimizer_config=ADAMW); store.complete(eph.ref)
         assert store.release_model("m") == 1
         assert store.get(keep.ref) and store.get(eph.ref) is None
         assert store.native_root("m").is_dir()
@@ -142,8 +144,8 @@ class TestDeletion:
 
 class TestBootSweep:
     def test_pending_rows_become_failed(self, store, tmp_path):
-        t = store.begin_save("m", W, "c1")
-        done = store.begin_save("m", W, "c2"); store.complete(done.ref)
+        t = store.begin_save("m", W, "c1", optimizer_config=ADAMW)
+        done = store.begin_save("m", W, "c2", optimizer_config=ADAMW); store.complete(done.ref)
         fresh = CheckpointStore(store.base, MetadataStorage(tmp_path / "meta"))  # a restart
         assert fresh.sweep_pending() == 1
         with pytest.raises(CheckpointFailed, match="restarted"):

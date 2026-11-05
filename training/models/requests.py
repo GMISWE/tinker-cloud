@@ -6,7 +6,7 @@ providing validation and documentation.
 """
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, validator, model_validator
 
 # loss_fn_config values: numbers, or text on the keys core.loss_registry declares
 # as text (the SDK's loss_fn_config_v2 carries both).
@@ -33,27 +33,33 @@ class ParallelismConfig(BaseModel):
     num_gpus: Optional[int] = Field(default=None, ge=1, le=128, description="Total number of GPUs (auto-detected if not set)")
 
 
-SERVED_OPTIMIZER = "adamw"
+OPTIMIZER_FAMILIES = ("adamw", "dimuon")   # what the wire can name; a backend serves a subset (SUPPORTED_OPTIMIZERS)
 
 
 class OptimizerConfig(BaseModel):
-    """Optimizer identity, fixed at model creation (SDK `optimizer_config`).
+    """Optimizer identity, fixed at model creation (SDK `optimizer_config`): the
+    family and, for dimuon, the version of TinkerCloud's stand-in for the
+    unpublished algorithm. The router calls `check()`; the service then refuses
+    a family the backend does not declare."""
 
-    Only `adamw` is served; the router rejects any other `type` with 400
-    (API-CONTRACT: Dimuon UNSUPPORTED). Extra keys are kept so the
-    rejection message can echo what the client sent."""
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
-    type: str = Field(default=SERVED_OPTIMIZER, description="Optimizer family")
+    type: str = Field(default="adamw", description="Optimizer family")
+    version: Optional[int] = Field(default=None, description="Family version; dimuon serves 1 only")
 
+    def check(self) -> None:
+        """Raises ValueError (a 400) for a family the wire does not define or a version it does not serve."""
+        if self.type not in OPTIMIZER_FAMILIES:
+            raise ValueError(f"optimizer_config.type {self.type!r} is not an optimizer family; "
+                             f"{' and '.join(repr(f) for f in OPTIMIZER_FAMILIES)} are")
+        if self.type == "dimuon" and self.version != 1:
+            raise ValueError(f"optimizer_config.version {self.version!r} is not served for dimuon; version 1 is")
+        if self.type == "adamw" and self.version is not None:
+            raise ValueError("optimizer_config.version is not a field of adamw")
 
-class OptimParams(BaseModel):
-    """Per-step parameters of a non-Adam optimizer (the SDK sends them as
-    `optimizer_params`; Adam keeps the `adam_params` key). Parsed only to be
-    rejected with a message that names the family."""
-    model_config = ConfigDict(extra="allow")
-
-    type: str = Field(..., description="Optimizer family")
+    def record(self) -> Dict[str, Any]:
+        """The form recorded with the model and its checkpoints and echoed by get_info / weights_info."""
+        return {"type": self.type} if self.version is None else {"type": self.type, "version": self.version}
 
 
 class CreateModelRequest(BaseModel):
@@ -69,7 +75,7 @@ class CreateModelRequest(BaseModel):
     # context length, batch shape, classification head, debug/staleness knobs.
     base_model: str = Field(..., description="HF model id or local model directory")
     lora_config: Optional[LoraConfig] = Field(default=None, description="LoRA configuration")
-    optimizer_config: OptimizerConfig = Field(default_factory=OptimizerConfig, description="Optimizer family; only adamw is served")
+    optimizer_config: OptimizerConfig = Field(default_factory=OptimizerConfig, description="Optimizer family, fixed for the model's life")
     parallelism_config: Optional[ParallelismConfig] = Field(default=None, description="Parallelism settings (server-side callers only)")
 
 
@@ -126,7 +132,7 @@ class LoadWeightsRequest(BaseModel):
     model_id: str = Field(..., description="Model ID")
     path: str = Field(..., description="tinker://<run>/weights/<name> to load from")
     optimizer: bool = Field(default=False, description="Also restore optimizer state (the checkpoint must carry it)")
-    optimizer_config: Optional[OptimizerConfig] = Field(default=None, description="Optimizer family for the restored run; only adamw is served")
+    optimizer_config: Optional[OptimizerConfig] = Field(default=None, description="Optimizer family of the restored run; must be the model's own")
     seq_id: Optional[int] = Field(default=None, description="Sequence ID for ordering")
 
 
@@ -380,7 +386,8 @@ class ForwardBackwardRequest(BaseModel):
 
 
 class AdamParams(BaseModel):
-    """Adam optimizer parameters."""
+    """One AdamW step's hyperparameters (SDK `AdamParams`, sent as `adam_params`)."""
+    type: Literal["adamw"] = "adamw"
     learning_rate: float = Field(default=0.0001, description="Learning rate")
     beta1: float = Field(default=0.9, description="Beta1 coefficient")
     beta2: float = Field(default=0.95, description="Beta2 coefficient")
@@ -389,13 +396,49 @@ class AdamParams(BaseModel):
     grad_clip_norm: float = Field(default=0.0, description="Gradient clip norm (0.0 = no clipping)")
 
 
+class DimuonParams(BaseModel):
+    """One Dimuon step's hyperparameters (SDK `DimuonParams`, sent as
+    `optimizer_params`); the constraints are the SDK's."""
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    type: Literal["dimuon"] = "dimuon"
+    learning_rate: float = Field(..., ge=0, description="Step size")
+    beta1: float = Field(default=0.9, ge=0, lt=1, description="Momentum EMA coefficient")
+    grad_clip_norm: float = Field(default=0.0, description="Max global grad norm; a nonpositive value disables clipping")
+
+
+OptimParams = Union[AdamParams, DimuonParams]
+
+
 class OptimStepRequest(BaseModel):
     """Request to perform optimizer step (new format)."""
     model_id: str = Field(..., description="Model ID")
-    adam_params: Optional[AdamParams] = Field(default=None, description="Adam optimizer parameters")
-    optimizer_params: Optional[OptimParams] = Field(default=None, description="Non-Adam parameters (rejected: only adamw is served)")
+    adam_params: Optional[AdamParams] = Field(default=None, description="AdamW step parameters (SDK AdamParams)")
+    optimizer_params: Optional[Dict[str, Any]] = Field(
+        default=None, description="Another family's step parameters, named by `type` (SDK DimuonParams)")
     step_num: Optional[int] = Field(default=None, ge=0, description="Step number for logging")
     seq_id: Optional[int] = Field(default=None, description="Per-model sequence number (idempotent retries)")
+
+    def optim_params(self) -> OptimParams:
+        """The one family's parameters this step carries. Raises ValueError (a
+        400): both keys or neither, a family optimizer_params cannot name, or a
+        field outside the family's constraints."""
+        if (self.adam_params is None) == (self.optimizer_params is None):
+            raise ValueError("optim_step takes exactly one of adam_params (adamw) and optimizer_params (dimuon)")
+        if self.adam_params is not None:
+            return self.adam_params
+        assert self.optimizer_params is not None
+        if "type" not in self.optimizer_params:
+            raise ValueError("optimizer_params names no type")
+        family = self.optimizer_params["type"]
+        if family != "dimuon":
+            raise ValueError(f"optimizer_params.type {family!r} is not a family optimizer_params carries; "
+                             "'dimuon' is (adamw goes as adam_params)")
+        try:
+            return DimuonParams.model_validate(self.optimizer_params)
+        except ValidationError as e:
+            fields = "; ".join(f"{'.'.join(str(x) for x in err['loc'])}: {err['msg']}" for err in e.errors())
+            raise ValueError(f"optimizer_params (dimuon): {fields}") from e
 
 
 class ASampleRequest(BaseModel):

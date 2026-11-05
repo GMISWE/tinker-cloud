@@ -11,7 +11,7 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, Generic, List, Optional, Tuple, TypeVar
 
-from ..models.requests import Datum
+from ..models.requests import Datum, OptimParams
 from .env_config import EnvConfig
 
 
@@ -89,6 +89,10 @@ class TrainingBackend(ABC, Generic[H]):
     # Loss names (core.loss_registry) this backend can train; TrainingService
     # rejects others with UnsupportedFeatureError before any GPU work.
     SUPPORTED_LOSS_FNS: FrozenSet[str] = frozenset()
+    # Optimizer families (models.requests.OPTIMIZER_FAMILIES) this backend
+    # serves; ModelService refuses a create or load naming another with 400
+    # before the backend sees it.
+    SUPPORTED_OPTIMIZERS: FrozenSet[str] = frozenset()
 
     @abstractmethod
     async def create_model(
@@ -102,9 +106,14 @@ class TrainingBackend(ABC, Generic[H]):
         rl_config: Optional[Dict[str, Any]] = None,
         rollout_config: Optional[Dict[str, Any]] = None,
         native_root: Optional[Path] = None,
+        optimizer: str = "adamw",
     ) -> H:
         """
         Initialize training actors and inference engine.
+
+        `optimizer` is the model's family for life, one of this backend's
+        SUPPORTED_OPTIMIZERS (the service checked). The default is the family
+        every backend serves, for callers other than the service (tests).
 
         Everything a backend sizes itself by comes from its own configuration
         or the model's config.json, never from the request (specs/025, D17):
@@ -205,16 +214,20 @@ class TrainingBackend(ABC, Generic[H]):
     async def apply_optimizer_step(
         self,
         handle: H,
-        learning_rate: Optional[float] = None,
-        adam_params: Optional[Dict[str, Any]] = None,
+        optim_params: Optional[OptimParams] = None,
     ) -> Dict[str, Any]:
         """
         Apply accumulated gradients via optimizer step, then sync
         weights to inference engine.
 
-        adam_params (P4): full client AdamParams (beta1/beta2/eps/weight_decay/
-        grad_clip_norm). Backends honor what they can and MUST warn on values
-        they cannot apply.
+        optim_params: the request's AdamParams or DimuonParams, its family
+        already checked against the model's by the service; the learning rate
+        is read from it. The wire always carries one (OptimStepRequest refuses
+        a step without); None is a direct caller's: automodel and fake refuse
+        it, nemo_rl keeps its learning rate, miles and megatron_bridge pass no
+        learning rate to their engines. Per-step fields a path cannot apply:
+        nemo_rl and verl warn (betas, eps, clip); miles and megatron_bridge
+        apply the learning rate only and say so in their docstrings.
 
         NeMo RL behavior:
             Concatenates all buffered forward_backward data and calls

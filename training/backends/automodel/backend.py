@@ -49,14 +49,14 @@ import torch
 from ...checkpoints.interchange import ADAPTER_CONFIG_FILE, ADAPTER_WEIGHTS_FILE, HF_ADAPTER_DIRNAME, find_hf_adapter, read_adapter_config
 from ...core.fault_injection import hang_point
 from ...core.loss_registry import clip_thresholds
-from ...models.requests import AdamParams, Datum, LoraConfig
+from ...models.requests import Datum, LoraConfig, OptimParams
 from ...utils.model_config import model_context_length, read_raw_hf_config
 from ..base import BackendError, BackendHandle, TrainingBackend, UnsupportedFeatureError
 from ..common.sampling.generation import sample_over_http
 from ..common.sampling.vllm_client import VllmLoraClient
 from ..http_pool import HttpClientPool
 from ..objectives import classification_spec
-from .adapter import OPTIMIZER_DIRNAME, OPTIMIZER_FILE
+from .adapter import OPTIMIZER_DIRNAME, OPTIMIZER_FILES
 from .config import AutomodelConfig
 from .converter import Batch, LossFn, RequestRows, coalesce, convert_request, row_sums, shard, split_rows
 from .errors import NonFiniteGradNorm, StateMismatch
@@ -128,6 +128,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
     needs_ray = True
     config: AutomodelConfig
     SUPPORTED_LOSS_FNS = frozenset(m.value for m in LossFn)   # the service's table is keyed by the wire string
+    SUPPORTED_OPTIMIZERS = frozenset({"adamw", "dimuon"})      # dimuon = dion.Muon per LoRA factor (worker.setup)
 
     def __init__(self, overrides: Optional[Dict[str, Any]] = None):
         super().__init__(overrides)
@@ -149,7 +150,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         self, model_id: str, request_id: str, base_model: str, num_gpus: int,
         lora_config: Optional[Dict[str, Any]] = None, parallelism: Optional[Dict[str, Any]] = None,
         rl_config: Optional[Dict[str, Any]] = None, rollout_config: Optional[Dict[str, Any]] = None,
-        native_root: Optional[Path] = None,
+        native_root: Optional[Path] = None, optimizer: str = "adamw",
     ) -> AutomodelHandle:
         if parallelism is not None:
             raise UnsupportedFeatureError("parallelism_config", backend=BACKEND,
@@ -162,7 +163,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
                                backend=BACKEND, operation="create_model")
         config = LoraConfig.model_validate(lora_config)
         try:
-            lora = lora_spec(config)
+            lora = lora_spec(config, optimizer)
         except ValueError as e:
             raise BackendError(str(e), backend=BACKEND, operation="create_model") from e
         if lora.rank > self.config.max_lora_rank:
@@ -343,22 +344,20 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         return [out["logprobs"]["data"] for out in result["loss_fn_outputs"]]
 
     async def apply_optimizer_step(
-        self, handle: AutomodelHandle, learning_rate: Optional[float] = None,
-        adam_params: Optional[Dict[str, Any]] = None,
+        self, handle: AutomodelHandle, optim_params: Optional[OptimParams] = None,
     ) -> Dict[str, Any]:
         group = self._live_group(handle, "apply_optimizer_step")
-        if learning_rate is None or adam_params is None:
+        if optim_params is None:
             raise BackendError(
-                "the request carries no adam_params; the learning rate and clip are the request's (R11)",
+                "the request carries no adam_params or optimizer_params; the learning rate and clip are the request's, never the server's",
                 backend=BACKEND,
                 operation="apply_optimizer_step",
             )
-        adam = AdamParams(learning_rate=learning_rate, **adam_params)
 
         async def step() -> Dict[str, Any]:
             await hang_point("automodel.apply_optimizer_step")   # test-only; a no-op unless configured
             try:
-                outs = await group.ranks.optim_step(handle.model_id, adam)
+                outs = await group.ranks.optim_step(handle.model_id, optim_params)
             except NonFiniteGradNorm as e:
                 # Every rank refused (the norm is all-reduced) and zeroed its
                 # grads; this request fails, but the group remains usable.
@@ -551,7 +550,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
     # --- checkpoints ------------------------------------------------------
     async def save_checkpoint(self, handle: AutomodelHandle, root: Path, step: Optional[int] = None,
                               persist: bool = True) -> None:
-        """Rank 0 writes the interchange adapter (`hf_adapter/`) and the AdamW
+        """Rank 0 writes the interchange adapter (`hf_adapter/`) and the optimizer
         state of the LoRA parameters (`optimizer/`) under `root`, as a barrier
         on the group. An ephemeral sampler save writes nothing: vLLM holds the
         version the sampler pins."""
@@ -572,8 +571,9 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
 
     async def load_checkpoint(self, handle: AutomodelHandle, root: Path, optimizer: bool = False) -> None:
         """Copy the adapter under `root` into the ranks and, when asked, the
-        AdamW state: restored whole or refused. The loaded weights are
-        published to vLLM as the next version."""
+        optimizer state: restored whole or refused (another family's state
+        cannot be the model's). The loaded weights are published to vLLM as
+        the next version."""
         adapter = find_hf_adapter(str(root))
         if adapter is None:
             raise BackendError(f"checkpoint {root} holds no {HF_ADAPTER_DIRNAME}/{ADAPTER_WEIGHTS_FILE}",
@@ -588,10 +588,10 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
             raise BackendError(f"checkpoint {root} was saved for another LoRA ({mismatch})",
                                backend=BACKEND, operation="load_checkpoint")
         optimizer_dir = root / OPTIMIZER_DIRNAME if optimizer else None
-        if optimizer_dir is not None and not (optimizer_dir / OPTIMIZER_FILE).is_file():
+        if optimizer_dir is not None and not any((optimizer_dir / f).is_file() for f in OPTIMIZER_FILES.values()):
             raise BackendError(
-                f"checkpoint {root} carries no optimizer state ({OPTIMIZER_DIRNAME}/{OPTIMIZER_FILE}): load it with "
-                "optimizer=false, or resume from a checkpoint the automodel backend wrote",
+                f"checkpoint {root} carries no optimizer state ({OPTIMIZER_DIRNAME}/<{'|'.join(OPTIMIZER_FILES.values())}>): "
+                "load it with optimizer=false, or resume from a checkpoint the automodel backend wrote",
                 backend=BACKEND, operation="load_checkpoint")
         group = self._live_group(handle, "load_checkpoint")
 

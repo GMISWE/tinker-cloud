@@ -12,7 +12,7 @@ and the seed are per tenant.
 """
 import hashlib
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Literal, Optional, Tuple
 
 from ...models.requests import LoraConfig
 
@@ -22,17 +22,20 @@ MLP_MODULES = ("gate_proj", "up_proj", "down_proj")
 
 @dataclass(frozen=True)
 class LoraSpec:
+    """What add_tenant receives: the group's signature (rank, alpha, targets)
+    plus the tenant's own dropout and optimizer family."""
     rank: int
     alpha: int
     target_modules: Tuple[str, ...]   # module names, as PEFT and vLLM read them
     dropout: float
+    optimizer: Literal["adamw", "dimuon"] = "adamw"   # the backend sets it from the request; the default serves direct callers
 
     @property
     def signature(self) -> Tuple[int, int, Tuple[str, ...]]:
         return (self.rank, self.alpha, self.target_modules)
 
 
-def lora_spec(config: LoraConfig) -> LoraSpec:
+def lora_spec(config: LoraConfig, optimizer: str = "adamw") -> LoraSpec:
     """Raises ValueError for rank 0 (not a LoRA) or no target module."""
     if config.rank == 0:
         raise ValueError("lora_config.rank is 0: not a LoRA model")
@@ -41,7 +44,7 @@ def lora_spec(config: LoraConfig) -> LoraSpec:
         raise ValueError("lora_config trains neither attention nor MLP: the adapter would have no parameters")
     # LoraConfig documents alpha = rank when unset
     alpha = config.alpha if config.alpha is not None else config.rank
-    return LoraSpec(rank=config.rank, alpha=alpha, target_modules=targets, dropout=config.dropout)
+    return LoraSpec(rank=config.rank, alpha=alpha, target_modules=targets, dropout=config.dropout, optimizer=optimizer)
 
 
 def tenant_seed(model_id: str, seed: Optional[int]) -> int:

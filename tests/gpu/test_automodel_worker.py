@@ -418,3 +418,147 @@ def test_tenant_export_and_save_read_the_slot_without_swap(tmp_path):
         assert shared.last_swap > 0
     finally:
         shared.kill()
+
+
+# --- the dimuon family: dion.Muon per LoRA factor; one group holds both families ----
+
+import dataclasses  # noqa: E402
+import math  # noqa: E402
+
+from tinkercloud.training.backends.automodel.adapter import OPTIMIZER_FILES  # noqa: E402
+from tinkercloud.training.backends.automodel.errors import StateMismatch  # noqa: E402
+from tinkercloud.training.models.requests import DimuonParams  # noqa: E402
+
+LORA_DIMUON = dataclasses.replace(LORA, optimizer="dimuon")
+DIMUON = DimuonParams(learning_rate=1.5e-3)
+
+
+def test_dimuon_steps_lower_the_loss_and_keep_momentum_state():
+    """20 Muon steps on one batch: every loss finite, the last below the first;
+    the state is one `momentum` per LoRA parameter, no Adam moment."""
+    x, _ = requests()
+    batch = coalesce([x], 2)
+    grp = Group(2, 2, {"t": (SEED, LORA_DIMUON)})
+    try:
+        losses = []
+        for _ in range(20):
+            losses.append(sum(row_sums(batch, grp.fwd_bwd(batch)["row_loss"])))
+            assert grp.optim(DIMUON) > 0
+        family, state = grp.call("_optimizer_state", before=("t",))[0]
+        names = set(grp.lora())
+    finally:
+        grp.kill()
+    assert all(math.isfinite(v) for v in losses), losses
+    assert losses[-1] < losses[0], (losses[0], losses[-1])
+    assert family == "dimuon"
+    assert set(state) == {peft_key(n) for n in names}
+    assert all(set(st) == {"momentum"} for st in state.values())
+
+
+def test_dimuon_checkpoint_round_trip_and_family_mismatch(tmp_path):
+    """save_state after one Muon step writes optimizer/dimuon.safetensors with
+    exactly the momentum keys; a fresh Muon tenant that loads it reproduces the
+    weights and momentum exactly and, in the same group, the next step exactly
+    and a fresh group (another process) reproduces it exactly too, which holds
+    only because the worker primes dion's compiled kernels at setup
+    (worker._prime_muon; without it this assertion failed on the A factors); an
+    AdamW tenant refuses the file, and a Muon tenant refuses an AdamW file."""
+    from safetensors.torch import load_file
+
+    x, _ = requests()
+    batch = coalesce([x], 2)
+    root = tmp_path / "ckpt"
+    grp = Group(2, 2, {"t": (SEED, LORA_DIMUON)})
+    try:
+        grp.fwd_bwd(batch)
+        grp.optim(DIMUON)
+        grp.call("save_state", before=("t", str(root)))
+        s1 = grp.lora()
+        grp.fwd_bwd(batch)
+        grp.optim(DIMUON)
+        s2 = grp.lora()                     # the uninterrupted second step
+        adapter = ci.find_hf_adapter(str(root))
+        assert adapter is not None
+        opt_dir = root / OPTIMIZER_DIRNAME
+        assert sorted(p.name for p in opt_dir.iterdir()) == [OPTIMIZER_FILES["dimuon"]]
+        saved = load_file(str(opt_dir / OPTIMIZER_FILES["dimuon"]))
+        assert set(saved) == {f"{peft_key(k)}.momentum" for k in s1}
+        # a fresh tenant of the same group loads the checkpoint and takes the same step
+        grp.call("add_tenant", before=("u", LORA_DIMUON, SEED + 1))
+        grp.call("load_state", before=("u", adapter, str(opt_dir)))
+        u1 = grp.lora("u")
+        assert all(torch.equal(u1[k], s1[k]) for k in s1)
+        _, state = grp.call("_optimizer_state", before=("u",))[0]
+        assert all(torch.equal(state[peft_key(k)]["momentum"], saved[f"{peft_key(k)}.momentum"]) for k in s1)
+        grp.fwd_bwd(batch, tenant="u")
+        grp.optim(DIMUON, "u")
+        assert equal_states(grp.lora("u"), s2)
+    finally:
+        grp.kill()
+
+    grp = Group(2, 2, {"t": (SEED, LORA_DIMUON)})   # a fresh group: another process, maybe other GPUs
+    try:
+        grp.call("load_state", before=("t", adapter, str(opt_dir)))
+        assert equal_states(grp.lora(), s1)
+        grp.fwd_bwd(batch)
+        grp.optim(DIMUON)
+        r2 = grp.lora()
+    finally:
+        grp.kill()
+    assert equal_states(r2, s2)
+
+    grp = Group(2, 2, {"a": SEED})          # an AdamW tenant
+    try:
+        with pytest.raises(StateMismatch, match="dimuon.*adamw"):
+            grp.call("load_state", before=("a", adapter, str(opt_dir)))
+        grp.fwd_bwd(batch, tenant="a")
+        grp.optim(ADAM, "a")
+        grp.call("save_state", before=("a", str(tmp_path / "adamw")))
+    finally:
+        grp.kill()
+    grp = Group(2, 2, {"t": (SEED, LORA_DIMUON)})
+    try:
+        with pytest.raises(StateMismatch, match="adamw.*dimuon"):
+            grp.call("load_state", before=("t", adapter, str(tmp_path / "adamw" / OPTIMIZER_DIRNAME)))
+    finally:
+        grp.kill()
+
+
+def test_adamw_and_dimuon_tenants_share_a_group_and_step_as_solo():
+    """One group, tenant a on AdamW and tenant b on Muon: each steps with its
+    own family and lands exactly where its solo run does."""
+    x, y = requests()
+    bx, by = coalesce([x], 2), coalesce([y], 2)
+    solo = Group(2, 2, {"a": 1})
+    try:
+        solo.fwd_bwd(bx, tenant="a")
+        norm_a = solo.optim(ADAM, "a")
+        weights_a = solo.lora("a")
+    finally:
+        solo.kill()
+    solo = Group(2, 2, {"b": (2, LORA_DIMUON)})
+    try:
+        solo.fwd_bwd(by, tenant="b")
+        norm_b = solo.optim(DIMUON, "b")
+        weights_b = solo.lora("b")
+    finally:
+        solo.kill()
+
+    shared = Group(2, 2, {"a": 1, "b": (2, LORA_DIMUON)})
+    try:
+        shared.fwd_bwd(bx, tenant="a")
+        shared.fwd_bwd(by, tenant="b")
+        assert shared.optim(ADAM, "a") == norm_a
+        assert equal_states(shared.lora("a"), weights_a)
+        assert shared.optim(DIMUON, "b") == norm_b
+        assert equal_states(shared.lora("b"), weights_b)
+        # a second round: the states swapped through the slots keep each family's own
+        shared.fwd_bwd(bx, tenant="a")
+        shared.fwd_bwd(by, tenant="b")
+        fam_a, st_a = shared.call("_optimizer_state", before=("a",))[0]
+        fam_b, st_b = shared.call("_optimizer_state", before=("b",))[0]
+        assert (fam_a, fam_b) == ("adamw", "dimuon")
+        assert all(set(st) == {"exp_avg", "exp_avg_sq", "step"} for st in st_a.values())
+        assert all(set(st) == {"momentum"} for st in st_b.values())
+    finally:
+        shared.kill()

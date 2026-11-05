@@ -35,7 +35,6 @@ from ..core.dependencies import (
 from ..checkpoints import CheckpointKind, CheckpointRef, CheckpointStore
 from ..storage import MetadataStorage, FuturesStorage
 from ..models.requests import (
-    SERVED_OPTIMIZER,
     LoadWeightsRequest,
     SaveWeightsExternalRequest,
     SaveWeightsRequest,
@@ -235,14 +234,14 @@ async def load_weights(
             detail=f"LoadWeights is not permitted with seq_id {request.seq_id}: the model has already "
                    "trained; create a new model and load into it first",
         )
-    if request.optimizer_config is not None and request.optimizer_config.type != SERVED_OPTIMIZER:
-        raise HTTPException(
-            status_code=400,
-            detail=f"optimizer_config.type {request.optimizer_config.type!r} is not supported "
-                   f"on this server; only {SERVED_OPTIMIZER!r} is",
-        )
     ref = CheckpointRef.parse(request.path)           # 400 on a malformed path
     store.require(ref, kind=CheckpointKind.WEIGHTS)   # 404 / 425 / 500 / wrong kind, before the future exists
+    try:   # one optimizer family per model, for life
+        if request.optimizer_config is not None:
+            request.optimizer_config.check()
+        service.require_load_family(training_clients[request.model_id], ref, request.optimizer, request.optimizer_config)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     request_id = generate_request_id()
 
     async def execute():
@@ -397,7 +396,8 @@ async def weights_info(
         return WeightsInfoResponse(
             base_model=base_model,
             is_lora=is_lora,
-            lora_rank=lora_rank if is_lora else None
+            lora_rank=lora_rank if is_lora else None,
+            optimizer_config=store.optimizer_config(ref),
         )
 
     # If not in active clients, try metadata storage
@@ -411,7 +411,8 @@ async def weights_info(
         return WeightsInfoResponse(
             base_model=base_model,
             is_lora=is_lora,
-            lora_rank=lora_rank if is_lora else None
+            lora_rank=lora_rank if is_lora else None,
+            optimizer_config=store.optimizer_config(ref),
         )
 
     # Model not found anywhere

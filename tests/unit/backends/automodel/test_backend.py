@@ -18,7 +18,7 @@ from tinkercloud.training.backends.automodel.scheduler import GroupScheduler
 from tinkercloud.training.backends.base import BackendError
 from tinkercloud.training.backends.http_pool import HttpClientPool
 from tinkercloud.training.core import routing
-from tinkercloud.training.models.requests import Datum
+from tinkercloud.training.models.requests import AdamParams, Datum
 from tests.datums import ce_datum
 
 CONFIG = dict(train_gpus=2, max_loras=1, max_lora_rank=8, max_cpu_loras=1, micro_batch_rows=2)
@@ -296,10 +296,10 @@ def test_nonfinite_step_fails_the_request_and_keeps_the_group(tmp_path):
         backend, ranks, handle = wired(tmp_path)   # the step that succeeds publishes v1
         ranks.fault = NonFiniteGradNorm("grad norm is inf")
         with pytest.raises(BackendError, match="grad norm is inf"):
-            await backend.apply_optimizer_step(handle, 0.5, ADAM)
+            await backend.apply_optimizer_step(handle, AdamParams(learning_rate=0.5, **ADAM))
         assert not ranks.stopped and handle.weight_version == 0
         ranks.swap_seconds = 0.25
-        result = await backend.apply_optimizer_step(handle, 0.5, ADAM)
+        result = await backend.apply_optimizer_step(handle, AdamParams(learning_rate=0.5, **ADAM))
         assert result["grad_norm"] == 0.5 and result["weight_version"] == 1
         assert result["swap_seconds"] == 0.25 and result["metrics"] == {"swap_seconds": 0.25}
         assert (await backend.forward(handle, [ce_datum([1, 2])], "cross_entropy"))["metrics"]["swap_seconds:max"] == 0.25
@@ -312,7 +312,7 @@ def test_rank_fault_releases_the_group():
         backend, ranks, handle = wired()
         ranks.fault = RuntimeError("CUDA error")
         with pytest.raises(BackendError, match="released"):
-            await backend.apply_optimizer_step(handle, 0.5, ADAM)
+            await backend.apply_optimizer_step(handle, AdamParams(learning_rate=0.5, **ADAM))
         await until_stopped(ranks)
         assert "g" not in backend._groups
         with pytest.raises(BackendError, match="CUDA error"):
@@ -463,7 +463,7 @@ def test_tenant_delete_queued_behind_a_fault_completes_and_stops_vllm(tmp_path):
         await backend.prepare_for_generation(m)
         ranks.hold_step = asyncio.Event()
         ranks.fault = RuntimeError("CUDA error")
-        step_b = asyncio.create_task(backend.apply_optimizer_step(b, 0.5, ADAM))
+        step_b = asyncio.create_task(backend.apply_optimizer_step(b, AdamParams(learning_rate=0.5, **ADAM)))
         await asyncio.sleep(0.02)
         delete_m = asyncio.create_task(backend.delete_model(m))
         await asyncio.sleep(0.02)
@@ -491,7 +491,7 @@ def test_tenant_fault_cause_outlives_a_group_reopened_under_its_key(monkeypatch,
         b = await backend.create_model("b", "r2", "base", 2, lora_config=LORA_A, native_root=tmp_path / "b")
         started[0].fault = RuntimeError("CUDA error")
         with pytest.raises(BackendError, match="released"):
-            await backend.apply_optimizer_step(a, 0.5, ADAM)
+            await backend.apply_optimizer_step(a, AdamParams(learning_rate=0.5, **ADAM))
         await until_stopped(started[0])
         c = await backend.create_model("c", "r3", "base", 2, lora_config=LORA_A, native_root=tmp_path / "c")
         assert c.group_key == a.group_key and len(started) == 2 and backend._groups[c.group_key].tenants == {"c"}
@@ -549,10 +549,10 @@ def test_tenant_fault_in_one_pass_fails_every_queued_tenant_and_names_the_cause_
         b = tenant_handle(a, "b")
         ranks.hold_step = asyncio.Event()
         ranks.fault = RuntimeError("CUDA error")
-        step_a = asyncio.create_task(backend.apply_optimizer_step(a, 0.5, ADAM))
+        step_a = asyncio.create_task(backend.apply_optimizer_step(a, AdamParams(learning_rate=0.5, **ADAM)))
         await asyncio.sleep(0.02)
         queued = [asyncio.create_task(backend.forward_backward(b, [ce_datum([1, 2])], "cross_entropy")),
-                  asyncio.create_task(backend.apply_optimizer_step(b, 0.5, ADAM)),
+                  asyncio.create_task(backend.apply_optimizer_step(b, AdamParams(learning_rate=0.5, **ADAM))),
                   asyncio.create_task(backend.forward_backward(a, [ce_datum([1, 2, 3])], "cross_entropy"))]
         await asyncio.sleep(0.02)
         assert ranks.passes == [], "the queued ops wait behind a's step"
@@ -568,7 +568,7 @@ def test_tenant_fault_in_one_pass_fails_every_queued_tenant_and_names_the_cause_
             with pytest.raises(BackendError, match="CUDA error"):
                 await backend.forward(handle, [ce_datum([1, 2])], "cross_entropy")
             with pytest.raises(BackendError, match="CUDA error"):
-                await backend.apply_optimizer_step(handle, 0.5, ADAM)
+                await backend.apply_optimizer_step(handle, AdamParams(learning_rate=0.5, **ADAM))
         await backend.close()
     run(go())
 
@@ -600,7 +600,7 @@ def test_step_publishes_the_next_version_and_retires_the_old_one_after_its_sampl
         vllm.hold["m@v0"] = asyncio.Event()
         early = asyncio.create_task(backend.sample(handle, "r0", [1], 1, SP))
         await asyncio.sleep(0.05)    # r0 is at the engine on v0
-        step = await backend.apply_optimizer_step(handle, 0.5, ADAM)
+        step = await backend.apply_optimizer_step(handle, AdamParams(learning_rate=0.5, **ADAM))
         assert step["weight_version"] == 1
         assert ranks.exports[-1] == tmp_path / "adapters" / "v1"
         assert set(vllm.loaded) == {"m@v0", "m@v1"}, "v0 stays while r0 runs on it"
@@ -622,7 +622,7 @@ def test_a_step_whose_publish_fails_reports_the_step_as_taken(tmp_path, routed):
         backend, ranks, handle = wired(tmp_path, vllm)
         await backend.forward_backward(handle, [ce_datum([1, 2])], "cross_entropy")
         with pytest.raises(BackendError, match=r"step was taken \(weights at v1\).*500"):
-            await backend.apply_optimizer_step(handle, 0.5, ADAM)
+            await backend.apply_optimizer_step(handle, AdamParams(learning_rate=0.5, **ADAM))
         assert handle.weight_version == 1 and handle.generation_synced_version == -1
         assert not ranks.stopped, "a vLLM fault is not the group's"
         vllm.fail_load = False

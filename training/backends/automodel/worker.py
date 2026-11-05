@@ -1,11 +1,11 @@
 """
 One FSDP2 rank of an Automodel training group (R1): a Ray actor on one GPU that
 holds its shard of the base model and, for every tenant of the group, the
-tenant's LoRA shard, grads and AdamW state (the adapter store).
+tenant's LoRA shard, grads and optimizer state (the adapter store).
 
 Automodel patches one LoRA adapter into the model and FSDP2 shards it, so the
 model has one set of LoRA tensors. One tenant is live in them; every other
-tenant's shard, grads and AdamW state wait in a pinned-CPU slot. An op of a
+tenant's shard, grads and optimizer state wait in a pinned-CPU slot. An op of a
 non-live tenant swaps it in first: the live tenant's state is copied into its
 slot, then the requested tenant's slot is copied into the model's tensors.
 Both are `copy_()` on the local shard, no collective. Grads and the optimizer
@@ -19,9 +19,9 @@ The driver calls every rank with the same method at once and gathers the
 results in rank order. Each call is one Tinker primitive; there is no training
 loop here (Automodel's recipe owns its loop, Tinker's client owns this one):
   forward_backward  runs now and returns the real loss; grads accumulate (R9)
-  optim_step        writes the request's AdamParams, clips, steps (R11)
-  save_state        gathers the LoRA weights and AdamW state; rank 0 writes
-  load_state        copies a checkpoint's weights, and its AdamW state when
+  optim_step        writes the request's params into the tenant's family's optimizer, clips, steps
+  save_state        gathers the LoRA weights and optimizer state; rank 0 writes
+  load_state        copies a checkpoint's weights, and its optimizer state when
                     asked, into every rank's shard
 A pass and a step report `swap_seconds`, the time their swap took (0 when
 the tenant was live).
@@ -40,8 +40,9 @@ import socket
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+import dion
 import ray
 import torch
 import torch.distributed as dist
@@ -55,24 +56,25 @@ from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor, distribute_tensor
 
 from ...checkpoints.interchange import ADAPTER_WEIGHTS_FILE, HF_ADAPTER_DIRNAME
-from ...models.requests import AdamParams
-from .adapter import ADAM_STATE_KEYS, OPTIMIZER_DIRNAME, peft_key, read_adam_state, write_adam_state, write_peft_adapter
+from ...models.requests import AdamParams, OptimParams
+from .adapter import OPTIMIZER_DIRNAME, SHARD_KEYS, STATE_KEYS, peft_key, read_optimizer_state, write_optimizer_state, write_peft_adapter
 from .converter import Batch
 from .errors import NonFiniteGradNorm, StateMismatch
 from .losses import compute_loss
 from .lora import LoraSpec
 
-AdamState = Dict[str, torch.Tensor]   # exp_avg, exp_avg_sq, step
+OptimState = Dict[str, torch.Tensor]   # one parameter's state in the tenant's family (adapter.STATE_KEYS)
 
 
 @dataclass
 class _Slot:
     """One tenant's state on this rank while it is not live: the local shards
-    in pinned host memory. A grad or Adam entry is None when the tenant has
-    none (no pass since its last step; no step yet)."""
+    in pinned host memory. A grad or optimizer entry is None when the tenant
+    has none (no pass since its last step; no step yet). The optimizer state
+    is the tenant's family's (its LoraSpec.optimizer)."""
     weights: Dict[str, torch.Tensor] = field(default_factory=dict)
     grads: Dict[str, Optional[torch.Tensor]] = field(default_factory=dict)
-    adam: Dict[str, Optional[AdamState]] = field(default_factory=dict)
+    optim: Dict[str, Optional[OptimState]] = field(default_factory=dict)
 
 
 class AutomodelWorker:
@@ -122,10 +124,46 @@ class AutomodelWorker:
         _check_targets(self.lora_params, self.lora.target_modules)
         self.lora_modules = [m for m in self.model.modules() if isinstance(m, LinearLoRA)]
         assert self.lora_modules, "the model has LoRA parameters but no LoRA module"
-        # lr, betas, eps and weight_decay are rewritten from each request's AdamParams
-        # before every step (R11); the constructor's values are never used
-        self.optimizer = torch.optim.AdamW([p for _, p in self.lora_params])
+        params = [p for _, p in self.lora_params]
+        # One optimizer object per family over the same parameters: a second
+        # training group would take as many more whole GPUs. A tenant's family
+        # (LoraSpec.optimizer) picks one and its slot holds that family's state.
+        # lr and the per-step fields are rewritten from each request before
+        # every step; the constructors' values are never used. dion refuses
+        # DTensor parameters without their own mesh ("Must create optimizer
+        # with DeviceMesh"); its group-level `step` (incremented in dion
+        # muon.py `Muon.step`, read only by its adamw groups' bias correction)
+        # is not checkpointed.
+        mesh = params[0].device_mesh if isinstance(params[0], DTensor) else None   # dion takes no mesh for a plain tensor
+        self.optimizers: Dict[str, torch.optim.Optimizer] = {
+            "adamw": torch.optim.AdamW(params),
+            "dimuon": dion.Muon(params, distributed_mesh=mesh, weight_decay=0.0, nesterov=False,
+                                adjust_lr="spectral_norm"),
+        }
+        self._prime_muon(params)
         return sum(p.numel() for _, p in self.lora_params)
+
+    def _prime_muon(self, params: List[torch.nn.Parameter]) -> None:
+        """One Muon step on zero gradients, state discarded, so the weights are
+        untouched (orth(0) = 0). dion's update functions are torch.compile'd and
+        see several shapes in one step (A factors, transposed B factors); under
+        dynamo's automatic dynamic shapes the first shape a process meets gets a
+        static kernel and the next a dynamic one, and the two round the bf16
+        reductions differently, so the kernels a step runs depend on the
+        process's compile history (measured: with automatic dynamic shapes off
+        the two processes agree bit for bit). A fresh process that resumes a run
+        has no such history; priming gives every process the same one. The
+        dynamo setting stays on for the model's own compiled kernels, whose
+        sequence lengths do vary. Reproduction: the
+        fresh-group round trip in tests/gpu/test_automodel_worker.py
+        (test_dimuon_checkpoint_round_trip_and_family_mismatch), which differed
+        on the A factors without this and is bit-equal with it."""
+        muon = self.optimizers["dimuon"]
+        for p in params:
+            p.grad = torch.zeros_like(p)
+        muon.step()
+        muon.zero_grad(set_to_none=True)
+        muon.state.clear()   # every parameter had a grad, so every one has state to drop
 
     # --- tenants ---------------------------------------------------------
     def add_tenant(self, tenant: str, lora: LoraSpec, seed: int) -> None:
@@ -141,7 +179,7 @@ class AutomodelWorker:
         _init_lora(self.lora_params, seed)
         for _, p in self.lora_params:
             p.grad = None
-            self.optimizer.state.pop(p, None)
+            self._drop_state(p)
         self.tenant_lora[tenant] = lora
         self._set_dropout(lora.dropout)
         self.live = tenant
@@ -171,7 +209,8 @@ class AutomodelWorker:
         started = time.perf_counter()
         self._stash_live()
         slot = self.slots.pop(tenant)
-        state = self.optimizer.state
+        family = self.tenant_lora[tenant].optimizer
+        state = self.optimizers[family].state
         with torch.no_grad():
             for n, p in self.lora_params:
                 _local(p).copy_(slot.weights[n], non_blocking=True)
@@ -182,34 +221,36 @@ class AutomodelWorker:
                     if p.grad is None:
                         p.grad = torch.zeros_like(p)
                     _local(p.grad).copy_(grad, non_blocking=True)
-                adam = slot.adam[n]
-                if adam is None:
+                for other, optimizer in self.optimizers.items():   # the other family's buffers are a previous tenant's
+                    if other != family:
+                        optimizer.state.pop(p, None)
+                st = slot.optim[n]
+                if st is None:
                     state.pop(p, None)
-                elif p in state:   # the previous tenant's buffers, same shapes: reuse them
-                    for k in ("exp_avg", "exp_avg_sq"):
-                        _local(state[p][k]).copy_(adam[k], non_blocking=True)
-                    state[p]["step"].copy_(adam["step"])
+                elif p in state:   # the previous tenant's buffers, same family and shapes: reuse them
+                    for k in SHARD_KEYS[family]:
+                        _local(state[p][k]).copy_(st[k], non_blocking=True)
+                    for k in _scalar_keys(family):
+                        state[p][k].copy_(st[k])
                 else:
-                    state[p] = {"exp_avg": _on_device(p, adam["exp_avg"]), "exp_avg_sq": _on_device(p, adam["exp_avg_sq"]),
-                                "step": adam["step"].clone()}
+                    state[p] = _state_on_device(p, family, st)
         torch.cuda.synchronize()
         self._set_dropout(self.tenant_lora[tenant].dropout)
         self.live = tenant
         return time.perf_counter() - started
 
     def _stash_live(self) -> None:
-        """Copy the live tenant's shards, grads and Adam state into its slot."""
+        """Copy the live tenant's shards, grads and optimizer state into its slot."""
         if self.live is None:
             return
         slot = _Slot()
-        state = self.optimizer.state
+        family = self.tenant_lora[self.live].optimizer
+        state = self.optimizers[family].state
         with torch.no_grad():
             for n, p in self.lora_params:
                 slot.weights[n] = _pinned(_local(p))
                 slot.grads[n] = None if p.grad is None else _pinned(_local(p.grad))
-                slot.adam[n] = None if p not in state else {
-                    "exp_avg": _pinned(_local(state[p]["exp_avg"])), "exp_avg_sq": _pinned(_local(state[p]["exp_avg_sq"])),
-                    "step": state[p]["step"].clone()}
+                slot.optim[n] = None if p not in state else _state_to_host(family, state[p])
         torch.cuda.synchronize()
         self.slots[self.live] = slot
         self.live = None
@@ -217,6 +258,11 @@ class AutomodelWorker:
     def _require_tenant(self, tenant: str) -> None:
         if tenant != self.live and tenant not in self.slots:
             raise ValueError(f"tenant {tenant} is not in this group")
+
+    def _drop_state(self, p: torch.nn.Parameter) -> None:
+        """Forget every family's state for `p` (a tenant leaves the tensors)."""
+        for optimizer in self.optimizers.values():
+            optimizer.state.pop(p, None)
 
     # --- passes and steps ---------------------------------------------------
     def forward_backward(self, tenant: str, shard: Batch, clip: Optional[Tuple[float, float]]) -> Dict[str, Any]:
@@ -239,23 +285,30 @@ class AutomodelWorker:
         out["swap_seconds"] = swap
         return out
 
-    def optim_step(self, tenant: str, adam: AdamParams) -> Dict[str, float]:
+    def optim_step(self, tenant: str, params: OptimParams) -> Dict[str, float]:
         """Raises NonFiniteGradNorm. The norm is all-reduced, so every rank
-        takes the same branch: all step or all refuse."""
+        takes the same branch: all step or all refuse. `params` is the tenant's
+        own family (the service checked)."""
+        family = self.tenant_lora[tenant].optimizer
+        assert params.type == family, (tenant, family, params.type)   # an invariant, not validation: the API refused mismatches
         swap = self._swap_to(tenant)
-        for group in self.optimizer.param_groups:
-            group["lr"] = adam.learning_rate
-            group["betas"] = (adam.beta1, adam.beta2)
-            group["eps"] = adam.eps
-            group["weight_decay"] = adam.weight_decay
-        # max_norm inf computes the norm and scales by 1: grad_clip_norm 0 means no clipping
-        max_norm = adam.grad_clip_norm if adam.grad_clip_norm > 0 else math.inf
+        optimizer = self.optimizers[family]
+        for group in optimizer.param_groups:
+            group["lr"] = params.learning_rate
+            if isinstance(params, AdamParams):
+                group["betas"] = (params.beta1, params.beta2)
+                group["eps"] = params.eps
+                group["weight_decay"] = params.weight_decay
+            else:
+                group["mu"] = params.beta1   # dion's momentum coefficient; weight decay stays 0 (constructor)
+        # max_norm inf computes the norm and scales by 1: a nonpositive grad_clip_norm means no clipping
+        max_norm = params.grad_clip_norm if params.grad_clip_norm > 0 else math.inf
         norm = float(clip_grad_norm(max_norm, [self.model]))
         if not math.isfinite(norm):
-            self.optimizer.zero_grad(set_to_none=True)
+            optimizer.zero_grad(set_to_none=True)
             raise NonFiniteGradNorm(f"grad norm is {norm}; the optimizer step was not taken and the grads were zeroed")
-        self.optimizer.step()
-        self.optimizer.zero_grad(set_to_none=True)
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
         return {"grad_norm": norm, "swap_seconds": swap}
 
     # --- state in and out ---------------------------------------------------
@@ -269,65 +322,75 @@ class AutomodelWorker:
         slot = self.slots[tenant]
         return {n: _full(_on_device(p, slot.weights[n])).float() for n, p in self.lora_params}
 
-    def _adam_state(self, tenant: str) -> Dict[str, Dict[str, torch.Tensor]]:
-        """The tenant's full AdamW moments and step per LoRA parameter on CPU,
-        keyed as the adapter is; empty until its first step. torch's Adam
-        creates a parameter's state at its first step with a grad
-        (`torch/optim/adam.py`, `if p.grad is not None`), so the state is all
-        or none here, every LoRA parameter being in the forward path; a
-        partial state is a bug and is refused, never written."""
+    def _optimizer_state(self, tenant: str) -> Tuple[str, Dict[str, Dict[str, torch.Tensor]]]:
+        """The tenant's family and its full optimizer state per LoRA parameter
+        on CPU, keyed as the adapter is; empty until its first step. Both
+        optimizers create a parameter's state at its first step with a grad
+        (`torch/optim/adam.py` and dion's `muon.py` `_create_ortho_tasks`, each
+        `if p.grad is not None`), so the state is all or none here, every LoRA
+        parameter being in the forward path; a partial state is a bug and is
+        refused, never written."""
         self._require_tenant(tenant)
+        family = self.tenant_lora[tenant].optimizer
+        keys, shards = STATE_KEYS[family], SHARD_KEYS[family]
         per_param: list   # (name, param, that param's state as local shards, or None)
         if tenant == self.live:
-            state = self.optimizer.state
-            per_param = [(n, p, {k: _local(state[p][k]) for k in ADAM_STATE_KEYS} if p in state else None)
+            state = self.optimizers[family].state
+            per_param = [(n, p, {k: _local(state[p][k]) for k in keys} if p in state else None)
                          for n, p in self.lora_params]
         else:
             slot = self.slots[tenant]
-            per_param = [(n, p, slot.adam[n]) for n, p in self.lora_params]
+            per_param = [(n, p, slot.optim[n]) for n, p in self.lora_params]
         stepped = [st is not None for _, _, st in per_param]
         if any(stepped) and not all(stepped):
-            raise RuntimeError(f"AdamW holds state for {sum(stepped)} of {len(stepped)} LoRA parameters; "
+            raise RuntimeError(f"{family} holds state for {sum(stepped)} of {len(stepped)} LoRA parameters; "
                                "a checkpoint of it would be partial")
-        return {peft_key(n): {k: _full(st[k] if k == "step" else _on_device(p, st[k])) for k in ADAM_STATE_KEYS}
-                for n, p, st in per_param if st is not None}
+        return family, {peft_key(n): {k: _full(_on_device(p, st[k]) if k in shards else st[k]) for k in keys}
+                        for n, p, st in per_param if st is not None}
 
     def save_state(self, tenant: str, root: str) -> None:
-        """Rank 0 writes the tenant's adapter (`hf_adapter/`) and the AdamW
-        state of its LoRA parameters (`optimizer/`) under `root` (adapter.py),
-        without swapping the tenant in. Both gathers are collective: call it
-        on all ranks at once."""
+        """Rank 0 writes the tenant's adapter (`hf_adapter/`) and the optimizer
+        state of its LoRA parameters (`optimizer/`, its family's file) under
+        `root` (adapter.py), without swapping the tenant in. Both gathers are
+        collective: call it on all ranks at once."""
         lora = self.lora_state(tenant)
-        adam = self._adam_state(tenant)
+        family, state = self._optimizer_state(tenant)
         if self.rank == 0:
             write_peft_adapter(lora, self.tenant_lora[tenant], self.base_model, Path(root) / HF_ADAPTER_DIRNAME)
-            write_adam_state(adam, Path(root) / OPTIMIZER_DIRNAME)
+            write_optimizer_state(family, state, Path(root) / OPTIMIZER_DIRNAME)
 
     def load_state(self, tenant: str, adapter_dir: str, optimizer_dir: Optional[str]) -> None:
         """Copy the adapter's weights into the tenant's shards and, given
-        optimizer_dir, the AdamW state; without it the optimizer keeps what it
-        has (fresh on a tenant that has not trained). The files' keys must
-        be exactly this model's LoRA parameters: StateMismatch before anything
-        is copied. Collective: call it on all ranks at once."""
+        optimizer_dir, the optimizer state; without it the optimizer keeps what
+        it has (fresh on a tenant that has not trained). The files' keys must
+        be exactly this model's LoRA parameters and the state file the tenant's
+        family's: StateMismatch before anything is copied.
+        Collective: call it on all ranks at once."""
         self._require_tenant(tenant)
+        family = self.tenant_lora[tenant].optimizer
         weights = load_file(str(Path(adapter_dir) / ADAPTER_WEIGHTS_FILE))
         self._require_keys(weights, "adapter")
-        adam = None if optimizer_dir is None else read_adam_state(Path(optimizer_dir))
-        if adam:
-            self._require_keys(adam, "optimizer state")
+        saved = None if optimizer_dir is None else read_optimizer_state(Path(optimizer_dir))
+        if saved is not None:
+            saved_family, state = saved
+            if saved_family != family:
+                raise StateMismatch(f"the checkpoint's optimizer state is {saved_family}'s but this model's optimizer is {family}")
+            if state:
+                self._require_keys(state, "optimizer state")
         self._swap_to(tenant)
         with torch.no_grad():
             for n, p in self.lora_params:
                 _copy_full(p, weights[peft_key(n)].float())
-        if adam is None:
+        if saved is None:   # a weights-only load: the optimizer keeps what it has (a request shape, not a gap)
             return
+        optimizer = self.optimizers[family]
         for n, p in self.lora_params:
-            if not adam:   # saved before the first step: no state to restore
-                self.optimizer.state.pop(p, None)
+            if not state:   # saved before the first step: no state to restore
+                optimizer.state.pop(p, None)
                 continue
-            st = adam[peft_key(n)]
-            self.optimizer.state[p] = {"exp_avg": _like(p, st["exp_avg"]), "exp_avg_sq": _like(p, st["exp_avg_sq"]),
-                                       "step": st["step"].clone()}
+            st = state[peft_key(n)]
+            optimizer.state[p] = {**{k: _like(p, st[k]) for k in SHARD_KEYS[family]},
+                                  **{k: st[k].clone() for k in _scalar_keys(family)}}
 
     def _require_keys(self, have: Dict[str, Any], what: str) -> None:
         want = {peft_key(n) for n, _ in self.lora_params}
@@ -453,6 +516,23 @@ def _like(p: torch.Tensor, full: torch.Tensor) -> torch.Tensor:
     if isinstance(p, DTensor):
         return distribute_tensor(full.to(p.to_local().device), p.device_mesh, p.placements)
     return full.to(p.device)
+
+
+def _scalar_keys(family: str) -> Tuple[str, ...]:
+    """The family's state keys that are not laid out as the parameter (AdamW's `step`)."""
+    return tuple(k for k in STATE_KEYS[family] if k not in SHARD_KEYS[family])
+
+
+def _state_to_host(family: str, state: OptimState) -> OptimState:
+    """One parameter's optimizer state as a slot holds it: shards pinned on the host, scalars cloned."""
+    return {**{k: _pinned(_local(state[k])) for k in SHARD_KEYS[family]},
+            **{k: state[k].clone() for k in _scalar_keys(family)}}
+
+
+def _state_on_device(p: torch.Tensor, family: str, slot_state: OptimState) -> OptimState:
+    """The inverse of _state_to_host: shards laid out as `p` is, scalars cloned."""
+    return {**{k: _on_device(p, slot_state[k]) for k in SHARD_KEYS[family]},
+            **{k: slot_state[k].clone() for k in _scalar_keys(family)}}
 
 
 def _copy_full(p: torch.Tensor, full: torch.Tensor) -> None:

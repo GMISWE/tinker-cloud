@@ -27,7 +27,6 @@ from ..core.dependencies import (
 )
 from ..storage import MetadataStorage, FuturesStorage
 from ..models.requests import (
-    SERVED_OPTIMIZER,
     CreateModelRequest,
     DeleteModelRequest,
     UnloadModelRequest,
@@ -87,14 +86,13 @@ async def create_model(
         raise HTTPException(status_code=400, detail=f"{MODEL_ID_HEADER} {x_model_id!r} does not name this engine ({engine_name()})")
     model_id = x_model_id
 
-    # API-CONTRACT: only AdamW is served; a Dimuon run must fail here, not
-    # train under AdamW with its learning rate ignored.
-    if request.optimizer_config.type != SERVED_OPTIMIZER:
-        raise HTTPException(
-            status_code=400,
-            detail=f"optimizer_config.type {request.optimizer_config.type!r} is not supported "
-                   f"on this server; only {SERVED_OPTIMIZER!r} is",
-        )
+    # The family is fixed for the model's life; a family the
+    # backend does not serve fails here, not by training under another one.
+    try:
+        request.optimizer_config.check()
+        service.require_optimizer(request.optimizer_config)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     async def execute():
         try:
@@ -107,6 +105,7 @@ async def create_model(
                 metadata_storage=metadata_storage,
                 training_clients=training_clients,
                 training_runs_metadata=training_runs_metadata,
+                optimizer_config=request.optimizer_config,
             )
         except Exception:
             # the gateway recorded the model at submit; a create that fails is reported before the future is
@@ -214,7 +213,8 @@ async def get_info(
             model_data=ModelData(**result["model_data"]),
             is_lora=result["is_lora"],
             lora_rank=result["lora_rank"],
-            model_name=result["model_name"]
+            model_name=result["model_name"],
+            optimizer_config=result["optimizer_config"],
         )
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))

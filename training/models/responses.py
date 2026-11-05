@@ -310,7 +310,7 @@ class GetInfoResponse(BaseModel):
     is_lora: bool = Field(..., description="Whether LoRA is enabled")
     lora_rank: Optional[int] = Field(default=None, description="LoRA rank if enabled")
     model_name: str = Field(..., description="Model name")
-    optimizer_config: Dict[str, Any] = Field(default_factory=lambda: {"type": "adamw"}, description="The one optimizer family this server runs")
+    optimizer_config: Dict[str, Any] = Field(..., description="The model's optimizer family as recorded at create")
 
 
 class DeleteModelResponse(BaseModel):
@@ -465,7 +465,7 @@ class WeightsInfoResponse(BaseModel):
     base_model: str = Field(..., description="Base model path")
     is_lora: bool = Field(..., description="Whether LoRA is enabled")
     lora_rank: Optional[int] = Field(default=None, description="LoRA rank if enabled")
-    optimizer_config: Dict[str, Any] = Field(default_factory=lambda: {"type": "adamw"}, description="The one optimizer family this server runs")
+    optimizer_config: Dict[str, Any] = Field(..., description="The model's optimizer family as recorded at create")
 
 
 # ============= Result validation at the futures boundary =============

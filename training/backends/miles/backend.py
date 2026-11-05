@@ -19,7 +19,7 @@ import ray
 from ..base import BackendError, BackendHandle, SampleRequestError, TrainingBackend, UnsupportedFeatureError
 from ...utils.model_config import read_raw_hf_config
 from ..objectives import classification_spec
-from ...models.requests import Datum
+from ...models.requests import Datum, OptimParams
 from .config import NO_CLIP_EPS_HIGH, MilesConfig
 from ...core import routing
 from ...core.loss_registry import clip_thresholds
@@ -253,6 +253,7 @@ def _refuse_topk(backend: str, topk_sample_logprobs: int, topk_prompt_logprobs: 
 class MilesBackend(TrainingBackend[MilesHandle]):
     # sft_loss / policy_loss; PPO clip range is a boot-time Megatron arg (see forward_backward).
     SUPPORTED_LOSS_FNS = frozenset({"cross_entropy", "importance_sampling", "ppo"})
+    SUPPORTED_OPTIMIZERS = frozenset({"adamw"})   # no Muon on this path
     """Thin adapter over existing Miles integration code (model_service.py / training_service.py)."""
     config: MilesConfig
 
@@ -294,6 +295,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
         rl_config: Optional[Dict[str, Any]] = None,
         rollout_config: Optional[Dict[str, Any]] = None,
         native_root: Optional[Path] = None,
+        optimizer: str = "adamw",
     ) -> MilesHandle:
         classification = classification_spec(await asyncio.to_thread(read_raw_hf_config, base_model))
         if classification is not None:
@@ -1117,11 +1119,11 @@ class MilesBackend(TrainingBackend[MilesHandle]):
     async def apply_optimizer_step(
         self,
         handle: MilesHandle,
-        learning_rate: Optional[float] = None,
-        adam_params: Optional[Dict[str, Any]] = None,
+        optim_params: Optional[OptimParams] = None,
     ) -> Dict[str, Any]:
-        # adam_params accepted for contract uniformity (P4); Miles applies lr
-        # only — betas/eps are Megatron args fixed at creation.
+        # Miles applies the learning rate only: betas/eps are Megatron args
+        # fixed at creation.
+        learning_rate = optim_params.learning_rate if optim_params is not None else None
 
         async def _run() -> Dict[str, Any]:
             # TinkerTrainGroup: apply_optimizer_step(learning_rate) fans out to
