@@ -22,7 +22,7 @@ import logging
 from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 
 import torch
 
@@ -30,7 +30,7 @@ from ..base import BackendError, BackendHandle, SampleRequestError, TrainingBack
 from ...utils.model_config import read_raw_hf_config
 from ..objectives import classification_spec
 from .config import VerlConfig
-from ...models.requests import Datum
+from ...models.requests import AdamParams, Datum, OptimParams
 from ...checkpoints.interchange import (
     HF_ADAPTER_DIRNAME,
     find_hf_adapter,
@@ -75,6 +75,8 @@ class VerlBackend(TrainingBackend[VerlHandle]):
     config: VerlConfig
 
     SUPPORTED_LOSS_FNS = frozenset({"cross_entropy", "importance_sampling", "ppo"})  # losses.LOSS_FNS
+
+    SUPPORTED_OPTIMIZERS = frozenset({"adamw"})   # no Muon on this path
     """veRL backend using upstream TinkerTrainingWorker split primitives."""
 
     def __init__(self, overrides: Optional[Dict[str, Any]] = None):
@@ -110,6 +112,7 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         rl_config: Optional[Dict[str, Any]] = None,
         rollout_config: Optional[Dict[str, Any]] = None,
         native_root: Optional[Path] = None,
+        optimizer: str = "adamw",
     ) -> VerlHandle:
         classification = classification_spec(await asyncio.to_thread(read_raw_hf_config, base_model))
         if classification is not None:
@@ -198,29 +201,21 @@ class VerlBackend(TrainingBackend[VerlHandle]):
     async def apply_optimizer_step(
         self,
         handle: VerlHandle,
-        learning_rate: Optional[float] = None,
-        adam_params: Optional[Dict[str, Any]] = None,
+        optim_params: Optional[OptimParams] = None,
     ) -> Dict[str, Any]:
         async with handle._lock:
             try:
                 await self._quiesce_samplers(handle)
                 await asyncio.to_thread(self._ensure_training_ready, handle)
                 params: Dict[str, Any] = {}
-                if learning_rate is not None:
-                    params["lr"] = float(learning_rate)
-                ap = adam_params or {}
-                if ap.get("beta1") is not None or ap.get("beta2") is not None:
-                    params["betas"] = (float(ap.get("beta1", 0.9)), float(ap.get("beta2", 0.95)))
-                if ap.get("eps") is not None:
-                    params["eps"] = float(ap["eps"])
-                if ap.get("weight_decay") is not None:
-                    params["weight_decay"] = float(ap["weight_decay"])
-                unsupported = {k: v for k, v in ap.items()
-                               if k not in ("beta1", "beta2", "eps", "weight_decay", "grad_clip_norm") and v is not None}
-                if unsupported:
-                    logger.warning("verl optim_step ignoring AdamParams %s", sorted(unsupported))
-                if ap.get("grad_clip_norm") is not None:
-                    logger.warning("verl optim_step: grad_clip_norm set at engine build, not per step")
+                if optim_params is not None:
+                    adam = cast(AdamParams, optim_params)   # the only family this backend declares
+                    params["lr"] = float(adam.learning_rate)
+                    params["betas"] = (float(adam.beta1), float(adam.beta2))
+                    params["eps"] = float(adam.eps)
+                    params["weight_decay"] = float(adam.weight_decay)
+                    if adam.grad_clip_norm > 0:
+                        logger.warning("verl optim_step: grad_clip_norm is set at engine build, not per step")
 
                 metrics = await asyncio.to_thread(
                     _wg_scalar_call, handle.worker_group.optimizer_step, params or None,

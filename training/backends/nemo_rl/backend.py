@@ -26,7 +26,7 @@ from ..base import BackendError, BackendHandle, SampleRequestError, TrainingBack
 from ...utils.model_config import read_raw_hf_config
 from ..objectives import classification_spec
 from ..http_pool import HttpClientPool
-from ...models.requests import Datum
+from ...models.requests import Datum, OptimParams
 from .config import NemoRLConfig
 from ...core.loss_registry import clip_thresholds
 from ...checkpoints.interchange import export_hf_adapter, stage_hf_adapter
@@ -91,6 +91,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
     config: NemoRLConfig
     # TinkerSumCELoss / TinkerSumPGLoss; cispo and dro have no NeMo RL loss.
     SUPPORTED_LOSS_FNS = frozenset({"cross_entropy", "importance_sampling", "ppo"})
+    SUPPORTED_OPTIMIZERS = frozenset({"adamw"})   # no Muon on this path
     """
     NeMo RL backend — uses Policy.train() push-mode API.
 
@@ -138,6 +139,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         rl_config: Optional[Dict[str, Any]] = None,
         rollout_config: Optional[Dict[str, Any]] = None,
         native_root: Optional[Path] = None,
+        optimizer: str = "adamw",
     ) -> NemoRLHandle:
         classification = classification_spec(await asyncio.to_thread(read_raw_hf_config, base_model))
         if classification is not None:
@@ -429,8 +431,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
     async def apply_optimizer_step(
         self,
         handle: NemoRLHandle,
-        learning_rate: Optional[float] = None,
-        adam_params: Optional[Dict[str, Any]] = None,
+        optim_params: Optional[OptimParams] = None,
     ) -> Dict[str, Any]:
         """
         Execute single policy.train() call with all buffered data.
@@ -508,14 +509,12 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                 num_buffered, handle.model_id,
             )
 
-            if learning_rate is not None:
-                _set_learning_rate(handle.policy, learning_rate)
-
-            # P4: betas/eps are fixed at creation (builder defaults match the
-            # Tinker AdamParams contract: 0.9/0.95/1e-8); the worker exposes no
-            # setter, so warn loudly if a client requests different values.
-            if adam_params:
-                _warn_on_adam_mismatch(handle, adam_params)
+            if optim_params is not None:
+                _set_learning_rate(handle.policy, optim_params.learning_rate)
+                # betas/eps are fixed at creation (builder defaults match the
+                # Tinker AdamParams contract: 0.9/0.95/1e-8); the worker exposes no
+                # setter, so warn loudly if a client requests different values.
+                _warn_on_adam_mismatch(handle, optim_params.model_dump())
 
             # Serialize GPU lifecycle: sleep vLLM → train → refit.
             # Pipelined SFT loops fire multiple optim_step calls concurrently;

@@ -33,7 +33,7 @@ mv /tmp/tinker-cloud/tests /app/tests
 mkdir -p /app/scripts && mv /tmp/tinker-cloud/scripts/gates /app/scripts/gates   # always in the bundle: a missing dir is a broken bundle
 
 if [ "$PROFILE" = automodel ]; then
-  /opt/venv/bin/python -c 'import nemo_automodel, torch, ray; print("training env OK: torch", torch.__version__, "ray", ray.__version__)'
+  /opt/venv/bin/python -c 'import nemo_automodel, torch, ray, dion; print("training env OK: torch", torch.__version__, "ray", ray.__version__, "dion", dion.__file__)'
   /opt/vllm-env/bin/vllm-api-server --check
 fi
 

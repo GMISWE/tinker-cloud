@@ -9,6 +9,7 @@ import logging
 from typing import Dict, List, Any, Optional
 
 from ..backends.base import TrainingBackend, UnsupportedFeatureError
+from ..models.requests import OptimParams
 
 logger = logging.getLogger(__name__)
 
@@ -74,38 +75,31 @@ class TrainingService:
         logger.info("Forward-backward completed for %s", model_id)
         return result
 
+    @staticmethod
+    def require_optimizer_family(client_info: Dict[str, Any], optim_params: OptimParams) -> None:
+        """Raises ValueError (a 400) naming both families when the step's
+        parameters are not the model's family."""
+        family = client_info["optimizer_config"]["type"]
+        if optim_params.type != family:
+            raise ValueError(f"optim_step carries {optim_params.type} parameters but the model's optimizer is {family}")
+
     async def apply_optimizer_step(
         self,
         model_id: str,
         client_info: Dict[str, Any],
-        adam_params: Any = None,
+        optim_params: Optional[OptimParams] = None,
     ) -> Dict[str, Any]:
         """
-        Apply optimizer step to update model weights.
+        Apply optimizer step to update model weights. `optim_params` passed
+        `require_optimizer_family`.
         """
         logger.info("Optimizer step for %s", model_id)
 
         handle = client_info["backend_handle"]
+        if optim_params is not None:
+            logger.info("Setting learning rate to %s for %s", optim_params.learning_rate, model_id)
 
-        # Extract learning rate from adam_params (Tinker API pattern)
-        learning_rate = None
-        adam_params_dict = None
-        if adam_params is not None:
-            learning_rate = adam_params.learning_rate
-            logger.info("Setting learning rate to %s for %s", learning_rate, model_id)
-            # P4: forward the FULL AdamParams so backends can honor or at least
-            # detect-and-warn on beta/eps/clip values they cannot apply.
-            adam_params_dict = {
-                "beta1": adam_params.beta1,
-                "beta2": adam_params.beta2,
-                "eps": adam_params.eps,
-                "weight_decay": adam_params.weight_decay,
-                "grad_clip_norm": adam_params.grad_clip_norm,
-            }
-
-        result = await self.backend.apply_optimizer_step(
-            handle, learning_rate=learning_rate, adam_params=adam_params_dict,
-        )
+        result = await self.backend.apply_optimizer_step(handle, optim_params)
 
         # Mirror top-level grad_norm into the metrics dict: the SDK's
         # OptimStepResponse carries only `metrics` (upstream shape), so a

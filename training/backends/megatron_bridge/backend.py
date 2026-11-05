@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from ..base import BackendError, BackendHandle, TrainingBackend
-from ...models.requests import Datum
+from ...models.requests import Datum, OptimParams
 from ...utils.model_config import read_raw_hf_config
 from ..objectives import Objective, classification_spec
 from .config import MegatronBridgeConfig
@@ -49,6 +49,8 @@ class MegatronBridgeBackend(TrainingBackend[MegatronBridgeHandle]):
     config: MegatronBridgeConfig
 
     SUPPORTED_LOSS_FNS = frozenset({"cross_entropy", "classification_ce"})
+
+    SUPPORTED_OPTIMIZERS = frozenset({"adamw"})   # no Muon on this path
     """Megatron-native classification backend (Ray-actor delegation, no gen plane)."""
 
     def __init__(self, overrides: Optional[Dict[str, Any]] = None):
@@ -74,6 +76,7 @@ class MegatronBridgeBackend(TrainingBackend[MegatronBridgeHandle]):
         rl_config: Optional[Dict[str, Any]] = None,
         rollout_config: Optional[Dict[str, Any]] = None,
         native_root: Optional[Path] = None,
+        optimizer: str = "adamw",
     ) -> MegatronBridgeHandle:
         """Spawn a GPU worker actor that builds the classifier + LoRA + optimizer."""
         classification = classification_spec(await asyncio.to_thread(read_raw_hf_config, base_model))
@@ -149,10 +152,10 @@ class MegatronBridgeBackend(TrainingBackend[MegatronBridgeHandle]):
     async def apply_optimizer_step(
         self,
         handle: MegatronBridgeHandle,
-        learning_rate: Optional[float] = None,
-        adam_params: Optional[Dict[str, Any]] = None,
+        optim_params: Optional[OptimParams] = None,
     ) -> Dict[str, Any]:
-        # adam_params accepted for contract uniformity; betas/eps are fixed at creation.
+        # the learning rate only; betas/eps are fixed at creation
+        learning_rate = optim_params.learning_rate if optim_params is not None else None
         return await _get(handle.worker.apply_optimizer_step.remote(learning_rate))
 
     # --- generation plane: N/A for classification ---

@@ -18,6 +18,8 @@ from tinkercloud.training.checkpoints import (
 from tinkercloud.training.checkpoints.store import is_expired
 from tinkercloud.training.utils import signed_urls
 
+ADAMW = {"type": "adamw"}   # the family record every save carries
+
 E = CheckpointKind.EXTERNAL_WEIGHTS
 
 
@@ -30,7 +32,7 @@ class TestStoreKind:
             CheckpointRef.parse("tinker://m/external/hf1")  # the SDK type name is not a kind
 
     def test_files_lists_regular_files_relative_to_root(self, store):
-        t = store.begin_save("m", E, "hf1")
+        t = store.begin_save("m", E, "hf1", optimizer_config=ADAMW)
         (t.root / "a.json").write_text("{}")
         (t.root / "sub").mkdir()
         (t.root / "sub" / "b.bin").write_bytes(b"xy")
@@ -43,16 +45,16 @@ class TestStoreKind:
 
 class TestTtl:
     def test_ttl_is_recorded_and_listed(self, store):
-        t = store.begin_save("m", E, "hf1", ttl_seconds=3600)
+        t = store.begin_save("m", E, "hf1", ttl_seconds=3600, optimizer_config=ADAMW)
         store.complete(t.ref)
         rec = store.get(t.ref)
         delta = datetime.fromisoformat(rec["expires_at"]) - datetime.now(timezone.utc)
         assert timedelta(minutes=59) < delta <= timedelta(hours=1)
         assert store.list("m")[0]["expires_at"] == rec["expires_at"]
-        assert store.begin_save("m", E, "forever").ref and store.get(CheckpointRef.make("m", E, "forever"))["expires_at"] is None
+        assert store.begin_save("m", E, "forever", optimizer_config=ADAMW).ref and store.get(CheckpointRef.make("m", E, "forever"))["expires_at"] is None
 
     def test_expired_reads_as_not_found(self, store):
-        t = store.begin_save("m", E, "hf1", ttl_seconds=3600)
+        t = store.begin_save("m", E, "hf1", ttl_seconds=3600, optimizer_config=ADAMW)
         store.complete(t.ref)
         rec = store.get(t.ref)
         assert not is_expired(rec)

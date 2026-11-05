@@ -15,7 +15,7 @@ from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 from typing import Dict, Tuple
 
-from ..models.requests import SERVED_OPTIMIZER, ForwardRequest, ForwardBackwardRequest, OptimStepRequest
+from ..models.requests import ForwardRequest, ForwardBackwardRequest, OptimStepRequest
 from ..models.responses import AsyncOperationResponse
 from ..services.training_service import TrainingService
 from ..core.task_manager import TaskManager
@@ -163,25 +163,22 @@ async def optim_step(
             status_code=404,
             detail=f"Model {request.model_id} not found"
         )
-    # The SDK sends Adam as `adam_params` and every other family as
-    # `optimizer_params`. Only AdamW is served (API-CONTRACT UNSUPPORTED rows);
-    # anything else fails loudly instead of stepping AdamW at a stale rate.
-    if request.optimizer_params is not None:
-        raise HTTPException(
-            status_code=400,
-            detail=f"optimizer_params.type {request.optimizer_params.type!r} is not supported "
-                   f"on this server; only {SERVED_OPTIMIZER!r} (adam_params) is",
-        )
-
-    # Get client info
     client_info = training_clients[request.model_id]
+    # The SDK sends Adam as `adam_params` and every other family as
+    # `optimizer_params`; the parameters must be the model's own family
+    # or the step fails here, not under the wrong optimizer.
+    try:
+        optim_params = request.optim_params()
+        service.require_optimizer_family(client_info, optim_params)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     # Business logic wrapped in async task
     async def execute_optim_step():
         return await service.apply_optimizer_step(
             model_id=request.model_id,
             client_info=client_info,
-            adam_params=request.adam_params,
+            optim_params=optim_params,
         )
 
     # Create background task

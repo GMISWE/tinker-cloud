@@ -15,6 +15,7 @@ from typing import Dict, Any, Optional
 
 from ..backends.base import TrainingBackend
 from ..checkpoints import CheckpointKind, CheckpointRef, CheckpointStore
+from ..models.requests import OptimizerConfig
 from ..storage import MetadataStorage
 
 logger = logging.getLogger(__name__)
@@ -64,7 +65,7 @@ class CheckpointService:
         name = path or f"checkpoint_{int(time.time())}"
         ticket = self.store.begin_save(
             model_id, CheckpointKind.WEIGHTS, name,
-            weight_version=handle.weight_version,
+            weight_version=handle.weight_version, optimizer_config=client_info["optimizer_config"],
         )
         logger.info("[%s] Saving weights for %s to %s (step %s)", request_id, model_id, ticket.ref.uri, ticket.step)
         await self._save(handle, ticket)
@@ -86,6 +87,7 @@ class CheckpointService:
         ticket = self.store.begin_save(
             model_id, CheckpointKind.EXTERNAL_WEIGHTS, name,
             weight_version=handle.weight_version, ttl_seconds=ttl_seconds,
+            optimizer_config=client_info["optimizer_config"],
         )
         logger.info("[%s] Exporting external weights for %s to %s (step %s)", request_id, model_id, ticket.ref.uri, ticket.step)
         try:
@@ -97,6 +99,21 @@ class CheckpointService:
         size_bytes = sum(os.path.getsize(p) for p in self.store.files(ticket.ref).values())
         logger.info("[%s] External weights exported: %s (%d bytes)", request_id, ticket.ref.uri, size_bytes)
         return {"path": ticket.ref.uri, "size_bytes": size_bytes, "type": "save_weights_external"}
+
+    def require_load_family(self, client_info: Dict[str, Any], ref: CheckpointRef, optimizer: bool,
+                            optimizer_config: Optional[OptimizerConfig]) -> None:
+        """Raises ValueError (a 400) naming both families when a load would
+        mix them: a declared `optimizer_config` that
+        is not the model's, or optimizer state from a checkpoint of another
+        family. A weights-only load crosses families freely."""
+        family = client_info["optimizer_config"]["type"]
+        if optimizer_config is not None and optimizer_config.type != family:
+            raise ValueError(f"load_weights declares optimizer {optimizer_config.type} but the model's optimizer is {family}")
+        if optimizer:
+            saved = self.store.optimizer_config(ref)["type"]
+            if saved != family:
+                raise ValueError(f"checkpoint {ref.uri} holds {saved} optimizer state but the model's optimizer is {family}; "
+                                 "load it with optimizer=false")
 
     async def load_weights(
         self,
@@ -162,6 +179,7 @@ class CheckpointService:
             name = f"{model_id}_{sampling_session_seq_id}_{uuid.uuid4().hex[:8]}"
             ticket = self.store.begin_save(
                 model_id, CheckpointKind.SAMPLER_WEIGHTS, name, persist=False, weight_version=weight_version,
+                optimizer_config=client_info["optimizer_config"],
             )
             logger.info("[%s] Ephemeral sampler save for %s: %s", request_id, model_id, ticket.ref.uri)
             await self._save(handle, ticket)
@@ -173,6 +191,7 @@ class CheckpointService:
         name = path or name or f"sampler_{int(time.time())}"
         ticket = self.store.begin_save(
             model_id, CheckpointKind.SAMPLER_WEIGHTS, name, weight_version=weight_version,
+            optimizer_config=client_info["optimizer_config"],
         )
         logger.info("[%s] Saving sampler weights for %s to %s (step %s)", request_id, model_id, ticket.ref.uri, ticket.step)
         await self._save(handle, ticket)

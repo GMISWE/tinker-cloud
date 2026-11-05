@@ -41,7 +41,7 @@ from tinkercloud.training.backends.automodel.backend import AutomodelBackend  # 
 from tinkercloud.training.backends.automodel.group import sweep_leftovers  # noqa: E402
 from tinkercloud.training.backends.base import BackendError  # noqa: E402
 from tinkercloud.training.core import routing  # noqa: E402
-from tinkercloud.training.models.requests import Datum  # noqa: E402
+from tinkercloud.training.models.requests import AdamParams, Datum  # noqa: E402
 from tests.datums import random_ce_datum  # noqa: E402
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -140,7 +140,7 @@ def test_lifecycle_through_the_backend(caplog, tmp_path):
             assert a["metrics"] == {"loss:sum": a["loss"], "clamped_positions:sum": 0, "swap_seconds:max": 0.0}, \
                 "m was swapped in by at_init's forward; the passes behind it swap nothing"
 
-            step = await backend.apply_optimizer_step(handle, 1e-3, ADAM)
+            step = await backend.apply_optimizer_step(handle, AdamParams(learning_rate=1e-3, **ADAM))
             assert step["grad_norm"] > 0
             assert step["weight_version"] == handle.weight_version == 1
             after = await backend.forward(handle, x, "cross_entropy")
@@ -155,11 +155,11 @@ def test_lifecycle_through_the_backend(caplog, tmp_path):
             # The worker's own message reaches the client, not Ray's traceback.
             await backend.forward_backward(handle, datums((37, 64, 5), weight=3e38), "cross_entropy")
             with pytest.raises(BackendError, match=r"grad norm is (inf|nan); the optimizer step was not taken") as err:
-                await backend.apply_optimizer_step(handle, 1e-3, ADAM)
+                await backend.apply_optimizer_step(handle, AdamParams(learning_rate=1e-3, **ADAM))
             assert "ray::" not in str(err.value) and len(str(err.value)) < 300
             assert handle.weight_version == 1
             await backend.forward_backward(handle, x, "cross_entropy")
-            assert (await backend.apply_optimizer_step(handle, 1e-3, ADAM))["grad_norm"] > 0
+            assert (await backend.apply_optimizer_step(handle, AdamParams(learning_rate=1e-3, **ADAM)))["grad_norm"] > 0
             assert handle.weight_version == 2
         finally:
             await backend.delete_model(handle)
@@ -224,7 +224,7 @@ def test_checkpoint_round_trip_through_fresh_models(tmp_path):
 
     async def step(h):
         await backend.forward_backward(h, x, "cross_entropy")
-        await backend.apply_optimizer_step(h, 1e-3, ADAM)
+        await backend.apply_optimizer_step(h, AdamParams(learning_rate=1e-3, **ADAM))
 
     async def go():
         h = await model("m")
@@ -293,7 +293,7 @@ def test_two_tenants_share_a_group_and_match_their_solo_runs(tmp_path):
     async def one_step(h, batch):
         """(loss, grad_norm, swap seconds of the pass and the step)."""
         r = await backend.forward_backward(h, batch, "cross_entropy")
-        s = await backend.apply_optimizer_step(h, 1e-3, ADAM)
+        s = await backend.apply_optimizer_step(h, AdamParams(learning_rate=1e-3, **ADAM))
         return r["loss"], s["grad_norm"], r["metrics"]["swap_seconds:max"] + s["metrics"]["swap_seconds"]
 
     async def solo(name, lora):

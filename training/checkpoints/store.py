@@ -211,11 +211,13 @@ class CheckpointStore:
         persist: bool = True,
         weight_version: Optional[int] = None,
         ttl_seconds: Optional[int] = None,
+        optimizer_config: Dict[str, Any],
     ) -> SaveTicket:
         """Record a pending save and hand back where to write. A name already
         recorded for this model and kind is overwritten by the new save (the
         API lets a client save twice under one name); its old counter value is
-        not reused. ``ttl_seconds`` sets ``expires_at``; None never expires."""
+        not reused. ``ttl_seconds`` sets ``expires_at``; None never expires.
+        ``optimizer_config`` is the model's optimizer family record."""
         ref = CheckpointRef.make(model_id, kind, name)
         root = self.root(ref)
         step = self.next_step(model_id) if persist else None
@@ -230,9 +232,21 @@ class CheckpointStore:
             "model_id": ref.model_id, "kind": ref.kind.value, "name": ref.name,
             "status": CheckpointStatus.PENDING.value, "step": step, "ephemeral": not persist,
             "weight_version": weight_version, "error": None, "completed_at": None,
-            "expires_at": expires_at,
+            "expires_at": expires_at, "optimizer_config": optimizer_config,
         })
         return SaveTicket(ref=ref, root=root, step=step)
+
+    def optimizer_config(self, ref: CheckpointRef) -> Dict[str, Any]:
+        """The optimizer family recorded with a checkpoint, as weights_info
+        echoes it. Every record this store writes carries the field; one
+        without it is from before the field existed, when AdamW was the only
+        family the server had. Raises KeyError for an unknown ref."""
+        rec = self.get(ref)
+        if rec is None:
+            raise KeyError(f"no checkpoint record for {ref.uri}")
+        if "optimizer_config" not in rec:
+            return {"type": "adamw"}
+        return rec["optimizer_config"]
 
     def complete(self, ref: CheckpointRef) -> None:
         self._set_status(ref, CheckpointStatus.COMPLETED, None)

@@ -8,6 +8,7 @@ import pytest
 
 from tinkercloud.training.backends.automodel.scheduler import GroupScheduler, pass_key
 from tinkercloud.training.backends.base import BackendError
+from tinkercloud.training.models.requests import AdamParams
 from tests.unit.backends.automodel.test_backend import ADAM, wired
 
 FB = "forward_backward"
@@ -23,7 +24,7 @@ def test_cancelled_release_keeps_the_tenant_for_the_next_delete():
     async def go():
         backend, ranks, m = wired()
         ranks.hold_step = asyncio.Event()                       # the step never returns: the group hangs
-        step = asyncio.ensure_future(backend.apply_optimizer_step(m, 0.5, ADAM))
+        step = asyncio.ensure_future(backend.apply_optimizer_step(m, AdamParams(learning_rate=0.5, **ADAM)))
         for _ in range(50):
             if ("optim_step", "m") in ranks.ops:
                 break

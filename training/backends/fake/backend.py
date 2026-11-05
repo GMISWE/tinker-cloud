@@ -30,7 +30,7 @@ from ..base import BackendError, BackendHandle, TrainingBackend
 from ...checkpoints.interchange import ADAPTER_CONFIG_FILE, ADAPTER_WEIGHTS_FILE, hf_adapter_dir
 from ...utils.model_config import model_context_length, read_raw_hf_config
 from ..objectives import classification_spec
-from ...models.requests import Datum, ModelInput
+from ...models.requests import Datum, ModelInput, OPTIMIZER_FAMILIES, OptimParams
 from ...core.loss_registry import LOSS_FNS
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,7 @@ class FakeHandle(BackendHandle):
     step_count: int = 0
     pending: int = 0
     metrics: Dict[str, Any] = field(default_factory=dict)
+    optimizer: str = field(kw_only=True)
 
 
 def _tokens_of(model_input: ModelInput) -> List[int]:
@@ -85,6 +86,7 @@ def topk_for(tokens: List[int], k: int) -> List[List[Tuple[int, float]]]:
 class FakeBackend(TrainingBackend[FakeHandle]):
     needs_ray = False
     SUPPORTED_LOSS_FNS = frozenset(LOSS_FNS)
+    SUPPORTED_OPTIMIZERS = frozenset(OPTIMIZER_FAMILIES)   # both, so the protocol suite covers the family seam
 
     def __init__(self, overrides: Optional[Dict[str, Any]] = None):
         self.overrides = overrides or {}
@@ -109,7 +111,7 @@ class FakeBackend(TrainingBackend[FakeHandle]):
         self, model_id: str, request_id: str, base_model: str, num_gpus: int,
         lora_config: Optional[Dict[str, Any]] = None, parallelism: Optional[Dict[str, Any]] = None,
         rl_config: Optional[Dict[str, Any]] = None, rollout_config: Optional[Dict[str, Any]] = None,
-        native_root: Optional[Path] = None,
+        native_root: Optional[Path] = None, optimizer: str = "adamw",
     ) -> FakeHandle:
         # A model directory is read like the GPU backends read theirs (head,
         # context window); a bare name ("fake/tiny") is the test double.
@@ -124,10 +126,10 @@ class FakeBackend(TrainingBackend[FakeHandle]):
             )
         h = FakeHandle(model_id=model_id, backend_type="fake", base_model=base_model,
                        lora_config=lora_config, hf_path=base_model, context_length=context_length,
-                       max_topk_logprobs=FAKE_MAX_TOPK)
+                       max_topk_logprobs=FAKE_MAX_TOPK, optimizer=optimizer)
         self._models[model_id] = h
         self._trace("create_model", model_id, base_model=base_model, lora_config=lora_config,
-                    native_root=native_root)
+                    native_root=native_root, optimizer=optimizer)
         return h
 
     async def delete_model(self, handle: FakeHandle) -> None:
@@ -169,16 +171,17 @@ class FakeBackend(TrainingBackend[FakeHandle]):
         }
 
     async def apply_optimizer_step(
-        self, handle: FakeHandle, learning_rate: Optional[float] = None,
-        adam_params: Optional[Dict[str, Any]] = None,
+        self, handle: FakeHandle, optim_params: Optional[OptimParams] = None,
     ) -> Dict[str, Any]:
         h = self._handle(handle, "apply_optimizer_step")
-        lr = learning_rate if learning_rate is not None else 0.0
+        if optim_params is None:
+            raise BackendError("the request carries no optimizer parameters", backend="fake", operation="apply_optimizer_step")
+        lr = optim_params.learning_rate
         h.step_count += 1
         h.w += lr * h.pending
         h.pending = 0
         h.weight_version += 1
-        self._trace("apply_optimizer_step", h.model_id, learning_rate=lr, adam_params=adam_params)
+        self._trace("apply_optimizer_step", h.model_id, learning_rate=lr, optim_params=optim_params.model_dump())
         return {
             "success": True,
             "grad_norm": float(h.step_count),

@@ -5,17 +5,18 @@ and target modules. Written by rank 0 of a training group after the gather
 (worker.export_adapter); read by the base model's vLLM through
 /v1/load_lora_adapter, so the directory must be on a filesystem both see.
 
-A checkpoint adds the AdamW state of the same parameters beside it,
-`optimizer/adamw.safetensors`: `<PEFT key>.<exp_avg|exp_avg_sq|step>`,
-unsharded, keyed as the adapter file is. Empty before the first optimizer
-step; the file still exists, so a load with optimizer=true restores "no step
-taken" instead of being refused (that refusal is for roots another backend
-wrote).
+A checkpoint adds the optimizer state of the same parameters beside it, one
+file named for the tenant's family:
+`optimizer/adamw.safetensors`: `<PEFT key>.<exp_avg|exp_avg_sq|step>`, or
+`optimizer/dimuon.safetensors`: `<PEFT key>.momentum`; unsharded, keyed as
+the adapter file is. Empty before the first optimizer step; the file still
+exists, so a load with optimizer=true restores "no step taken" instead of
+being refused (that refusal is for roots another backend wrote).
 """
 import json
 import shutil
 from pathlib import Path
-from typing import Callable, Dict
+from typing import Callable, Dict, Tuple
 
 import torch
 from safetensors.torch import load_file, save_file
@@ -24,8 +25,13 @@ from ...checkpoints.interchange import ADAPTER_CONFIG_FILE, ADAPTER_WEIGHTS_FILE
 from .lora import LoraSpec
 
 OPTIMIZER_DIRNAME = "optimizer"
-OPTIMIZER_FILE = "adamw.safetensors"
-ADAM_STATE_KEYS = ("exp_avg", "exp_avg_sq", "step")
+# per family: the state file under OPTIMIZER_DIRNAME, every per-parameter
+# state key, and the keys laid out as the parameter is (the rest are scalars)
+OPTIMIZER_FILES = {"adamw": "adamw.safetensors", "dimuon": "dimuon.safetensors"}
+STATE_KEYS = {"adamw": ("exp_avg", "exp_avg_sq", "step"), "dimuon": ("momentum",)}
+SHARD_KEYS = {"adamw": ("exp_avg", "exp_avg_sq"), "dimuon": ("momentum",)}
+OPTIMIZER_FILE = OPTIMIZER_FILES["adamw"]
+ADAM_STATE_KEYS = STATE_KEYS["adamw"]
 
 # Wrapper segments torch.compile and activation checkpointing put into module
 # names; PEFT and vLLM address the module underneath.
@@ -69,23 +75,49 @@ def write_peft_adapter(state: Dict[str, torch.Tensor], lora: LoraSpec, base_mode
     _swap_in(dest, write)
 
 
-def write_adam_state(state: Dict[str, Dict[str, torch.Tensor]], dest: Path) -> None:
-    """`dest/adamw.safetensors` from {PEFT key: {exp_avg, exp_avg_sq, step}},
-    replacing what is there."""
+def write_optimizer_state(family: str, state: Dict[str, Dict[str, torch.Tensor]], dest: Path) -> None:
+    """`dest/<family file>` from {PEFT key: {state key: tensor}}, replacing
+    whatever family's file was there."""
     flat = {f"{name}.{field}": t.contiguous() for name, fields in state.items() for field, t in fields.items()}
-    _swap_in(dest, lambda tmp: save_file(flat, str(tmp / OPTIMIZER_FILE), metadata={"format": "pt"}))
+    _swap_in(dest, lambda tmp: save_file(flat, str(tmp / OPTIMIZER_FILES[family]), metadata={"format": "pt"}))
+
+
+def optimizer_state_family(src: Path) -> str:
+    """The family whose state file `src` holds. Raises ValueError when it
+    holds none or more than one."""
+    present = [family for family, name in OPTIMIZER_FILES.items() if (src / name).is_file()]
+    if len(present) != 1:
+        raise ValueError(f"{src} holds {len(present)} optimizer state files, not one of "
+                         f"{'|'.join(OPTIMIZER_FILES.values())}")
+    return present[0]
+
+
+def read_optimizer_state(src: Path) -> Tuple[str, Dict[str, Dict[str, torch.Tensor]]]:
+    """The inverse of write_optimizer_state: (family, state). Raises ValueError
+    on a key that is not `<PEFT key>.<field>` or a parameter missing a field."""
+    family = optimizer_state_family(src)
+    path = src / OPTIMIZER_FILES[family]
+    keys = STATE_KEYS[family]
+    state: Dict[str, Dict[str, torch.Tensor]] = {}
+    for key, t in load_file(str(path)).items():
+        name, _, field = key.rpartition(".")
+        if field not in keys or not name:
+            raise ValueError(f"{path}: key {key!r} is not <PEFT key>.<{'|'.join(keys)}>")
+        state.setdefault(name, {})[field] = t
+    for name, fields in state.items():
+        if set(fields) != set(keys):
+            raise ValueError(f"{path}: {name} has fields {sorted(fields)}, not {sorted(keys)}")
+    return family, state
+
+
+def write_adam_state(state: Dict[str, Dict[str, torch.Tensor]], dest: Path) -> None:
+    """write_optimizer_state for the AdamW family."""
+    write_optimizer_state("adamw", state, dest)
 
 
 def read_adam_state(src: Path) -> Dict[str, Dict[str, torch.Tensor]]:
-    """The inverse of write_adam_state. Raises ValueError on a key that is not
-    `<PEFT key>.<field>` or a parameter missing a field."""
-    state: Dict[str, Dict[str, torch.Tensor]] = {}
-    for key, t in load_file(str(src / OPTIMIZER_FILE)).items():
-        name, _, field = key.rpartition(".")
-        if field not in ADAM_STATE_KEYS or not name:
-            raise ValueError(f"{src / OPTIMIZER_FILE}: key {key!r} is not <PEFT key>.<{'|'.join(ADAM_STATE_KEYS)}>")
-        state.setdefault(name, {})[field] = t
-    for name, fields in state.items():
-        if set(fields) != set(ADAM_STATE_KEYS):
-            raise ValueError(f"{src / OPTIMIZER_FILE}: {name} has fields {sorted(fields)}, not {sorted(ADAM_STATE_KEYS)}")
+    """read_optimizer_state of a directory holding the AdamW file."""
+    family, state = read_optimizer_state(src)
+    if family != "adamw":
+        raise ValueError(f"{src} holds {family} state, not adamw")
     return state

@@ -22,3 +22,24 @@ as `TensorData`. The per-token fields and their native names:
 
 The unit tests under `tests/unit/backends/<name>/test_converter.py` are the
 executable form of this table.
+
+## Optimizer state files (automodel)
+
+A training checkpoint root holds the interchange adapter (`hf_adapter/`) and the
+tenant's optimizer state under `optimizer/`, one file named for the family
+(`backends/automodel/adapter.py`):
+
+| family | file | keys per LoRA parameter |
+|---|---|---|
+| `adamw` | `optimizer/adamw.safetensors` | `<peft key>.exp_avg`, `.exp_avg_sq`, `.step` |
+| `dimuon` | `optimizer/dimuon.safetensors` | `<peft key>.momentum` |
+
+The family is read from the file name. A load with `optimizer=true` across
+families is refused at the API with a 400 naming both families (the checkpoint
+record carries the family); a mismatching file that reaches the worker is a
+`StateMismatch`. A weights-only load crosses families, which is how a run
+switches optimizer.
+Before the first step the file exists and is empty. Each backend declares the
+families it serves in `SUPPORTED_OPTIMIZERS`; TinkerCloud's `dimuon` is a
+stand-in for Thinking Machines' unpublished algorithm (`dion.Muon` applied to
+each LoRA factor, weight decay 0, dion's `spectral_norm` learning-rate scaling).

@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional
 
 from ..backends.base import TrainingBackend
+from ..models.requests import OptimizerConfig
 from ..checkpoints import CheckpointStore
 from ..core import routing
 from ..storage import MetadataStorage
@@ -30,6 +31,14 @@ class ModelService:
         self.store = store
         self.sample_futures = sample_futures
 
+    def require_optimizer(self, optimizer_config: OptimizerConfig) -> None:
+        """Raises ValueError (a 400) naming the backend when it does not serve
+        the family; the router runs this before the create is queued."""
+        if optimizer_config.type not in self.backend.SUPPORTED_OPTIMIZERS:
+            raise ValueError(
+                f"optimizer family {optimizer_config.type!r} is not served by {type(self.backend).__name__}; "
+                f"{', '.join(sorted(self.backend.SUPPORTED_OPTIMIZERS))} are")
+
     async def create_model(
         self,
         model_id: str,
@@ -40,9 +49,13 @@ class ModelService:
         metadata_storage: MetadataStorage,
         training_clients: Dict[str, Dict[str, Any]],
         training_runs_metadata: Dict[str, Dict[str, Any]],
+        optimizer_config: OptimizerConfig,
     ) -> Dict[str, Any]:
         """
         Create a new training model via the backend abstraction.
+
+        `optimizer_config` passed `require_optimizer`; its record form is
+        stored with the model.
 
         Returns:
             Dict with model_id, base_model, lora_config, status
@@ -67,7 +80,9 @@ class ModelService:
             lora_config=lora_config,
             parallelism=parallelism_config,
             native_root=native_root,
+            optimizer=optimizer_config.type,
         )
+        optimizer_record = optimizer_config.record()
 
         # Save metadata
         hf_path = handle.hf_path
@@ -78,6 +93,7 @@ class ModelService:
             "base_model": base_model,
             "hf_path": hf_path,
             "lora_config": lora_config,
+            "optimizer_config": optimizer_record,
             "objective": handle.objective,
             "num_labels": handle.num_labels,
             "created_at": datetime.now().isoformat(),
@@ -99,6 +115,7 @@ class ModelService:
             "hf_path": hf_path,
             "base_model": base_model,
             "lora_config": lora_config,
+            "optimizer_config": optimizer_record,
             "created_at": datetime.now().isoformat(),
         }
         training_clients[model_id] = client_info
@@ -176,6 +193,7 @@ class ModelService:
             "is_lora": is_lora,
             "lora_rank": lora_rank if is_lora else None,
             "model_name": model_name,
+            "optimizer_config": client_info["optimizer_config"],
         }
 
     def get_tokenizer_info(
