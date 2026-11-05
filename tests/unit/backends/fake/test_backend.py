@@ -10,7 +10,7 @@ PROMPT = [1, 2, 3, 4, 5]
 
 def _fake_model():
     b = FakeBackend()
-    return b, asyncio.run(b.create_model("m", "r", "fake/tiny", 0))
+    return b, asyncio.run(b.create_model("m", "r", "fake/tiny", 0, optimizer="adamw"))
 
 
 def test_fake_topk_is_deterministic_and_validates():

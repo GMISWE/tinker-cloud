@@ -112,7 +112,8 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         rl_config: Optional[Dict[str, Any]] = None,
         rollout_config: Optional[Dict[str, Any]] = None,
         native_root: Optional[Path] = None,
-        optimizer: str = "adamw",
+        *,
+        optimizer: str,
     ) -> VerlHandle:
         classification = classification_spec(await asyncio.to_thread(read_raw_hf_config, base_model))
         if classification is not None:
@@ -201,24 +202,24 @@ class VerlBackend(TrainingBackend[VerlHandle]):
     async def apply_optimizer_step(
         self,
         handle: VerlHandle,
-        optim_params: Optional[OptimParams] = None,
+        optim_params: OptimParams,
     ) -> Dict[str, Any]:
+        adam = cast(AdamParams, optim_params)   # the only family this backend declares
         async with handle._lock:
             try:
                 await self._quiesce_samplers(handle)
                 await asyncio.to_thread(self._ensure_training_ready, handle)
-                params: Dict[str, Any] = {}
-                if optim_params is not None:
-                    adam = cast(AdamParams, optim_params)   # the only family this backend declares
-                    params["lr"] = float(adam.learning_rate)
-                    params["betas"] = (float(adam.beta1), float(adam.beta2))
-                    params["eps"] = float(adam.eps)
-                    params["weight_decay"] = float(adam.weight_decay)
-                    if adam.grad_clip_norm > 0:
-                        logger.warning("verl optim_step: grad_clip_norm is set at engine build, not per step")
+                params: Dict[str, Any] = {
+                    "lr": float(adam.learning_rate),
+                    "betas": (float(adam.beta1), float(adam.beta2)),
+                    "eps": float(adam.eps),
+                    "weight_decay": float(adam.weight_decay),
+                }
+                if adam.grad_clip_norm > 0:
+                    logger.warning("verl optim_step: grad_clip_norm is set at engine build, not per step")
 
                 metrics = await asyncio.to_thread(
-                    _wg_scalar_call, handle.worker_group.optimizer_step, params or None,
+                    _wg_scalar_call, handle.worker_group.optimizer_step, params,
                 )
                 handle.weight_version += 1
                 grad_norm = metrics.get("grad_norm")

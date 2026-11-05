@@ -138,21 +138,21 @@ class TestCheckpointRootContract:
     def test_fake_writes_under_root_and_round_trips(self, tmp_path):
         from tinkercloud.training.backends.fake.backend import FakeBackend
         b = FakeBackend()
-        h = asyncio.run(b.create_model("m", "r", "fake/tiny", 0, native_root=tmp_path / "native"))
+        h = asyncio.run(b.create_model("m", "r", "fake/tiny", 0, native_root=tmp_path / "native", optimizer="adamw"))
         h.w = 0.75
         root = tmp_path / "weights" / "c1"
         root.mkdir(parents=True)
         asyncio.run(b.save_checkpoint(h, root, step=3, persist=True))
         written = {p.relative_to(tmp_path) for p in tmp_path.rglob("*") if p.is_file()}
         assert written == {root.relative_to(tmp_path) / "fake_state.json"}
-        h2 = asyncio.run(b.create_model("m2", "r", "fake/tiny", 0, native_root=tmp_path / "n2"))
+        h2 = asyncio.run(b.create_model("m2", "r", "fake/tiny", 0, native_root=tmp_path / "n2", optimizer="adamw"))
         asyncio.run(b.load_checkpoint(h2, root))
         assert h2.w == 0.75
 
     def test_persist_false_writes_nothing(self, tmp_path):
         from tinkercloud.training.backends.fake.backend import FakeBackend
         b = FakeBackend()
-        h = asyncio.run(b.create_model("m", "r", "fake/tiny", 0, native_root=tmp_path / "native"))
+        h = asyncio.run(b.create_model("m", "r", "fake/tiny", 0, native_root=tmp_path / "native", optimizer="adamw"))
         root = tmp_path / "sampler_weights" / "e1"
         asyncio.run(b.save_checkpoint(h, root, step=None, persist=False))
         assert not root.exists()

@@ -76,7 +76,8 @@ class MegatronBridgeBackend(TrainingBackend[MegatronBridgeHandle]):
         rl_config: Optional[Dict[str, Any]] = None,
         rollout_config: Optional[Dict[str, Any]] = None,
         native_root: Optional[Path] = None,
-        optimizer: str = "adamw",
+        *,
+        optimizer: str,
     ) -> MegatronBridgeHandle:
         """Spawn a GPU worker actor that builds the classifier + LoRA + optimizer."""
         classification = classification_spec(await asyncio.to_thread(read_raw_hf_config, base_model))
@@ -152,10 +153,10 @@ class MegatronBridgeBackend(TrainingBackend[MegatronBridgeHandle]):
     async def apply_optimizer_step(
         self,
         handle: MegatronBridgeHandle,
-        optim_params: Optional[OptimParams] = None,
+        optim_params: OptimParams,
     ) -> Dict[str, Any]:
-        # the learning rate only; betas/eps are fixed at creation
-        learning_rate = optim_params.learning_rate if optim_params is not None else None
+        # the worker steps at its scheduler's rate; betas/eps are fixed at creation
+        learning_rate = optim_params.learning_rate
         return await _get(handle.worker.apply_optimizer_step.remote(learning_rate))
 
     # --- generation plane: N/A for classification ---

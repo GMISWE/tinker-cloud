@@ -8,6 +8,7 @@ import pytest
 
 from tinkercloud.training.backends.base import BackendError
 from tinkercloud.training.backends.nemo_rl import backend as nb
+from tinkercloud.training.models.requests import AdamParams
 from tinkercloud.training.backends.nemo_rl.backend import NemoRLHandle
 from tests.datums import make_synthetic_batch
 
@@ -298,7 +299,7 @@ class TestNemoRLBackendBuffering:
 
     def test_apply_optimizer_step_empty_buffer_is_noop(self, backend, handle):
         """An empty buffer steps nothing and reports success with grad_norm 0."""
-        result = asyncio.run(backend.apply_optimizer_step(handle))
+        result = asyncio.run(backend.apply_optimizer_step(handle, AdamParams(learning_rate=1e-4)))
         assert result["success"] is True
         assert result["grad_norm"] == 0.0
         assert result["loss_fn_outputs"] == []

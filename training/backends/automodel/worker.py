@@ -131,9 +131,9 @@ class AutomodelWorker:
         # lr and the per-step fields are rewritten from each request before
         # every step; the constructors' values are never used. dion refuses
         # DTensor parameters without their own mesh ("Must create optimizer
-        # with DeviceMesh"); its group-level `step` (incremented in dion
-        # muon.py `Muon.step`, read only by its adamw groups' bias correction)
-        # is not checkpointed.
+        # with DeviceMesh"). Its group-level `step` counter is not
+        # checkpointed: only dion's element-wise adamw update reads it, and
+        # every parameter here takes the Muon update.
         mesh = params[0].device_mesh if isinstance(params[0], DTensor) else None   # dion takes no mesh for a plain tensor
         self.optimizers: Dict[str, torch.optim.Optimizer] = {
             "adamw": torch.optim.AdamW(params),
@@ -144,20 +144,14 @@ class AutomodelWorker:
         return sum(p.numel() for _, p in self.lora_params)
 
     def _prime_muon(self, params: List[torch.nn.Parameter]) -> None:
-        """One Muon step on zero gradients, state discarded, so the weights are
-        untouched (orth(0) = 0). dion's update functions are torch.compile'd and
-        see several shapes in one step (A factors, transposed B factors); under
-        dynamo's automatic dynamic shapes the first shape a process meets gets a
-        static kernel and the next a dynamic one, and the two round the bf16
-        reductions differently, so the kernels a step runs depend on the
-        process's compile history (measured: with automatic dynamic shapes off
-        the two processes agree bit for bit). A fresh process that resumes a run
-        has no such history; priming gives every process the same one. The
-        dynamo setting stays on for the model's own compiled kernels, whose
-        sequence lengths do vary. Reproduction: the
-        fresh-group round trip in tests/gpu/test_automodel_worker.py
-        (test_dimuon_checkpoint_round_trip_and_family_mismatch), which differed
-        on the A factors without this and is bit-equal with it."""
+        """One Muon step on zero gradients, its state discarded; the weights stay
+        unchanged (orth(0) = 0). dion's update functions are torch.compile'd and
+        meet several shapes in one step (A factors, transposed B factors);
+        priming compiles them for those shapes before any tenant's first step,
+        so every process, including one that resumes a run, has the same compile
+        history. test_dimuon_checkpoint_round_trip_and_family_mismatch in
+        tests/gpu/test_automodel_worker.py pins the result: a fresh group's
+        resumed step is bit-equal to the uninterrupted one."""
         muon = self.optimizers["dimuon"]
         for p in params:
             p.grad = torch.zeros_like(p)

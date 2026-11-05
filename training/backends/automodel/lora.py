@@ -28,14 +28,14 @@ class LoraSpec:
     alpha: int
     target_modules: Tuple[str, ...]   # module names, as PEFT and vLLM read them
     dropout: float
-    optimizer: str = "adamw"   # "adamw" | "dimuon", one of the backend's SUPPORTED_OPTIMIZERS; the default serves direct callers
+    optimizer: str   # "adamw" | "dimuon", one of the backend's SUPPORTED_OPTIMIZERS
 
     @property
     def signature(self) -> Tuple[int, int, Tuple[str, ...]]:
         return (self.rank, self.alpha, self.target_modules)
 
 
-def lora_spec(config: LoraConfig, optimizer: str = "adamw") -> LoraSpec:
+def lora_spec(config: LoraConfig, optimizer: str) -> LoraSpec:
     """Raises ValueError for rank 0 (not a LoRA) or no target module."""
     if config.rank == 0:
         raise ValueError("lora_config.rank is 0: not a LoRA model")

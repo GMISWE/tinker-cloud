@@ -23,7 +23,7 @@ from tests.datums import ce_datum
 
 CONFIG = dict(train_gpus=2, max_loras=1, max_lora_rank=8, max_cpu_loras=1, micro_batch_rows=2)
 ADAM = dict(beta1=0.9, beta2=0.95, eps=1e-8, weight_decay=0.0, grad_clip_norm=0.0)
-LORA = LoraSpec(rank=8, alpha=16, target_modules=("q_proj",), dropout=0.0)
+LORA = LoraSpec(rank=8, alpha=16, target_modules=("q_proj",), dropout=0.0, optimizer="adamw")
 VLLM = "http://vllm:1"
 SP = {"temperature": 0.0, "top_p": 1.0, "max_tokens": 4}
 run = asyncio.run
@@ -332,8 +332,8 @@ def test_bad_request_fails_before_the_ranks():
             await backend.forward_backward(handle, [no_weights], "cross_entropy")
         with pytest.raises(BackendError, match="not served"):
             await backend.forward_backward(handle, [ce_datum([1, 2])], "dro")
-        with pytest.raises(BackendError, match="adam_params"):
-            await backend.apply_optimizer_step(handle)
+        with pytest.raises(TypeError, match="optim_params"):
+            await backend.apply_optimizer_step(handle)  # type: ignore[call-arg]
         assert ranks.passes == []
         await backend.close()
     run(go())
@@ -358,17 +358,17 @@ def test_tenant_create_joins_the_group_or_opens_its_own_group(monkeypatch, tmp_p
     backend, started = creatable(monkeypatch)
 
     async def go():
-        a = await backend.create_model("a", "r1", "base", 2, lora_config=LORA_A, native_root=tmp_path / "a")
-        b = await backend.create_model("b", "r2", "base", 2, lora_config=LORA_A, native_root=tmp_path / "b")
+        a = await backend.create_model("a", "r1", "base", 2, lora_config=LORA_A, native_root=tmp_path / "a", optimizer="adamw")
+        b = await backend.create_model("b", "r2", "base", 2, lora_config=LORA_A, native_root=tmp_path / "b", optimizer="adamw")
         assert a.group_key == b.group_key and len(started) == 1, "the same signature joins the group"
         assert backend._groups[a.group_key].tenants == {"a", "b"}
         assert started[0].ops == [("add_tenant", "a"), ("add_tenant", "b")]
-        c = await backend.create_model("c", "r3", "base", 2, lora_config={**LORA_A, "alpha": 32}, native_root=tmp_path / "c")
+        c = await backend.create_model("c", "r3", "base", 2, lora_config={**LORA_A, "alpha": 32}, native_root=tmp_path / "c", optimizer="adamw")
         assert c.group_key != a.group_key and len(started) == 2, "another signature opens its own group"
         assert started[1].ops == [("add_tenant", "c")] and backend._groups[c.group_key].tenants == {"c"}
         assert a.sampler_key == b.sampler_key == c.sampler_key, "one vLLM per base model"
         # dropout is the tenant's, not the group's: d joins a's group and the ranks receive its own spec
-        d = await backend.create_model("d", "r4", "base", 2, lora_config={**LORA_A, "dropout": 0.3}, native_root=tmp_path / "d")
+        d = await backend.create_model("d", "r4", "base", 2, lora_config={**LORA_A, "dropout": 0.3}, native_root=tmp_path / "d", optimizer="adamw")
         assert d.group_key == a.group_key and len(started) == 2
         assert started[0].loras["d"].dropout == 0.3 and started[0].loras["a"].dropout == 0.0
         assert started[0].loras["d"].signature == started[0].loras["a"].signature
@@ -385,8 +385,8 @@ def test_tenant_concurrent_creates_of_one_signature_open_one_group_and_the_secon
 
     async def go():
         a, b = await asyncio.gather(
-            backend.create_model("a", "r1", "base", 2, lora_config=LORA_A, native_root=tmp_path / "a"),
-            backend.create_model("b", "r2", "base", 2, lora_config=LORA_A, native_root=tmp_path / "b"))
+            backend.create_model("a", "r1", "base", 2, lora_config=LORA_A, native_root=tmp_path / "a", optimizer="adamw"),
+            backend.create_model("b", "r2", "base", 2, lora_config=LORA_A, native_root=tmp_path / "b", optimizer="adamw"))
         assert len(started) == 1 and a.group_key == b.group_key
         assert backend._groups[a.group_key].tenants == {"a", "b"}
         assert started[0].ops == [("add_tenant", "a"), ("add_tenant", "b")] and not started[0].stopped
@@ -398,10 +398,10 @@ def test_tenant_failed_joins_leave_the_group_untouched(monkeypatch, tmp_path):
     backend, started = creatable(monkeypatch)
 
     async def go():
-        a = await backend.create_model("a", "r1", "base", 2, lora_config=LORA_A, native_root=tmp_path / "a")
+        a = await backend.create_model("a", "r1", "base", 2, lora_config=LORA_A, native_root=tmp_path / "a", optimizer="adamw")
         started[0].fault = RuntimeError("pinned memory exhausted")
         with pytest.raises(BackendError, match="model b could not join training group .*pinned memory exhausted"):
-            await backend.create_model("b", "r2", "base", 2, lora_config=LORA_A, native_root=tmp_path / "b")
+            await backend.create_model("b", "r2", "base", 2, lora_config=LORA_A, native_root=tmp_path / "b", optimizer="adamw")
         group = backend._groups[a.group_key]
         assert group.tenants == {"a"} and group.lost is None and not started[0].stopped
         assert (await backend.forward(a, [ce_datum([1, 2])], "cross_entropy"))["loss"] == 2.0
@@ -487,13 +487,13 @@ def test_tenant_fault_cause_outlives_a_group_reopened_under_its_key(monkeypatch,
     backend, started = creatable(monkeypatch)
 
     async def go():
-        a = await backend.create_model("a", "r1", "base", 2, lora_config=LORA_A, native_root=tmp_path / "a")
-        b = await backend.create_model("b", "r2", "base", 2, lora_config=LORA_A, native_root=tmp_path / "b")
+        a = await backend.create_model("a", "r1", "base", 2, lora_config=LORA_A, native_root=tmp_path / "a", optimizer="adamw")
+        b = await backend.create_model("b", "r2", "base", 2, lora_config=LORA_A, native_root=tmp_path / "b", optimizer="adamw")
         started[0].fault = RuntimeError("CUDA error")
         with pytest.raises(BackendError, match="released"):
             await backend.apply_optimizer_step(a, AdamParams(learning_rate=0.5, **ADAM))
         await until_stopped(started[0])
-        c = await backend.create_model("c", "r3", "base", 2, lora_config=LORA_A, native_root=tmp_path / "c")
+        c = await backend.create_model("c", "r3", "base", 2, lora_config=LORA_A, native_root=tmp_path / "c", optimizer="adamw")
         assert c.group_key == a.group_key and len(started) == 2 and backend._groups[c.group_key].tenants == {"c"}
         assert (await backend.forward(c, [ce_datum([1, 2])], "cross_entropy"))["loss"] == 2.0
         for handle in (a, b):

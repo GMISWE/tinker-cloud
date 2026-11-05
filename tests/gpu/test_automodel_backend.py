@@ -92,7 +92,7 @@ def test_lifecycle_through_the_backend(caplog, tmp_path):
 
     async def go():
         backend = AutomodelBackend(overrides=CONFIG)
-        handle = await backend.create_model("m", "req-1", MODEL, num_gpus=2, lora_config=LORA, native_root=tmp_path)
+        handle = await backend.create_model("m", "req-1", MODEL, num_gpus=2, lora_config=LORA, native_root=tmp_path, optimizer="adamw")
         key, skey = handle.group_key, handle.sampler_key
         routing.table.publish("m", routing.InferenceEndpoint(handle.inference_endpoints))
         try:
@@ -122,7 +122,7 @@ def test_lifecycle_through_the_backend(caplog, tmp_path):
             assert sum(gap) / len(gap) < 0.1 and max(gap) < 0.5, f"sampler vs trainer logprobs: {gap}"
 
             # the same signature joins the group: no new ranks; leaving keeps them
-            m2 = await backend.create_model("m2", "req-2", MODEL, num_gpus=2, lora_config=LORA, native_root=tmp_path / "m2")
+            m2 = await backend.create_model("m2", "req-2", MODEL, num_gpus=2, lora_config=LORA, native_root=tmp_path / "m2", optimizer="adamw")
             assert m2.group_key == key and am_actors(f"am-{key}-r") == {f"am-{key}-r0", f"am-{key}-r1"}
             await backend.delete_model(m2)
             assert am_actors(f"am-{key}-r") == {f"am-{key}-r0", f"am-{key}-r1"} and pg_states(f"am-{key}") == {"CREATED"}
@@ -211,7 +211,7 @@ def test_checkpoint_round_trip_through_fresh_models(tmp_path):
 
     async def model(name):
         h = await backend.create_model(name, f"req-{name}", MODEL, num_gpus=2, lora_config=LORA,
-                                       native_root=tmp_path / f"native-{name}")
+                                       native_root=tmp_path / f"native-{name}", optimizer="adamw")
         routing.table.publish(name, routing.InferenceEndpoint(h.inference_endpoints))
         return h
 
@@ -282,7 +282,7 @@ def test_two_tenants_share_a_group_and_match_their_solo_runs(tmp_path):
 
     async def model(name, lora, phase):
         h = await backend.create_model(name, f"req-{name}-{phase}", MODEL, num_gpus=2, lora_config=lora,
-                                       native_root=tmp_path / f"native-{name}-{phase}")
+                                       native_root=tmp_path / f"native-{name}-{phase}", optimizer="adamw")
         routing.table.publish(name, routing.InferenceEndpoint(h.inference_endpoints))
         return h
 

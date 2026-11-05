@@ -295,7 +295,8 @@ class MilesBackend(TrainingBackend[MilesHandle]):
         rl_config: Optional[Dict[str, Any]] = None,
         rollout_config: Optional[Dict[str, Any]] = None,
         native_root: Optional[Path] = None,
-        optimizer: str = "adamw",
+        *,
+        optimizer: str,
     ) -> MilesHandle:
         classification = classification_spec(await asyncio.to_thread(read_raw_hf_config, base_model))
         if classification is not None:
@@ -1119,11 +1120,11 @@ class MilesBackend(TrainingBackend[MilesHandle]):
     async def apply_optimizer_step(
         self,
         handle: MilesHandle,
-        optim_params: Optional[OptimParams] = None,
+        optim_params: OptimParams,
     ) -> Dict[str, Any]:
         # Miles applies the learning rate only: betas/eps are Megatron args
         # fixed at creation.
-        learning_rate = optim_params.learning_rate if optim_params is not None else None
+        learning_rate = optim_params.learning_rate
 
         async def _run() -> Dict[str, Any]:
             # TinkerTrainGroup: apply_optimizer_step(learning_rate) fans out to

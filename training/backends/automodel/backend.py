@@ -150,7 +150,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         self, model_id: str, request_id: str, base_model: str, num_gpus: int,
         lora_config: Optional[Dict[str, Any]] = None, parallelism: Optional[Dict[str, Any]] = None,
         rl_config: Optional[Dict[str, Any]] = None, rollout_config: Optional[Dict[str, Any]] = None,
-        native_root: Optional[Path] = None, optimizer: str = "adamw",
+        native_root: Optional[Path] = None, *, optimizer: str,
     ) -> AutomodelHandle:
         if parallelism is not None:
             raise UnsupportedFeatureError("parallelism_config", backend=BACKEND,
@@ -344,15 +344,9 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         return [out["logprobs"]["data"] for out in result["loss_fn_outputs"]]
 
     async def apply_optimizer_step(
-        self, handle: AutomodelHandle, optim_params: Optional[OptimParams] = None,
+        self, handle: AutomodelHandle, optim_params: OptimParams,
     ) -> Dict[str, Any]:
         group = self._live_group(handle, "apply_optimizer_step")
-        if optim_params is None:
-            raise BackendError(
-                "the request carries no adam_params or optimizer_params; the learning rate and clip are the request's, never the server's",
-                backend=BACKEND,
-                operation="apply_optimizer_step",
-            )
 
         async def step() -> Dict[str, Any]:
             await hang_point("automodel.apply_optimizer_step")   # test-only; a no-op unless configured
