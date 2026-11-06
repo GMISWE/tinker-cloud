@@ -693,8 +693,9 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             # Optimizer state rides beside the weights so load_weights(optimizer=true)
             # can restore it; LoRA moments are small. The save reads the training
             # state: after a refit it is offloaded, and the Megatron worker's offload
-            # frees its parameter buffers (storage resized to 0), so make it resident
-            # first, as forward() does and as NeMo RL does before every save.
+            # frees its parameter buffers (megatron.core ParamAndGradBuffer.offload_to_cpu
+            # resizes their storage to 0), so make it resident first, as forward() does
+            # and as NeMo RL's GRPO loop does (prepare_for_training before save_checkpoint).
             async with handle._training_lock:
                 await _take_engine_for_training(handle)
                 if not handle.training_resident:
