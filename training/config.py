@@ -15,6 +15,9 @@ from pydantic import BaseModel, Field, validator
 
 logger = logging.getLogger(__name__)
 
+# The key a server takes when TINKER_API_KEY is unset; production refuses to start with it.
+DEV_API_KEY = "tml-dev-key"
+
 
 class ModelInfo(BaseModel):
     """Information about a supported model."""
@@ -85,19 +88,6 @@ class RayConfig(BaseModel):
         description="Ignore Ray re-initialization errors"
     )
 
-    @validator("address")
-    def validate_address(cls, v):
-        """Ensure Ray address is provided."""
-        if not v:
-            # Try common patterns
-            if os.getenv("RAY_HEAD_SERVICE_HOST"):
-                host = os.getenv("RAY_HEAD_SERVICE_HOST")
-                port = os.getenv("RAY_HEAD_SERVICE_PORT_CLIENT", "10001")
-                return f"ray://{host}:{port}"
-            # Default to local Ray
-            return "ray://localhost:10001"
-        return v
-
 
 class ParallelismConfig(BaseModel):
     """Model parallelism configuration."""
@@ -159,7 +149,7 @@ class AuthConfig(BaseModel):
     """Authentication configuration."""
 
     api_key: str = Field(
-        default_factory=lambda: os.getenv("TINKER_API_KEY", "tml-dev-key"),
+        default_factory=lambda: os.getenv("TINKER_API_KEY", DEV_API_KEY),
         description="API key for authentication"
     )
     api_key_header: str = Field(
@@ -171,10 +161,12 @@ class AuthConfig(BaseModel):
         description="Enable API key authentication"
     )
 
-    @validator("api_key")
+    @validator("api_key", always=True)
     def validate_api_key(cls, v):
-        """Ensure API key is not empty in production."""
-        if not v or v == "tml-dev-key":
+        """Production needs a key and refuses the dev key, each key read as the auth code
+        reads the setting (comma-separated, stripped)."""
+        keys = [k.strip() for k in v.split(",") if k.strip()]
+        if not keys or DEV_API_KEY in keys:
             env = os.getenv("ENV", "development")
             if env == "production":
                 raise ValueError("Production requires a secure API key")
@@ -217,7 +209,7 @@ class ExternalWeightsConfig(BaseModel):
         logger.warning("TINKERCLOUD_URL_SIGNING_KEY unset: signed download URLs are valid for this process only")
         return secrets.token_hex(32)
 
-    @validator("public_base_url")
+    @validator("public_base_url", always=True)
     def no_trailing_slash(cls, v):
         return v.rstrip("/") if v else v
 
@@ -247,7 +239,7 @@ class BackendConfig(BaseModel):
             raise ValueError("TINKERCLOUD_BACKEND_OVERRIDES must be a JSON object")
         return parsed
 
-    @validator("backend_type")
+    @validator("backend_type", always=True)
     def validate_backend_type(cls, v):
         """Ensure backend type is supported (single allow-list lives in the factory)."""
         from .backends.factory import SUPPORTED_BACKENDS
