@@ -49,7 +49,7 @@ async def main() -> int:
     for client in ("aiohttp", "httpx"):
         app = build_app(config(client), Registry(), SessionStore(None))
         async with serve_uds(engine, sock):
-            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.state.engines), base_url="http://g") as eng:
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.state.engines), base_url="http://g", headers=key) as eng:
                 r = await eng.post("/engines/register", json={"name": "fake", "backend": "fake", "gpus": [], "socket": sock, "pid": 1})
                 assert r.status_code == 200, r.text
                 assert (await eng.get("/engines")).status_code == 200

@@ -13,12 +13,14 @@ class RegisterClient:
     """Keeps this engine's row current in the gateway's registry. Never raises into the engine."""
 
     def __init__(self, gateway_socket: str, name: str, backend: str, gpus: Optional[List[int]], socket: str,
-                 interval_s: float) -> None:
+                 interval_s: float, api_key: Optional[str] = None, key_header: str = "X-API-Key") -> None:
         self._name = name
         self._row = {"name": name, "backend": backend, "gpus": gpus, "socket": socket, "pid": os.getpid()}
         self._interval = interval_s
+        # the gateway's engines listener takes the same API key as the SDK face (None: auth off)
         self._client = httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(uds=gateway_socket),
-                                         base_url="http://gateway", timeout=5.0)
+                                         base_url="http://gateway", timeout=5.0,
+                                         headers={key_header: api_key} if api_key else None)
         self._task: Optional[asyncio.Task] = None
         self.registered = asyncio.Event()
         self.refused = asyncio.Event()   # the gateway answered 4xx: a conflict or a bad row, not retried

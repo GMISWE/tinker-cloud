@@ -83,6 +83,10 @@ class Decider:
             return "Invalid API key"
         return None
 
+    def key_valid(self, headers: Headers) -> bool:
+        """True when auth is off or the request carries one of the keys; no path is exempt."""
+        return self._keys is None or _header(headers, self._key_header).decode("latin-1") in self._keys
+
     def decide(self, path: str, query: bytes, headers: Headers, body: Optional[bytes]) -> Union[Route, Reject]:
         """`body` is the whole body when `routing.reads_body(path)`, else None (it streams past the decision)."""
         denied = self.authorized(path, headers)
