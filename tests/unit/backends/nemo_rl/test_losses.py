@@ -41,31 +41,31 @@ def _batch(seed=0, mismatch=0.05):
     return logits, data, curr, prev[:, 1:], adv[:, 1:], mask
 
 
-def _call(fn, logits, data, mask):
-    loss, metrics = fn(logits, data, torch.tensor(float(B), device=DEV), mask.sum())
+def _call(fn, next_token_logprobs, data, mask):
+    loss, metrics = fn(next_token_logprobs, data, torch.tensor(float(B), device=DEV), mask.sum())
     return loss
 
 
 @pytest.mark.parametrize("mismatch", [0.05, 3.0])
 def test_importance_sampling_is_the_documented_sum(mismatch):
     logits, data, curr, prev, adv, mask = _batch(mismatch=mismatch)
-    loss = _call(TinkerSumPGLoss(TINKER_PG_LOSS_DEFAULTS), logits, data, mask)
+    loss = _call(TinkerSumPGLoss(TINKER_PG_LOSS_DEFAULTS), curr, data, mask)
     expected = -(torch.exp(curr - prev) * adv * mask).sum()  # no clip even at ratio ~ e^3
     torch.testing.assert_close(loss, expected)
 
 
 def test_reference_logprobs_do_not_enter_the_loss():
     logits, data, curr, prev, adv, mask = _batch()
-    a = _call(TinkerSumPGLoss(TINKER_PG_LOSS_DEFAULTS), logits, data, mask)
+    a = _call(TinkerSumPGLoss(TINKER_PG_LOSS_DEFAULTS), curr, data, mask)
     data["reference_policy_logprobs"] = torch.randn(B, S, device=DEV)
-    b = _call(TinkerSumPGLoss(TINKER_PG_LOSS_DEFAULTS), logits, data, mask)
+    b = _call(TinkerSumPGLoss(TINKER_PG_LOSS_DEFAULTS), curr, data, mask)
     torch.testing.assert_close(a, b)
 
 
 def test_ppo_clips_with_the_client_bounds_only():
     logits, data, curr, prev, adv, mask = _batch(mismatch=0.5)
     fn = TinkerSumPGLoss({**TINKER_PG_LOSS_DEFAULTS, "ratio_clip_min": 0.2, "ratio_clip_max": 0.2})
-    loss = _call(fn, logits, data, mask)
+    loss = _call(fn, curr, data, mask)
     ratio = torch.exp(curr - prev)
     expected = -(torch.minimum(ratio * adv, ratio.clamp(0.8, 1.2) * adv) * mask).sum()
     torch.testing.assert_close(loss, expected)
@@ -75,8 +75,8 @@ def test_ppo_clips_with_the_client_bounds_only():
 def test_normalizer_is_one_regardless_of_batch_counts():
     logits, data, curr, prev, adv, mask = _batch()
     fn = TinkerSumPGLoss(TINKER_PG_LOSS_DEFAULTS)
-    a, _ = fn(logits, data, torch.tensor(2.0, device=DEV), torch.tensor(7.0, device=DEV))
-    b, _ = fn(logits, data, torch.tensor(200.0, device=DEV), torch.tensor(7000.0, device=DEV))
+    a, _ = fn(curr, data, torch.tensor(2.0, device=DEV), torch.tensor(7.0, device=DEV))
+    b, _ = fn(curr, data, torch.tensor(200.0, device=DEV), torch.tensor(7000.0, device=DEV))
     torch.testing.assert_close(a, b)
 
 
