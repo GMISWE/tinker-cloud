@@ -22,6 +22,9 @@ PIP=pip
 
 cd /tmp && tar xzf code.tar.gz
 mkdir -p /app /work /data/metadata /data/trajectories /data/.cache/huggingface
+# Download caches on /data: a recreated container keeps the wheels it fetched
+# (the default ~/.cache lives in the container's own filesystem)
+export PIP_CACHE_DIR=/data/.cache/pip UV_CACHE_DIR=/data/.cache/uv
 
 # TinkerCloud server -> /app (run via PYTHONPATH=/app python3 -m training)
 rm -rf /app/training /app/tests /app/gates /app/scripts /work/tinker_gmi /work/tinker-cookbook
