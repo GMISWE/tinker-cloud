@@ -74,4 +74,5 @@ def clip_thresholds(loss_fn: str, loss_fn_config: Optional[Mapping[str, Any]]) -
     """(low, high) for a clipped loss, with Tinker's per-loss defaults filled in."""
     low, high = (GSPO_CLIP_LOW, GSPO_CLIP_HIGH) if loss_fn == "gspo" else (DEFAULT_CLIP_LOW, DEFAULT_CLIP_HIGH)
     cfg = loss_fn_config or {}
+    # an absent threshold is Tinker's documented default for the loss
     return (float(cfg.get("clip_low_threshold", low)), float(cfg.get("clip_high_threshold", high)))
