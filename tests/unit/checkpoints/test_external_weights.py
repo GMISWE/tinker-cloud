@@ -53,16 +53,21 @@ class TestTtl:
         assert store.list("m")[0]["expires_at"] == rec["expires_at"]
         assert store.begin_save("m", E, "forever", optimizer_config=ADAMW).ref and store.get(CheckpointRef.make("m", E, "forever"))["expires_at"] is None
 
-    def test_expired_reads_as_not_found(self, store):
+    def test_expired_reads_as_not_found_and_is_swept(self, store):
         t = store.begin_save("m", E, "hf1", ttl_seconds=3600, optimizer_config=ADAMW)
+        (t.root / "weights.bin").write_bytes(b"weights")
         store.complete(t.ref)
         rec = store.get(t.ref)
         assert not is_expired(rec)
+        assert store.sweep_expired() == 0
         assert is_expired(rec, now=datetime.now(timezone.utc) + timedelta(hours=2))
         rec["expires_at"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
         store._write(t.ref, rec)
         with pytest.raises(CheckpointNotFound, match="expired"):
             store.require(t.ref)
+        assert store.sweep_expired() == 1
+        assert not t.root.exists() and store.get(t.ref) is None
+        assert store.list("m") == [] and store.usage() == (0, 0)
         assert not is_expired({"status": "completed"})  # pre-ttl record: never expires
 
 
