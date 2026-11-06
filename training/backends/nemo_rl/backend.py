@@ -616,9 +616,13 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             # curr_logprobs are computed on pre-optimizer weights (correct KL semantics).
             # Use token_mask to extract response-only logprobs matching Miles format.
             _t = time.time()
-            loss_fn_outputs = _extract_loss_fn_outputs(
-                train_result.get("curr_logprobs"), all_data, original_size,
-            )
+            curr_logprobs = train_result.get("curr_logprobs")
+            if curr_logprobs is None:
+                # both losses emit them; none back means the policy worker dropped them
+                raise BackendError(f"policy.train returned no curr_logprobs for {handle.loss_fn_name}: "
+                                   "the step's loss_fn_outputs would be empty", backend="nemo_rl",
+                                   operation="optim_step")
+            loss_fn_outputs = _extract_loss_fn_outputs(curr_logprobs, all_data, original_size)
             phases["extract"] = time.time() - _t
             logger.info(
                 "optim_step phases (s): %s",
@@ -1660,9 +1664,6 @@ def _extract_loss_fn_outputs(curr_logprobs, batched_data, original_size: int):
     Returns:
         List of dicts: [{"logprobs": {"data": [...], "shape": [N], "dtype": "float32"}}, ...]
     """
-    if curr_logprobs is None:
-        return []
-
     input_lengths = batched_data.get("input_lengths") if hasattr(batched_data, "get") else None
     loss_fn_outputs = []
 
