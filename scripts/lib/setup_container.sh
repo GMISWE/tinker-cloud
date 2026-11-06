@@ -131,6 +131,29 @@ $PIP install -q distro pyqwest orjson 'zstandard>=0.24' 'protobuf>=4.21' click \
   chz termcolor blobfile tiktoken cloudpickle rich anyio \
   'httpx[http2]' sympy pylatexenc math-verify pytest-timeout \
   sniffio 'pyrage>=1.4.0' 'tml-renderers>=0.4.0'
+# every requirement the SDK and the cookbook declare is installed; names only,
+# the image pins its own versions. A new upstream dependency stops setup here,
+# named, instead of as an import traceback later.
+python3 - <<'PY'
+import importlib.metadata as md
+import sys
+
+from packaging.requirements import Requirement
+
+missing = []
+for dist in ("tinker", "tinker-cookbook"):
+    for spec in md.requires(dist) or []:   # None: a distribution that declares nothing
+        req = Requirement(spec)
+        if req.marker is not None and not req.marker.evaluate({"extra": ""}):
+            continue   # an extra's or another platform's requirement
+        try:
+            md.version(req.name)
+        except md.PackageNotFoundError:
+            missing.append(f"{dist} needs {req.name}")
+if missing:
+    sys.exit("setup_container: add these to the install above:\n  " + "\n  ".join(missing))
+print("SDK and cookbook requirements present")
+PY
 
 # NeMo RL's non-colocated refit (NEMORL_COLOCATED=0) builds its NCCL group
 # through nccl4py inside the vLLM and policy worker venvs. Images before
