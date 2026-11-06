@@ -21,6 +21,7 @@ class NemoRLConfig(EnvConfig):
     megatron: bool = Field(False, description="Use the Megatron worker instead of DTensor")
     megatron_a_init: str = Field("xavier", description="Megatron LoRA A init method")
     megatron_precision_aware: bool = Field(True, description="use_precision_aware_optimizer")
+    megatron_ep: int = Field(1, ge=1, description="Megatron expert_model_parallel_size; > 1 needs a model with experts")
     refit_buffer_memory_ratio: float = Field(0.3, description="Share of free GPU memory for the IPC refit buffer")
     vllm_max_connections: Optional[int] = Field(None, description="Concurrent connections per vLLM worker server; None = unbounded (engine queue)")
     vllm_max_logprobs: int = Field(20, ge=1, description="vLLM max_logprobs: cap on topk_sample_logprobs / topk_prompt_logprobs per request")
@@ -41,6 +42,7 @@ class NemoRLConfig(EnvConfig):
         "megatron": "NEMORL_MEGATRON",
         "megatron_a_init": "NEMORL_MEGATRON_A_INIT",
         "megatron_precision_aware": "NEMORL_MEGATRON_PRECISION_AWARE",
+        "megatron_ep": "NEMORL_MEGATRON_EP",
         "refit_buffer_memory_ratio": "NRL_REFIT_BUFFER_MEMORY_RATIO",
         "vllm_max_connections": "TINKERCLOUD_VLLM_MAX_CONNECTIONS",
         "vllm_max_logprobs": "NEMORL_VLLM_MAX_LOGPROBS",

@@ -305,16 +305,27 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
         # reaches the optimizer per step through the worker's set_learning_rate,
         # which pins each group's max/min lr: the scheduler is constant with no
         # warmup and its lr is a placeholder, as on the DTensor path.
+        num_experts = _num_experts(raw_config)
+        if self.cfg.megatron_ep > 1:
+            if not self.cfg.megatron:
+                raise ValueError("NEMORL_MEGATRON_EP > 1 needs the Megatron worker (NEMORL_MEGATRON=1)")
+            if num_experts == 0 or num_experts % self.cfg.megatron_ep:
+                raise ValueError(f"NEMORL_MEGATRON_EP={self.cfg.megatron_ep} does not divide the "
+                                 f"model's {num_experts} experts")
         if self.cfg.megatron:
             policy_config["dtensor_cfg"] = {"enabled": False}
             if lora_config and lora_config.get("rank", 0) > 0:
                 meg_peft = {
                     "enabled": True,
                     # Megatron module names: qkv and gate/up are fused — the
-                    # lowering under test. Coverage mirrors all-linear.
-                    "target_modules": ["linear_qkv", "linear_proj",
-                                       "linear_fc1", "linear_fc2"],
+                    # lowering under test. Targets follow the SDK's LoRA flags.
+                    "target_modules": _megatron_lora_targets(lora_config),
                     "exclude_modules": [],
+                    # Tinker's shared-outer expert LoRA (cookbook hyperparam_utils
+                    # get_lora_param_count): one hidden-side factor shared across
+                    # experts, separate gate and up; matches nothing on a dense model.
+                    "experts_shared_outer_loras": True,
+                    "experts_shared_outer_separate_gate_up": True,
                     "dim": lora_config.get("rank", 8),
                     "alpha": lora_config.get("alpha") or lora_config.get("rank", 8),
                     "dropout": lora_config.get("dropout", 0.0),
@@ -342,21 +353,23 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
                 "env_vars": {},
                 "fp8_cfg": {"enabled": False, "fp8": "e4m3", "fp8_recipe": "blockwise", "fp8_param": False},
                 "tensor_model_parallel_size": tp_size,
-                "expert_tensor_parallel_size": 1,
-                "expert_model_parallel_size": 1,
+                "expert_tensor_parallel_size": 1,  # the separate gate/up adapter raises otherwise
+                "expert_model_parallel_size": self.cfg.megatron_ep,
                 "pipeline_model_parallel_size": pp_size,
                 "num_layers_in_first_pipeline_stage": None,
                 "num_layers_in_last_pipeline_stage": None,
                 "context_parallel_size": cp_size,
                 "pipeline_dtype": "bfloat16",
                 "sequence_parallel": False,
-                "freeze_moe_router": False,  # ValueError with PEFT; model is dense
+                "freeze_moe_router": False,  # ValueError with PEFT; LoRA freezes the router anyway
                 "moe_router_dtype": "fp64",
                 "moe_router_load_balancing_type": "none",
                 "moe_router_bias_update_rate": 0.0,
-                "moe_permute_fusion": False,
+                # NeMo RL assigns these over the bridge's provider: a model with
+                # experts keeps the gpt-oss provider's (gpt_oss_bridge.py)
+                "moe_permute_fusion": num_experts > 0,
                 "moe_enable_deepep": False,
-                "moe_token_dispatcher_type": "allgather",
+                "moe_token_dispatcher_type": "alltoall" if num_experts else "allgather",
                 "moe_shared_expert_overlap": False,
                 "moe_per_layer_logging": False,
                 "apply_rope_fusion": True,
@@ -404,6 +417,11 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
                     "data_parallel_sharding_strategy": "optim_grads_params",
                 },
             }
+
+        if num_experts:
+            # vLLM 0.20's default MoE backend does not take a refit
+            # (NeMo RL recipes/llm/grpo-gptoss-20b-8n8g-megatron.yaml)
+            policy_config["generation"]["vllm_kwargs"]["moe_backend"] = "triton"
 
         # Loss function config: Tinker's importance_sampling (no clip, no KL);
         # the ppo path swaps in the client's clip bounds per call.
@@ -461,6 +479,28 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
         )
 
         return config_dict, hf_path
+
+
+def _num_experts(raw_config: Dict[str, Any]) -> int:
+    """Routed experts per MoE layer from config.json; 0 for a dense model (neither key)."""
+    for key in ("num_local_experts", "num_experts"):  # gpt-oss/Mixtral, Qwen MoE
+        if key in raw_config:
+            return int(raw_config[key])
+    return 0
+
+
+def _megatron_lora_targets(lora_config: Dict[str, Any]) -> list:
+    """Megatron module names for the SDK's LoRA flags (train_attn, train_mlp, train_unembed)."""
+    targets = []
+    if lora_config["train_attn"]:
+        targets += ["linear_qkv", "linear_proj"]
+    if lora_config["train_mlp"]:
+        targets += ["linear_fc1", "linear_fc2"]
+    if lora_config["train_unembed"]:
+        targets += ["output_layer"]
+    if not targets:
+        raise ValueError("LoRA rank > 0 with train_attn, train_mlp and train_unembed all false")
+    return targets
 
 
 def _deep_merge(base: dict, overrides: dict) -> None:

@@ -1,6 +1,10 @@
 """NemoRLArgumentBuilder: the config dict handed to NeMo RL (parallelism, cluster layout, LoRA, RL knobs, overrides)."""
 import pytest
 
+# what routers/models.py passes: LoraConfig.dict()
+LORA16 = {"rank": 16, "alpha": None, "dropout": 0.0, "seed": None,
+          "train_unembed": True, "train_mlp": True, "train_attn": True}
+
 
 class TestNemoRLArgumentBuilder:
     """Test NemoRLArgumentBuilder config generation."""
@@ -92,13 +96,81 @@ class TestNemoRLArgumentBuilder:
         from tinkercloud.training.backends.nemo_rl.loss_config import NO_GRAD_CLIP
         cfg = NemoRLConfig.from_env({"megatron": True}, environ={})
         config_dict, _ = NemoRLArgumentBuilder(config=cfg).build_args(
-            base_model="meta-llama/Llama-3.1-8B", num_gpus=2, lora_config={"rank": 16},
+            base_model="meta-llama/Llama-3.1-8B", num_gpus=2, lora_config=LORA16,
         )
         meg = config_dict["policy"]["megatron_cfg"]
         assert meg["scheduler"]["lr_decay_style"] == "constant"
         assert meg["scheduler"]["lr_warmup_iters"] == 0
         assert meg["optimizer"]["clip_grad"] == NO_GRAD_CLIP
         assert config_dict["policy"]["dtensor_cfg"] == {"enabled": False}
+
+    @pytest.mark.parametrize("flags, targets", [
+        ({}, ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2", "output_layer"]),
+        ({"train_unembed": False}, ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2"]),
+        ({"train_attn": False, "train_mlp": False}, ["output_layer"]),
+    ])
+    def test_megatron_lora_targets_follow_the_sdk_flags(self, flags, targets):
+        from tinkercloud.training.backends.nemo_rl.builder import NemoRLArgumentBuilder
+        from tinkercloud.training.backends.nemo_rl.config import NemoRLConfig
+        cfg = NemoRLConfig.from_env({"megatron": True}, environ={})
+        config_dict, _ = NemoRLArgumentBuilder(config=cfg).build_args(
+            base_model="meta-llama/Llama-3.1-8B", num_gpus=2, lora_config={**LORA16, **flags},
+        )
+        peft = config_dict["policy"]["megatron_cfg"]["peft"]
+        assert peft["target_modules"] == targets
+        assert peft["experts_shared_outer_loras"] is True
+        assert peft["experts_shared_outer_separate_gate_up"] is True
+
+    def test_megatron_lora_refuses_no_target(self):
+        from tinkercloud.training.backends.nemo_rl.builder import NemoRLArgumentBuilder
+        from tinkercloud.training.backends.nemo_rl.config import NemoRLConfig
+        cfg = NemoRLConfig.from_env({"megatron": True}, environ={})
+        off = {"train_attn": False, "train_mlp": False, "train_unembed": False}
+        with pytest.raises(ValueError, match="all false"):
+            NemoRLArgumentBuilder(config=cfg).build_args(
+                base_model="meta-llama/Llama-3.1-8B", num_gpus=2, lora_config={**LORA16, **off},
+            )
+
+    def test_moe_model_gets_expert_parallel_and_the_providers_dispatcher(self, monkeypatch):
+        from tinkercloud.training.backends.nemo_rl import builder as mod
+        from tinkercloud.training.backends.nemo_rl.config import NemoRLConfig
+        monkeypatch.setattr(mod, "read_raw_hf_config", lambda base_model: {
+            "architectures": ["GptOssForCausalLM"], "max_position_embeddings": 131072,
+            "num_local_experts": 128,
+        })
+        cfg = NemoRLConfig.from_env({"megatron": True, "megatron_ep": 8}, environ={})
+        config_dict, _ = mod.NemoRLArgumentBuilder(config=cfg).build_args(
+            base_model="openai/gpt-oss-120b", num_gpus=8, lora_config=LORA16,
+        )
+        meg = config_dict["policy"]["megatron_cfg"]
+        assert meg["expert_model_parallel_size"] == 8
+        assert meg["expert_tensor_parallel_size"] == 1
+        assert meg["moe_token_dispatcher_type"] == "alltoall"
+        assert meg["moe_permute_fusion"] is True
+        assert config_dict["policy"]["generation"]["vllm_kwargs"]["moe_backend"] == "triton"
+
+    def test_dense_model_keeps_the_dense_moe_settings(self):
+        from tinkercloud.training.backends.nemo_rl.builder import NemoRLArgumentBuilder
+        from tinkercloud.training.backends.nemo_rl.config import NemoRLConfig
+        cfg = NemoRLConfig.from_env({"megatron": True}, environ={})
+        config_dict, _ = NemoRLArgumentBuilder(config=cfg).build_args(
+            base_model="meta-llama/Llama-3.1-8B", num_gpus=2, lora_config=LORA16,
+        )
+        meg = config_dict["policy"]["megatron_cfg"]
+        assert meg["expert_model_parallel_size"] == 1
+        assert meg["moe_token_dispatcher_type"] == "allgather"
+        assert "moe_backend" not in config_dict["policy"]["generation"]["vllm_kwargs"]
+
+    @pytest.mark.parametrize("overrides, match", [
+        ({"megatron": True, "megatron_ep": 2}, "does not divide the model's 0 experts"),
+        ({"megatron_ep": 2}, "needs the Megatron worker"),
+    ])
+    def test_expert_parallel_is_refused_where_it_cannot_apply(self, overrides, match):
+        from tinkercloud.training.backends.nemo_rl.builder import NemoRLArgumentBuilder
+        from tinkercloud.training.backends.nemo_rl.config import NemoRLConfig
+        cfg = NemoRLConfig.from_env(overrides, environ={})
+        with pytest.raises(ValueError, match=match):
+            NemoRLArgumentBuilder(config=cfg).build_args(base_model="meta-llama/Llama-3.1-8B", num_gpus=2)
 
     def test_sequence_packing_is_refused(self):
         # the step's per-sample logprobs are not collected from packed microbatches
@@ -156,8 +228,6 @@ _OPTIONAL_UPSTREAM_KEYS = {
     "dtensor_cfg.dp_replicate_size",    # .get (models/automodel/setup.py:464)
     "dtensor_cfg.automodel_kwargs",     # .get (models/automodel/setup.py:678)
     "dtensor_cfg.lora_cfg.match_all_linear",  # PeftConfig.from_dict default; target_modules are explicit
-    "megatron_cfg.peft.experts_shared_outer_loras",             # NotRequired in MegatronPeftConfig
-    "megatron_cfg.peft.experts_shared_outer_separate_gate_up",  # NotRequired in MegatronPeftConfig
 }
 
 
@@ -192,7 +262,7 @@ def test_policy_config_carries_every_key_the_installed_nemo_rl_reads(megatron, m
     })
     cfg = NemoRLConfig.from_env({"megatron": megatron}, environ={})
     config_dict, _ = mod.NemoRLArgumentBuilder(config=cfg).build_args(
-        base_model="Qwen/Qwen2.5-0.5B-Instruct", num_gpus=2, lora_config={"rank": 16},
+        base_model="Qwen/Qwen2.5-0.5B-Instruct", num_gpus=2, lora_config=LORA16,
     )
     drift = sorted(set(_missing_keys(reference, config_dict["policy"])) - _OPTIONAL_UPSTREAM_KEYS)
     assert not drift, f"policy keys {exemplar} has and the builder does not write: {drift}"

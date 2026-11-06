@@ -19,7 +19,7 @@ import torch
 
 from tests.datums import random_ce_datum
 from tinkercloud.training.backends.nemo_rl.backend import NemoRLBackend
-from tinkercloud.training.models.requests import AdamParams
+from tinkercloud.training.models.requests import AdamParams, LoraConfig
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 # unsorted lengths, two equal: 9 rows over DP=2 also leave one padding row
@@ -33,7 +33,7 @@ def check_step_logprobs_follow_the_datums(megatron: bool, tmp_path) -> None:
     async def go():
         backend = NemoRLBackend(overrides={"megatron": megatron, "debug_train_only": True})
         handle = await backend.create_model("m", "req-1", MODEL, num_gpus=2,
-                                            lora_config={"rank": 8, "alpha": 16},
+                                            lora_config=LoraConfig(rank=8, alpha=16).dict(),
                                             native_root=tmp_path, optimizer="adamw")
         try:
             fwd = await backend.forward(handle, data, "cross_entropy")
