@@ -99,6 +99,10 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
         swept = checkpoint_store.sweep_pending()
         if swept:
             logger.warning("Marked %d checkpoint save(s) interrupted by the last shutdown as failed", swept)
+        expired = checkpoint_store.sweep_expired()
+        if expired:
+            logger.info("Deleted %d expired checkpoint(s)", expired)
+        application.state.checkpoint_sweeper = asyncio.create_task(checkpoint_store.sweep_forever())
         logger.info("Checkpoint base: %s", config_obj.storage.checkpoint_base)
 
         logger.info("Initialized storage modules - DB: %s", config_obj.storage.futures_db_path)
@@ -197,6 +201,7 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
     @application.on_event("shutdown")
     async def shutdown_event():
         """Free every live model (actors, placement groups) before the process exits."""
+        application.state.checkpoint_sweeper.cancel()
         application.state.sample_futures_sweeper.cancel()
         runtime: TrainingRuntimeState = application.state.runtime
         # a free stuck on a hung op is cancelled first, then every live model is freed at once
