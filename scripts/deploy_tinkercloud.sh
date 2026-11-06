@@ -51,8 +51,9 @@
 #
 # --code-only  Skip pod/container creation; redeploy code + restart server.
 #
-# HF token: HF_TOKEN_FILE=<path> (copied to /tmp/hf_token.txt in the target;
-# if unset, an existing /tmp/hf_token.txt inside the target is reused).
+# HF token: HF_TOKEN_FILE=<path> (copied to /tmp/hf_token.txt in the target).
+# Unset, it is huggingface_hub's own token file when one exists; otherwise an
+# existing /tmp/hf_token.txt inside the target is reused (--code-only only).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -143,6 +144,7 @@ esac
 IMAGE_PULL_SECRET="${IMAGE_PULL_SECRET:-}"   # non-empty only for private-registry profiles (miles)
 SERVER_LOG="${SERVER_LOG:-/data/server1.log}"
 HF_TOKEN_FILE="${HF_TOKEN_FILE:-}"
+[ -z "$HF_TOKEN_FILE" ] && [ -s "$HOME/.cache/huggingface/token" ] && HF_TOKEN_FILE="$HOME/.cache/huggingface/token"
 # k8s: a host directory in HF_HOME layout (hub/models--...) mounted at
 # /data/.cache/huggingface, so weights outlive the pod and are shared by
 # every pod on the node. Blank keeps the cache in the pod's emptyDir.
@@ -184,6 +186,12 @@ elif [ "$TARGET" = docker ]; then
   EX_TIMEOUT() { timeout 30 $DOCKER exec "$CONTAINER" bash -c "$1" || true; }
 else
   echo "unknown --target $TARGET"; exit 1
+fi
+
+# A new target has no token to reuse: refuse before anything is created.
+if [ "$CODE_ONLY" = 0 ] && [ "$RUN_SERVER" = 1 ] && [ ! -s "$HF_TOKEN_FILE" ]; then
+  echo "ERROR: a new $PROFILE target needs an HF token: HF_TOKEN_FILE='${HF_TOKEN_FILE}' is missing or empty"
+  exit 1
 fi
 
 # --- 1. create the pod / container -----------------------------------------

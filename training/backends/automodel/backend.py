@@ -170,6 +170,10 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         if lora.rank > self.config.max_lora_rank:
             raise BackendError(f"LoRA rank {lora.rank} is above the server's max_lora_rank {self.config.max_lora_rank}",
                                backend=BACKEND, operation="create_model")
+        if lora.rank % self.config.train_gpus:
+            raise BackendError(f"LoRA rank {lora.rank} does not divide over the server's {self.config.train_gpus} "
+                               "training ranks (train_gpus): each LoRA factor is sharded across them",
+                               backend=BACKEND, operation="create_model")
         raw = await asyncio.to_thread(read_raw_hf_config, base_model)
         classification = classification_spec(raw)
         if classification is not None:

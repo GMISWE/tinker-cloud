@@ -821,3 +821,11 @@ def test_external_weights_export_leaves_the_adapter_at_the_root(tmp_path):
         assert files_under(root) == {"adapter_model.safetensors", "adapter_config.json"}
         await backend.close()
     run(go())
+
+
+def test_a_rank_the_training_ranks_cannot_split_is_refused(monkeypatch, tmp_path):
+    backend, started = creatable(monkeypatch)   # train_gpus=2
+    with pytest.raises(BackendError, match="LoRA rank 1 does not divide over the server's 2 training ranks"):
+        run(backend.create_model("a", "r1", "base", 2, lora_config={"rank": 1, "alpha": 1},
+                                 native_root=tmp_path / "a", optimizer="adamw"))
+    assert started == []   # refused before any group starts

@@ -64,7 +64,7 @@ async def _completed_response(fut: Dict[str, Any], accept: str, futures_storage:
             try:
                 blob = await asyncio.to_thread(serialize_result, fut["operation"], fut.get("result") or {})
             except Exception as e:
-                raise HTTPException(status_code=500, detail=f"result has no proto encoding: {e}")
+                raise HTTPException(status_code=500, detail=f"result has no proto encoding: {e}") from e
             futures_storage.set_result_proto(fut["request_id"], blob)
         return Response(content=blob, media_type=PROTO_CONTENT_TYPE)
     return JSONResponse(content=fut.get("result", {}))
@@ -125,8 +125,8 @@ async def retrieve_future(
         if sf.status == "pending":
             try:
                 await asyncio.wait_for(sf.done.wait(), timeout=LONG_POLL_HOLD_S)
-            except asyncio.TimeoutError:
-                raise HTTPException(status_code=408, detail="Operation still in progress")
+            except asyncio.TimeoutError as e:
+                raise HTTPException(status_code=408, detail="Operation still in progress") from e
         poll_tracking.pop(request_id, None)
         return await _sample_response(sf, accept, sample_futures)
 
@@ -277,4 +277,4 @@ async def cleanup_futures(
 
     except Exception as e:
         logger.error(f"Cleanup failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e

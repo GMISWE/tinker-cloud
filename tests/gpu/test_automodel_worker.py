@@ -210,6 +210,29 @@ def test_one_rank_group_runs():
         grp.kill()
 
 
+@pytest.mark.xfail(strict=True, reason="bug: a 1-rank group (no FSDP2) holds bf16 LoRA params although "
+                   "setup asks for lora_dtype=float32; 2 ranks hold float32. The fix removes this marker")
+def test_lora_parameters_train_in_float32():
+    """setup() builds the adapter with lora_dtype=float32: bf16 factors would round away
+    small AdamW updates. Reads the live parameters (lora_state casts to fp32 itself)."""
+    class Probe(AutomodelWorker):   # defined here: Ray pickles it by value
+        def lora_dtypes(self):
+            return sorted({str(p.dtype) for _, p in self.lora_params})
+
+    cls = ray.remote(num_gpus=1, num_cpus=1)(Probe)
+    seen = {}
+    for n in (1, 2):
+        ranks = [cls.remote(r, n, MODEL, LORA, 2) for r in range(n)]
+        try:
+            addr = ray.get(ranks[0].rendezvous_address.remote())
+            ray.get([w.setup.remote(addr) for w in ranks])
+            seen[n] = ray.get([w.lora_dtypes.remote() for w in ranks])
+        finally:
+            for w in ranks:
+                ray.kill(w)
+    assert all(d == ["torch.float32"] for ds in seen.values() for d in ds), seen
+
+
 def with_weight(batch, w):
     """The same batch with every CE weight set to w where it was nonzero."""
     from dataclasses import replace
