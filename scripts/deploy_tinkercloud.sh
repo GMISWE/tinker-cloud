@@ -311,6 +311,10 @@ fi
 # in-container). dev/monorepo only (submodule); git mode not supported for it.
 EXTRA_TAR_PATHS=""
 [ "$PROFILE" = megatron_bridge ] && EXTRA_TAR_PATHS="bionemo-recipes/recipes/evo2_megatron"
+# nemo_rl dev deploys carry the RL checkout's Megatron-Bridge package (its PEFT
+# carries); setup_container overlays it on the image's. A git deploy carries none.
+[ "$PROFILE" = nemo_rl ] && [ "$SOURCE" = dev ] && \
+  EXTRA_TAR_PATHS="RL/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge/src/megatron/bridge"
 
 # --- 2. gather code ---------------------------------------------------------
 echo "==> [2/6] gathering code (source=$SOURCE)"
@@ -321,7 +325,7 @@ if [ "$SOURCE" = dev ]; then
     [ -d "$MONOREPO/$d" ] || { echo "ERROR: $MONOREPO/$d missing (dev mode needs the monorepo)"; exit 1; }
   done
   if [ -n "$EXTRA_TAR_PATHS" ] && [ ! -d "$MONOREPO/$EXTRA_TAR_PATHS" ]; then
-    echo "ERROR: $MONOREPO/$EXTRA_TAR_PATHS missing (megatron_bridge needs the bionemo-recipes submodule: git submodule update --init bionemo-recipes)"; exit 1
+    echo "ERROR: $MONOREPO/$EXTRA_TAR_PATHS missing (a submodule not checked out: git submodule update --init --recursive)"; exit 1
   fi
   SRC="$MONOREPO"
 elif [ "$SOURCE" = git ]; then

@@ -75,6 +75,14 @@ fi
 if [ "$PROFILE" = nemo_rl ]; then
   PKG=$(python3 -c 'import nemo_rl, os; print(os.path.dirname(nemo_rl.__file__))')
   cp -r /tmp/RL/nemo_rl/. "$PKG/"
+  # the RL checkout's Megatron-Bridge package (PEFT carries) over the image's,
+  # which every worker venv imports from source; only dev deploys bundle it
+  MBSRC=/tmp/RL/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge/src/megatron/bridge
+  if [ -d "$MBSRC" ]; then
+    MBPKG="$(dirname "$PKG")/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge/src/megatron/bridge"
+    [ -d "$MBPKG" ] || { echo "ERROR: the image's Megatron-Bridge is not at $MBPKG"; exit 1; }
+    cp -r "$MBSRC/." "$MBPKG/"
+  fi
 elif [ "$PROFILE" = miles ]; then
   # Overlay the GMI miles fork onto the image's editable install: the base image's
   # baked miles predates the Tinker Ray-orchestration interface (forward_backward_only,
