@@ -1,5 +1,5 @@
 """The session reaper runs in the gateway: a session silent past the timeout has its models deleted on
-the engine, and a gateway restart frees nothing."""
+the engine, and failed deletes remain queued for another tick."""
 import asyncio
 
 import orjson
@@ -37,6 +37,60 @@ def test_an_expired_session_has_its_models_deleted_on_the_engine(tmp_path):
         finally:
             await h.close()
     run(main())
+
+
+def test_a_failed_engine_delete_is_retried(tmp_path):
+    async def main():
+        h = Harness(str(tmp_path))
+        h.cfg.session_timeout_s = 0.2
+        h.cfg.session_reap_interval_s = 0.05
+        deletes = []
+        retried = asyncio.Event()
+
+        def fail_first_delete(request):
+            if request["path"] != "/api/v1/delete_model":
+                return
+            deletes.append(orjson.loads(request["body"])["model_id"])
+            if len(deletes) == 1:
+                h.engine.answers[request["path"]] = 500
+            else:
+                h.engine.answers.pop(request["path"], None)
+                retried.set()
+
+        h.engine.on_request = fail_first_delete
+        try:
+            async with serve_uds(h.engine, h.engine_socket):
+                await h.register()
+                session_id = await h.create_session()
+                model_id = (await h.post_json("/api/v1/create_model", _create(session_id))).json()["model_id"]
+                await h.gateway.start()
+                await asyncio.wait_for(retried.wait(), timeout=2)
+                await asyncio.sleep(0.1)
+                assert deletes == [model_id, model_id]
+                assert h.store.get_session(session_id) is None
+        finally:
+            await h.close()
+    run(main())
+
+
+def test_a_failed_reap_is_durable_and_not_claimed_twice(tmp_path):
+    from training.gateway.sessions import SessionStore
+
+    path = tmp_path / "sessions.db"
+    first, second = SessionStore(path), SessionStore(path)
+    session_id = first.create_session([], {}, "t", None)
+    model_id = "model_fake_0123456789abcdef"
+    first.add_model(session_id, model_id, 0, "fake/tiny", "fake")
+    claimed = [(session_id, [model_id])]
+    assert first.claim_expired(-1) == claimed
+    assert second.claim_expired(-1) == []
+    first.retry_reap(model_id)
+    first.close()
+    second.close()
+    reopened = SessionStore(path)
+    assert reopened.claim_expired(-1) == claimed
+    reopened.remove_model(model_id)
+    reopened.close()
 
 
 def test_two_workers_free_each_expired_model_once(tmp_path):

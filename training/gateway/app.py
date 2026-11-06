@@ -131,7 +131,7 @@ class Gateway:
             except asyncio.CancelledError:
                 pass
         self._tasks.clear()
-        await self.reaper.shutdown([])   # the engines keep their models: a gateway restart frees nothing
+        await self.reaper.shutdown([])   # live models keep training through a gateway restart; pending reaps stay queued
         await self.pool.aclose()
 
     async def _refresh_forever(self) -> None:
@@ -188,20 +188,30 @@ class Gateway:
         return await forward(self.pool.client_for(engine), method, path, b"", headers, [], body)
 
     async def free_model(self, model_id: str, reason: str) -> None:
-        """Delete a model on its engine and drop its row; never raises (FreeFn's contract)."""
+        """Delete a model on its engine and acknowledge the reap; never raises (FreeFn's contract)."""
         name = engine_name_of(model_id)
         engine = self.registry.get(name) if name else None
         logger.info("Freeing model %s (%s)", model_id, reason)
+        delete_confirmed = False
         if engine is None:
-            logger.warning("Model %s names no registered engine; its row is dropped", model_id)
+            logger.warning("Model %s names no registered engine; its delete will be retried", model_id)
         else:
             try:
                 resp = await self.engine_call(engine, "POST", "/api/v1/delete_model", {"model_id": model_id})
-                if not (200 <= resp.status < 300 or resp.status == 404):
-                    logger.error("Engine %s answered %d to the delete of %s: %s", engine.name, resp.status, model_id, resp.body[:500])
+                if 200 <= resp.status < 300 or resp.status == 404:
+                    delete_confirmed = True
+                else:
+                    logger.error("Engine %s answered %d to the delete of %s; it will be retried: %s",
+                                 engine.name, resp.status, model_id, resp.body[:500])
+            except asyncio.CancelledError:
+                self.store.retry_reap(model_id)
+                raise
             except EngineUnreachable as exc:
-                logger.error("Engine %s unreachable; model %s was not freed: %s", engine.name, model_id, exc)
-        self.store.remove_model(model_id)
+                logger.error("Engine %s unreachable; model %s delete will be retried: %s", engine.name, model_id, exc)
+        if delete_confirmed:
+            self.store.remove_model(model_id)
+        else:
+            self.store.retry_reap(model_id)
 
     async def health(self, path: str) -> Reply:
         """The engine's own health, with the engines the gateway knows; 503 while none answers."""
