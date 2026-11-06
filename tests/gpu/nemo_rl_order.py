@@ -5,7 +5,9 @@ per-microbatch outputs, concatenated across microbatches and data-parallel
 ranks and unsorted after dynamic batching. forward() reaches the same weights
 through policy.get_logprobs, an independent path. Row i of the step must be
 datum i's: same length, same values, and closer to its own forward row than to
-any other datum's of that length.
+any other datum's of that length. Then a checkpoint saves from the offloaded
+policy a refit leaves behind (the Megatron worker's offload frees its
+parameter buffers).
 
 Shared by test_nemo_rl_logprob_order_{dtensor,megatron}.py: one create per Ray
 instance (nemo_rl's placement group name is deterministic), and the GPU
@@ -37,11 +39,16 @@ def check_step_logprobs_follow_the_datums(megatron: bool, tmp_path) -> None:
             fwd = await backend.forward(handle, data, "cross_entropy")
             await backend.forward_backward(handle, data, "cross_entropy")
             step = await backend.apply_optimizer_step(handle, AdamParams(learning_rate=1e-4, eps=1e-8))
+            # train-only runs no refit: offload as a refit does, then save
+            await asyncio.to_thread(handle.policy.offload_after_refit)
+            handle.training_resident = False
+            await backend.save_checkpoint(handle, tmp_path / "ckpt", step=1)
         finally:
             await backend.delete_model(handle)
         return fwd["loss_fn_outputs"], step["loss_fn_outputs"]
 
     fwd, step = asyncio.run(go())
+    assert any((tmp_path / "ckpt" / "weights").iterdir()), "the save wrote no weights"
     ref = [torch.tensor(o["logprobs"]["data"]) for o in fwd]
     got = [torch.tensor(o["logprobs"]["data"]) for o in step]
     # each row is its datum's length up to one constant offset, on both paths
