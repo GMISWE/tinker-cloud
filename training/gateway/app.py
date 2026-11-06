@@ -213,8 +213,9 @@ class Gateway:
         else:
             self.store.retry_reap(model_id)
 
-    async def health(self, path: str) -> Reply:
-        """The engine's own health, with the engines the gateway knows; 503 while none answers."""
+    async def health(self, path: str, show_models: bool = True) -> Reply:
+        """The engine's own health, with the engines the gateway knows; 503 while none answers.
+        Live model ids go only to a caller holding the key (`show_models`)."""
         engine = self.registry.only()
         if engine is None:
             self.registry.refresh()
@@ -229,6 +230,8 @@ class Gateway:
             return _error(503, f"engine {engine.name} answered {resp.status} to /health", path)
         health = HealthResponse.model_validate(orjson.loads(resp.body))   # the engine's body, checked once here
         health.engines = [{"name": engine.name, "state": "UP"}]
+        if not show_models:
+            health.model_ids = None
         return _json_reply(200, health.model_dump())
 
 
@@ -379,7 +382,7 @@ def sdk_face(gateway: Gateway, engines) -> FastAPI:
     @app.get("/api/v1/health")
     async def health(request: Request):
         try:
-            return _response(await gateway.health(request.url.path))
+            return _response(await gateway.health(request.url.path, gateway.decider.key_valid(request.headers.raw)))
         except RegistryUnavailable as exc:
             return _response(_error(503, f"engine registry busy: {exc}", request.url.path))
 
@@ -500,6 +503,11 @@ def gateway_engines_face(registry: Registry, gateway: Gateway):
     registration, store = engines_face(registry), store_face(gateway)
 
     async def app(scope, receive, send) -> None:
+        # an engine holds the same API key as its SDK clients; without it nobody registers,
+        # unregisters or records anything here, whatever the socket's permissions
+        if not gateway.decider.key_valid(scope["headers"]):
+            await _send_reply(send, _error(401, "an engine request needs the API key", scope["path"]))
+            return
         await (store if _store_route(scope["path"]) else registration)(scope, receive, send)
     return app
 

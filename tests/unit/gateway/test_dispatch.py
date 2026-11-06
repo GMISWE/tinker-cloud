@@ -34,7 +34,7 @@ def test_both_unix_scope_shapes_reach_the_engines_face():
 
             async def send(m):
                 sent.append(m)
-            await app(_scope(server), _scripted([{"type": "http.request", "body": b""}]), send)
+            await app(_scope(server, headers=[(b"x-api-key", API_KEY.encode())]), _scripted([{"type": "http.request", "body": b""}]), send)
             assert sent[0]["status"] == 200 and orjson.loads(sent[1]["body"]) == {"engines": []}, (server, sent)
     run(main())
 

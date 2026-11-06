@@ -13,9 +13,20 @@ import pytest
 from tinkercloud.training.core import loss_registry
 from tinkercloud.training.models.requests import ForwardBackwardRequest
 from tinkercloud.training.proto import tinker_public_pb2 as pb
+from tinkercloud.training.proto import wire
 from tinkercloud.training.proto.wire import (
     WireError, decompress_zstd, parse_forward_backward_request, serialize_result, zstd_available,
 )
+
+
+def test_a_zstd_body_past_the_bound_is_refused_and_an_unsized_frame_still_reads(monkeypatch):
+    zstandard = pytest.importorskip("zstandard")
+    monkeypatch.setattr(wire, "MAX_DECOMPRESSED_BODY_BYTES", 1 << 20)
+    small = b"x" * 1000
+    assert decompress_zstd(zstandard.ZstdCompressor(write_content_size=False).compress(small)) == small
+    for compressor in (zstandard.ZstdCompressor(), zstandard.ZstdCompressor(write_content_size=False)):
+        with pytest.raises(WireError, match="decompresses past"):
+            decompress_zstd(compressor.compress(b"\0" * ((1 << 20) + 1)))
 
 
 def _fb_msg(seq_id=3, loss_fn="cross_entropy", forward_only=False):

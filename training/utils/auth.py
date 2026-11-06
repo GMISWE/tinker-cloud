@@ -68,7 +68,7 @@ class APIKeyAuth:
             )
 
         if provided_key not in self.valid_keys:
-            logger.warning(f"Invalid API key provided: {provided_key[:8]}...")
+            logger.warning("Invalid API key provided")   # no part of it: a mistyped key is mostly a real one
             raise HTTPException(
                 status_code=401,
                 detail="Invalid API key"
@@ -76,6 +76,10 @@ class APIKeyAuth:
 
         # Success - log at debug level only
         logger.debug("API key validated successfully")
+
+    def is_valid(self, provided_key: Optional[str]) -> bool:
+        """verify() as a boolean that logs nothing (for routes that also serve keyless callers)."""
+        return not self.enabled or (bool(provided_key) and provided_key in self.valid_keys)
 
     def add_key(self, api_key: str) -> None:
         """
@@ -85,7 +89,7 @@ class APIKeyAuth:
             api_key: API key to add
         """
         self.valid_keys.add(api_key)
-        logger.info(f"Added new API key: {api_key[:8]}...")
+        logger.info("Added an API key")
 
     def remove_key(self, api_key: str) -> bool:
         """
@@ -99,7 +103,7 @@ class APIKeyAuth:
         """
         if api_key in self.valid_keys:
             self.valid_keys.remove(api_key)
-            logger.info(f"Removed API key: {api_key[:8]}...")
+            logger.info("Removed an API key")
             return True
         return False
 

@@ -39,9 +39,10 @@ PROTO_CONTENT_TYPE = "application/x-protobuf"
 # Operations (TaskManager names) whose completed result has a proto view.
 PROTO_RESULT_OPERATIONS = frozenset({"forward", "forward_backward", "sample", "asample"})
 
-# Bound on a decompressed body: far above any chunk the SDK sends (it caps
+# Bound on a decompressed body: over ten times any chunk the SDK sends (it caps
 # chunks at ~5 MB before compression), so only a crafted body ever hits it.
-MAX_DECOMPRESSED_BODY_BYTES = 1 << 30
+MAX_DECOMPRESSED_BODY_BYTES = 64 << 20
+_DECOMPRESS_PIECE_BYTES = 1 << 20
 
 
 def zstd_available() -> bool:
@@ -49,13 +50,20 @@ def zstd_available() -> bool:
 
 
 def decompress_zstd(body: bytes) -> bytes:
-    """`Content-Encoding: zstd` body -> raw bytes. ASGI servers do not decode request bodies."""
+    """`Content-Encoding: zstd` body -> raw bytes. ASGI servers do not decode request bodies.
+    Read piece by piece, so a frame that states no content size never reserves the whole bound."""
     if zstandard is None:
         raise WireError("zstd request bodies are not supported on this server (zstandard not installed)")
+    out = bytearray()
     try:
-        return zstandard.ZstdDecompressor().decompress(body, max_output_size=MAX_DECOMPRESSED_BODY_BYTES)
+        with zstandard.ZstdDecompressor().stream_reader(body) as reader:
+            while piece := reader.read(_DECOMPRESS_PIECE_BYTES):
+                out += piece
+                if len(out) > MAX_DECOMPRESSED_BODY_BYTES:
+                    raise WireError(f"zstd body decompresses past {MAX_DECOMPRESSED_BODY_BYTES} bytes")
     except zstandard.ZstdError as e:
         raise WireError(f"zstd decompression failed: {e}") from None
+    return bytes(out)
 
 # Undefined top-k slot; must match MASK_LOGPROB in the SDK's sample_response.py.
 _TOPK_MASK_TOKEN_ID = 0
