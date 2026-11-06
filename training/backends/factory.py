@@ -1,13 +1,15 @@
 """
 Backend factory — creates the appropriate TrainingBackend from configuration.
 
-`SUPPORTED_BACKENDS` is the one allow-list; the CLI flag, the config
-validator and the signature-contract test all import it from here.
+`SUPPORTED_BACKENDS` is the one allow-list; the CLI flag and the
+signature-contract test import it from here. It is `config.BACKEND_NAMES`,
+which the config validator reads without importing a backend.
 """
 import importlib
 import logging
 from typing import Any, Dict, Optional, Type
 
+from ..config import BACKEND_NAMES
 from .base import TrainingBackend
 
 logger = logging.getLogger(__name__)
@@ -21,7 +23,10 @@ _BACKEND_CLASSES = {
     "automodel": (".automodel.backend", "AutomodelBackend"),
     "fake": (".fake.backend", "FakeBackend"),  # deterministic CPU backend for protocol tests
 }
-SUPPORTED_BACKENDS = tuple(_BACKEND_CLASSES)
+if tuple(_BACKEND_CLASSES) != BACKEND_NAMES:
+    raise RuntimeError(f"config.BACKEND_NAMES {BACKEND_NAMES} and the factory's backends "
+                       f"{tuple(_BACKEND_CLASSES)} disagree")
+SUPPORTED_BACKENDS = BACKEND_NAMES
 
 
 class BackendFactory:
