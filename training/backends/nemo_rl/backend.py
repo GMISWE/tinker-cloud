@@ -685,7 +685,10 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             local_path = str(root)
 
             weights_path = f"{local_path}/weights"
-            checkpointing_cfg = handle.config["checkpointing"]
+            # Only the DTensor v2 worker takes a save format; Policy.save_checkpoint
+            # refuses one for the Megatron worker, which writes its own format.
+            save_format = ({} if handle.config["policy"]["megatron_cfg"]["enabled"]
+                           else {"checkpointing_cfg": handle.config["checkpointing"]})
 
             # Optimizer state rides beside the weights so load_weights(optimizer=true)
             # can restore it; LoRA moments are small.
@@ -693,7 +696,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                 handle.policy.save_checkpoint,
                 weights_path=weights_path,
                 optimizer_path=f"{local_path}/optimizer",
-                checkpointing_cfg=checkpointing_cfg,
+                **save_format,
             )
 
             # LoRA runs write the PEFT pair under <weights>/model; publish it
