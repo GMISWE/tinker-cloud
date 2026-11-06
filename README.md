@@ -82,7 +82,7 @@ Server-wide settings (`training/config.py`):
 | `TINKERCLOUD_BACKEND` | `miles`, `nemo_rl`, `verl`, `megatron_bridge`, `fake` (also `python -m training --backend B`) | `miles` |
 | `TINKERCLOUD_BACKEND_OVERRIDES` | JSON object of backend config fields, applied over the environment | unset |
 | `TRAINING_HOST` / `TRAINING_PORT` | Bind address | `0.0.0.0` / `8000` |
-| `TINKER_API_KEY` | API auth key | `tml-dev-key` |
+| `TINKER_API_KEY` | API auth key (comma-separated for several); `ENV=production` refuses to start when the list is empty or holds `tml-dev-key` | `tml-dev-key` |
 | `RAY_ADDRESS` / `RAY_NAMESPACE` | Ray cluster endpoint / namespace | auto (local head) / `default` |
 | `METADATA_DIR` | Futures DB, sessions DB, checkpoint metadata | `/data/metadata` |
 | `TINKERCLOUD_CHECKPOINT_BASE` | Root of every model's checkpoints (`<model>/{weights,sampler_weights,external_weights}/<name>/`) and native area (`<model>/native/`) | `/data/checkpoints` |
