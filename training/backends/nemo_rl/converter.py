@@ -16,7 +16,7 @@ RL path (ClippedPGLossFn):
   position p must describe target token x_p. Alignment details and the
   wire/flat layout cases: specs/001-dual-backend-support/bugs/BUG-012.
 
-SFT path (NLLLoss, loss_fn="cross_entropy"):
+SFT path (NLLLossFn, loss_fn="cross_entropy"):
   model_input.tokens + target_tokens[-1] → input_ids    [B, S]  (reconstructed)
   [0.0] + weights                        → token_mask   [B, S]  (reconstructed)
   (computed)                             → input_lengths [B]
@@ -89,7 +89,7 @@ class NemoRLDataConverter(DataConverter):
         Convert Tinker data to NeMo RL BatchedDataDict for training.
 
         Two paths:
-        - loss_fn == "cross_entropy" (SFT): Builds BatchedDataDict for NLLLoss
+        - loss_fn == "cross_entropy" (SFT): Builds BatchedDataDict for NLLLossFn
           with reconstructed full sequence (input_ids, token_mask, sample_mask,
           input_lengths). No RL-specific fields.
         - Other loss_fn values (RL): Maps all fields needed by ClippedPGLossDataDict.
@@ -152,16 +152,16 @@ class NemoRLDataConverter(DataConverter):
         })
 
     def _forward_backward_sft(self, data: List[Datum], image_preprocessor=None) -> Any:
-        """Convert SFT data to NeMo RL BatchedDataDict for NLLLoss.
+        """Convert SFT data to NeMo RL BatchedDataDict for NLLLossFn.
 
         SFT datum provides (from datum_from_tokens_weights in tinker-cookbook):
           model_input.tokens       = tokens[:-1]   (length N-1)
           loss_fn_inputs["target_tokens"] = tokens[1:]    (length N-1)
           loss_fn_inputs["weights"]       = weights[1:]   (length N-1)
 
-        NLLLoss expects:
+        NLLLossFn expects:
           input_ids  = full unshifted sequence [B, S]  (length N)
-          token_mask = full-length mask [B, S]          (NLLLoss slices [:, 1:])
+          token_mask = full-length mask [B, S]          (NLLLossFn slices [:, 1:])
           sample_mask = [B]
           input_lengths = [B]
 
@@ -169,7 +169,7 @@ class NemoRLDataConverter(DataConverter):
           input_ids  = concat(model_input.tokens, [target_tokens[-1]])  → length N
           token_mask = concat([0.0], weights)                           → length N
 
-        After NLLLoss slices [:, 1:], token_mask becomes weights and
+        After NLLLossFn slices [:, 1:], token_mask becomes weights and
         input_ids becomes target_tokens — correct alignment.
         """
         batch_size = len(data)

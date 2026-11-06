@@ -974,7 +974,7 @@ def _step_loss_fn(h: NemoRLHandle, step_loss_config: Optional[Dict[str, float]])
     PG loss with the call's clip range (contract defaults 0.8/1.2 when the call
     sends none); h.loss_fn is the unclipped importance_sampling loss."""
     if h.loss_fn_name == "cross_entropy":
-        # Pure-sum CE (Tinker contract), not NeMo RL's mean-normalized NLLLoss
+        # Pure-sum CE (Tinker contract), not NeMo RL's mean-normalized NLLLossFn
         # (BUG-015). Ships to Ray workers by reference (training is pip
         # install -e'd, so importable in the shared venv on server + workers).
         from .losses import TinkerSumCELoss
