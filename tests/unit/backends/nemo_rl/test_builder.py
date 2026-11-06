@@ -145,3 +145,54 @@ class TestNemoRLArgumentBuilder:
             num_gpus=4,
         )
         assert config_dict["policy"]["precision"] == "float32"
+
+
+# Keys of the installed NeMo RL's SFT exemplar the builder leaves out, each read optionally by
+# NeMo RL 0.7 (so absence is a real state there); any other missing key is drift to fix.
+_OPTIONAL_UPSTREAM_KEYS = {
+    "tokenizer.chat_template",          # presence-checked (algorithms/utils.py:373); the client tokenizes
+    "tokenizer.chat_template_kwargs",   # presence-checked (algorithms/utils.py:392)
+    "dtensor_cfg.env_vars",             # .get (models/policy/lm_policy.py:165)
+    "dtensor_cfg.dp_replicate_size",    # .get (models/automodel/setup.py:464)
+    "dtensor_cfg.automodel_kwargs",     # .get (models/automodel/setup.py:678)
+    "dtensor_cfg.lora_cfg.match_all_linear",  # PeftConfig.from_dict default; target_modules are explicit
+    "megatron_cfg.peft.experts_shared_outer_loras",             # NotRequired in MegatronPeftConfig
+    "megatron_cfg.peft.experts_shared_outer_separate_gate_up",  # NotRequired in MegatronPeftConfig
+}
+
+
+def _missing_keys(reference: dict, ours: dict, prefix: str = "") -> list:
+    """Keys of reference absent from ours, descending into sections ours enables."""
+    missing = []
+    for key, value in reference.items():
+        if key not in ours:
+            missing.append(prefix + key)
+        elif isinstance(value, dict) and isinstance(ours[key], dict) and ours[key].get("enabled", True) is not False:
+            missing += _missing_keys(value, ours[key], f"{prefix}{key}.")
+    return missing
+
+
+@pytest.mark.parametrize("megatron", [False, True])
+def test_policy_config_carries_every_key_the_installed_nemo_rl_reads(megatron, monkeypatch):
+    # NeMo RL reads many policy keys unconditionally; one missing key is a worker crash at
+    # create_model. Its own SFT exemplar lists them, so diff against the installed copy.
+    nemo_rl = pytest.importorskip("nemo_rl")
+    import os
+
+    import yaml
+    exemplar = os.path.join(os.path.dirname(os.path.dirname(nemo_rl.__file__)), "examples", "configs", "sft.yaml")
+    if not os.path.isfile(exemplar):
+        pytest.skip(f"no NeMo RL exemplar at {exemplar}")
+    with open(exemplar) as f:
+        reference = yaml.safe_load(f)["policy"]
+    from tinkercloud.training.backends.nemo_rl import builder as mod
+    from tinkercloud.training.backends.nemo_rl.config import NemoRLConfig
+    monkeypatch.setattr(mod, "read_raw_hf_config", lambda base_model: {
+        "architectures": ["Qwen2ForCausalLM"], "max_position_embeddings": 32768,
+    })
+    cfg = NemoRLConfig.from_env({"megatron": megatron}, environ={})
+    config_dict, _ = mod.NemoRLArgumentBuilder(config=cfg).build_args(
+        base_model="Qwen/Qwen2.5-0.5B-Instruct", num_gpus=2, lora_config={"rank": 16},
+    )
+    drift = sorted(set(_missing_keys(reference, config_dict["policy"])) - _OPTIONAL_UPSTREAM_KEYS)
+    assert not drift, f"policy keys {exemplar} has and the builder does not write: {drift}"
