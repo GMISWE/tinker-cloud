@@ -83,6 +83,8 @@ class SessionStore:
         c.execute("""CREATE TABLE IF NOT EXISTS session_models (
             session_id TEXT NOT NULL, model_id TEXT NOT NULL, model_seq_id INTEGER, base_model TEXT, model_path TEXT,
             created_at TEXT NOT NULL, PRIMARY KEY (session_id, model_id))""")
+        c.execute("""CREATE TABLE IF NOT EXISTS model_reaps (
+            model_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, claimed_at TEXT)""")
         # columns added after the first release; a pre-existing file lacks them
         self._add_missing_columns("sessions", {"finished_at": "TEXT", "finish_reason": "TEXT", "finish_detail": "TEXT",
                                                "display_name": "TEXT"})
@@ -92,6 +94,7 @@ class SessionStore:
         c.execute("CREATE INDEX IF NOT EXISTS idx_sessions_heartbeat ON sessions(last_heartbeat)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_session_models_seq ON session_models(session_id, model_seq_id)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_session_models_model ON session_models(model_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_model_reaps_claimed ON model_reaps(claimed_at)")
 
     def _add_missing_columns(self, table: str, columns: Dict[str, str]) -> None:
         present = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -159,24 +162,35 @@ class SessionStore:
         return self.get_session(session_id)
 
     def claim_expired(self, timeout_s: float) -> List[Tuple[str, List[str]]]:
-        """Drop every session silent for longer than `timeout_s`, with its models and samplers, in one
-        transaction, and return (session_id, model_ids) pairs: the caller frees the models. A row one
-        worker claimed is gone before another worker's tick can see it."""
-        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=timeout_s)).isoformat()
-        claimed: List[Tuple[str, List[str]]] = []
+        """Drop sessions silent for longer than `timeout_s` and claim their models for deletion.
+        An active model claim stays hidden from the other workers until a failed delete releases it."""
+        now = datetime.now(timezone.utc)
+        cutoff = (now - timedelta(seconds=timeout_s)).isoformat()
+        claimed: Dict[str, List[str]] = {}
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             for (session_id,) in self._read("SELECT session_id FROM sessions WHERE last_heartbeat < ?", (cutoff,)):
                 models = [m[0] for m in self._read("SELECT model_id FROM session_models WHERE session_id = ?", (session_id,))]
+                for model_id in models:
+                    self._write("INSERT OR IGNORE INTO model_reaps (model_id, session_id) VALUES (?, ?)",
+                                (model_id, session_id))
                 self._write("DELETE FROM samplers WHERE session_id = ?", (session_id,))
                 self._write("DELETE FROM session_models WHERE session_id = ?", (session_id,))
                 self._write("DELETE FROM sessions WHERE session_id = ?", (session_id,))
-                claimed.append((session_id, models))
+            rows = self._read("SELECT session_id, model_id FROM model_reaps "
+                              "WHERE claimed_at IS NULL ORDER BY session_id, model_id")
+            for session_id, model_id in rows:
+                self._write("UPDATE model_reaps SET claimed_at = ? WHERE model_id = ?", (now.isoformat(), model_id))
+                claimed.setdefault(session_id, []).append(model_id)
             self._conn.execute("COMMIT")
         except BaseException:   # the transaction's own rollback; the error goes on
             self._conn.execute("ROLLBACK")
             raise
-        return claimed
+        return list(claimed.items())
+
+    def retry_reap(self, model_id: str) -> None:
+        """Make a failed model delete claimable again."""
+        self._write("UPDATE model_reaps SET claimed_at = NULL WHERE model_id = ?", (model_id,))
 
     # ------------------------------------------------------------------ models
 
@@ -188,8 +202,9 @@ class SessionStore:
                     (session_id, model_id, model_seq_id, base_model, _now(), engine))
 
     def remove_model(self, model_id: str) -> Optional[str]:
-        """Drop the model's row; the session that owned it, or None."""
+        """Drop the model and pending reap rows; the session that owned it, or None."""
         rows = self._read("SELECT session_id FROM session_models WHERE model_id = ?", (model_id,))
+        self._write("DELETE FROM model_reaps WHERE model_id = ?", (model_id,))
         if not rows:
             return None
         self._write("DELETE FROM session_models WHERE model_id = ?", (model_id,))
