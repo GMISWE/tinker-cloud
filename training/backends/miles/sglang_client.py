@@ -147,7 +147,7 @@ class SGLangClient:
         except (KeyError, IndexError, TypeError) as e:
             logger.error(f"Failed to parse SGLang response: {e}")
             logger.error(f"SGLang response: {sglang_output}")
-            raise ValueError(f"Invalid SGLang response format: {e}")
+            raise ValueError(f"Invalid SGLang response format: {e}") from e
 
     @staticmethod
     def _normalize_logprob_entries(entries: List[Any]) -> List[Optional[float]]:

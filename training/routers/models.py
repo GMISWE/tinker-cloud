@@ -92,7 +92,7 @@ async def create_model(
         request.optimizer_config.check()
         service.require_optimizer(request.optimizer_config)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     async def execute():
         try:
@@ -149,7 +149,7 @@ async def delete_model(
         )
         return DeleteModelResponse(**result)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e
 
 
 @router.post("/api/v1/unload_model", response_model=AsyncOperationResponse)
@@ -217,7 +217,7 @@ async def get_info(
             optimizer_config=result["optimizer_config"],
         )
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e
 
 
 @router.get("/api/v1/get_tokenizer")
@@ -243,11 +243,11 @@ async def get_tokenizer(
             hf_checkpoint=result["hf_checkpoint"]
         )
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to load tokenizer: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to load tokenizer: {str(e)}") from e
 
 
 @router.get("/api/v1/training_runs/{model_id}", response_model=TrainingRunResponse)
@@ -265,4 +265,4 @@ async def get_training_run(
         )
         return TrainingRunResponse(**metadata)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e

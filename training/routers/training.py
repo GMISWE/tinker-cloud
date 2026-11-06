@@ -46,7 +46,7 @@ def _validate_loss(loss_fn: str, loss_fn_config) -> None:
     try:
         loss_registry.validate(loss_fn, loss_fn_config)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 def _submit_pass(
@@ -100,9 +100,9 @@ async def _read_forward_backward_request(http_request: Request) -> Tuple[Forward
             return ForwardBackwardRequest.model_validate(request_dict), forward_only
         return ForwardBackwardRequest.model_validate_json(body), False
     except WireError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+        raise HTTPException(status_code=422, detail=str(e)) from e
     except ValidationError as e:
-        raise RequestValidationError(e.errors())
+        raise RequestValidationError(e.errors()) from e
 
 
 @router.post("/api/v1/forward", response_model=AsyncOperationResponse)
@@ -171,7 +171,7 @@ async def optim_step(
         optim_params = request.optim_params()
         service.require_optimizer_family(client_info, optim_params)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     # Business logic wrapped in async task
     async def execute_optim_step():

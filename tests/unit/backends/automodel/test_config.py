@@ -38,5 +38,11 @@ def test_cpu_cache_smaller_than_gpu_slots_is_refused():
 
 
 def test_override_wins_over_env():
-    cfg = AutomodelConfig.from_env({"train_gpus": 3}, environ=ENV)
-    assert cfg.train_gpus == 3 and cfg.source_of("train_gpus") == "override"
+    cfg = AutomodelConfig.from_env({"train_gpus": 4}, environ=ENV)
+    assert cfg.train_gpus == 4 and cfg.source_of("train_gpus") == "override"
+
+
+@pytest.mark.parametrize("gpus", ["3", "6", "7"])
+def test_a_training_rank_count_a_lora_rank_cannot_divide_is_refused(gpus):
+    with pytest.raises(ValidationError, match=f"train_gpus={gpus} must be a power of two"):
+        AutomodelConfig.from_env(environ={**ENV, "AUTOMODEL_TRAIN_GPUS": gpus})

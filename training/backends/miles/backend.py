@@ -557,12 +557,12 @@ class MilesBackend(TrainingBackend[MilesHandle]):
 
             try:
                 await asyncio.wait_for(train_group.init(), timeout=1800.0)
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as e:
                 raise BackendError(
                     "Actor initialization timeout after 1800s",
                     backend="miles",
                     operation="create_model",
-                )
+                ) from e
 
             if rollout_manager is not None:
                 await train_group.set_rollout_manager()

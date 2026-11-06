@@ -267,7 +267,7 @@ async def load_weights(
             request.optimizer_config.check()
         service.require_load_family(training_clients[request.model_id], ref, request.optimizer, request.optimizer_config)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     request_id = generate_request_id()
 
     async def execute():

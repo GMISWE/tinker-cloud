@@ -33,6 +33,12 @@ class AutomodelConfig(EnvConfig):
 
     @model_validator(mode="after")
     def _check_lora_limits(self) -> "AutomodelConfig":
+        # dion's Muon, primed at every group's setup, all-to-alls each sharded LoRA factor and
+        # asserts its sharded dimension (the rank of A) divides by the rank count: a power of two
+        # divides every power-of-two rank from train_gpus up; create_model refuses the smaller ones
+        if self.train_gpus & (self.train_gpus - 1):
+            raise ValueError(f"train_gpus={self.train_gpus} must be a power of two: each LoRA factor is "
+                             "sharded over the training ranks and its rank must divide by their count")
         if self.max_lora_rank not in VLLM_MAX_LORA_RANKS:
             raise ValueError(f"max_lora_rank={self.max_lora_rank} is not one vLLM accepts: {VLLM_MAX_LORA_RANKS}")
         # vLLM refuses this at boot; failing here names the variable instead

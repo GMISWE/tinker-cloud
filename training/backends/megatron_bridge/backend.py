@@ -123,7 +123,7 @@ class MegatronBridgeBackend(TrainingBackend[MegatronBridgeHandle]):
             raise BackendError(
                 f"ray / megatron-bridge recipe not importable ({e!r}). Run under "
                 f"deploy_tinkercloud.sh --profile megatron_bridge (cu13 recipe env).",
-                backend="megatron_bridge", operation="create_model")
+                backend="megatron_bridge", operation="create_model") from e
 
         # ray.remote's actor-class type is only known where ray is installed.
         worker_actor: Any = MegatronBridgeWorker
@@ -187,7 +187,7 @@ class MegatronBridgeBackend(TrainingBackend[MegatronBridgeHandle]):
             await _get(handle.worker.save_checkpoint.remote(str(root)))
         except Exception as e:
             raise BackendError(f"save_checkpoint failed: {e!r}",
-                               backend="megatron_bridge", operation="save_checkpoint")
+                               backend="megatron_bridge", operation="save_checkpoint") from e
 
     async def load_checkpoint(self, handle: MegatronBridgeHandle, root: Path,
                               optimizer: bool = False) -> None:
@@ -195,7 +195,7 @@ class MegatronBridgeBackend(TrainingBackend[MegatronBridgeHandle]):
             await _get(handle.worker.load_checkpoint.remote(str(root), optimizer))
         except Exception as e:
             raise BackendError(f"load_checkpoint failed: {e!r}",
-                               backend="megatron_bridge", operation="load_checkpoint")
+                               backend="megatron_bridge", operation="load_checkpoint") from e
 
     async def delete_model(self, handle: MegatronBridgeHandle) -> None:
         """Kill the model's GPU actor (frees its megatron state + GPU)."""
