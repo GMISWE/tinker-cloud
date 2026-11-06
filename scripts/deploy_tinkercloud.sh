@@ -177,6 +177,30 @@ if [ "$TARGET" = k8s ]; then
   CP() { kubectl -n "$NS" cp "$1" "$POD:$2"; }
   EX() { kubectl -n "$NS" exec "$POD" -- bash -c "$1"; }
   EX_TIMEOUT() { timeout 30 kubectl -n "$NS" exec "$POD" -- bash -c "$1" || true; }
+  # Capabilities the pod spec adds. Kubernetes fixes them at pod creation and
+  # `kubectl apply` changes only the image, so an older pod keeps its old set.
+  POD_CAPS="SYS_PTRACE"
+  check_pod_caps() {
+    local live cap pvc gpus hf image
+    live=$(kx get pod "$POD" -o jsonpath='{.spec.containers[0].securityContext.capabilities.add}') \
+      || { echo "ERROR: could not read pod $POD's capabilities"; exit 1; }
+    for cap in $POD_CAPS; do
+      case "$live" in *"\"$cap\""*) ;; *)
+        echo "ERROR: pod $POD lacks $cap, which the pod spec adds (live: ${live:-none})"
+        # the recreate repeats the live pod's GPUs, image, /data PVC and HF cache:
+        # without DATA_PVC_SIZE the new pod mounts an empty emptyDir at /data
+        gpus=$(kx get pod "$POD" -o jsonpath='{.spec.containers[0].resources.limits.nvidia\.com/gpu}')
+        image=$(kx get pod "$POD" -o jsonpath='{.spec.containers[0].image}')
+        hf=$(kx get pod "$POD" -o jsonpath='{.spec.volumes[?(@.name=="hfcache")].hostPath.path}')
+        pvc=$(kx get pod "$POD" -o jsonpath='{.spec.volumes[?(@.name=="data")].persistentVolumeClaim.claimName}')
+        [ -n "$pvc" ] && pvc=$(kx get pvc "$pvc" -o jsonpath='{.spec.resources.requests.storage}')
+        echo "  recreate it: kubectl -n $NS delete pod $POD && POD=$POD GPUS=$gpus IMAGE=$image" \
+             "${pvc:+DATA_PVC_SIZE=$pvc }${hf:+HF_CACHE_HOSTPATH=$hf }$0 --profile $PROFILE"
+        [ -n "$pvc" ] || echo "  (its /data is an emptyDir: the recreate loses it)"
+        exit 1 ;;
+      esac
+    done
+  }
 elif [ "$TARGET" = docker ]; then
   # shellcheck disable=SC2086  # DOCKER may carry words ("sg docker -c")
   CP() { $DOCKER cp "$1" "$CONTAINER:$2"; }
@@ -245,7 +269,7 @@ spec:
     # py-spy dump / ray stack attach to non-child processes (Ray workers);
     # the runtime's default capability set omits it and the host's Yama
     # ptrace_scope=1 then refuses the attach
-    securityContext: {capabilities: {add: [SYS_PTRACE]}}
+    securityContext: {capabilities: {add: [${POD_CAPS// /, }]}}
     env:
     - {name: PYTHONUNBUFFERED, value: "1"}
     - {name: TOKENIZERS_PARALLELISM, value: "false"}
@@ -270,6 +294,7 @@ spec:
     $DATA_VOLUME_YAML
   $HF_VOLUME_YAML
 EOF
+    [ -n "$(kx get pod "$POD" --ignore-not-found -o name)" ] && check_pod_caps
     kubectl apply -f "$TMP/pod.yaml"
     echo "==> waiting for Ready on $IMAGE (image pull can take ~5-10 min on a cold node)"
     # NB: GPUS must be <= the node's UNALLOCATED nvidia.com/gpu (idle pods still
@@ -304,6 +329,7 @@ EOF
   fi
 else
   echo "==> [1/6] --code-only: restarting server on existing $TARGET target"
+  [ "$TARGET" = k8s ] && check_pod_caps
   EX "pkill -f 'python3 -m trainin[g]' || true; sleep 8" || true
 fi
 
