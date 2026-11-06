@@ -6,7 +6,7 @@
 #   scripts/pod_pytest.sh [pod] [pytest args...]
 #   scripts/pod_pytest.sh tinkercloud-nemorl tests/conformance tests/unit/core -q
 #
-# The tree is tarred (training/ tests/ gates/ pyproject.toml), pushed with
+# The tree is tarred (training/ tests/ gates/ pyproject.toml, and the rotate script a test reads), pushed with
 # sha256 verified on both sides, unpacked under /tmp/pytest-<user>/app and
 # aliased as the `tinkercloud` package the tests import. Default args run
 # the suites that need no GPU.
@@ -57,7 +57,7 @@ if [ "$GPU_RUN" = 1 ] && timeout 30 kubectl -n "$NS" exec "$POD" -- bash -c "ps 
 fi
 
 tar -C "$ROOT" -czf "$TMP/code.tgz" --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
-    training tests gates pyproject.toml
+    training tests gates pyproject.toml scripts/pod_rotate_server.sh
 SHA="$(sha256sum "$TMP/code.tgz" | cut -d' ' -f1)"
 for try in 1 2 3; do
   kx cp "$TMP/code.tgz" "$POD:$REMOTE.tgz"
