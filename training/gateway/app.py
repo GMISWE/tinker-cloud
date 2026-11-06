@@ -243,7 +243,7 @@ def sdk_face(gateway: Gateway, engines) -> FastAPI:
     @app.post("/api/v1/create_session", response_model=CreateSessionResponse)
     async def create_session(request: CreateSessionRequest, _: None = Depends(require_key)):
         # the SDK may send no metadata; the session reads back {} (its dict shape), as before the split
-        session_id = store.create_session(request.tags, request.user_metadata or {}, request.sdk_version,
+        session_id = store.create_session(request.tags, request.user_metadata or {}, request.sdk_version,  # no metadata reads back {}
                                           request.display_name)
         return CreateSessionResponse(session_id=session_id, info_message=None, warning_message=None, error_message=None)
 

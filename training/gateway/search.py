@@ -59,7 +59,7 @@ def _after_cursor(s: Session, req: SessionSearchRequest) -> bool:
 def search(sessions: List[Session], req: SessionSearchRequest) -> Tuple[List[Session], Optional[Dict[str, str]]]:
     """`sessions` newest first; returns one page and the next cursor (None once exhausted).
     Raises UnknownProject for a project id this server does not have."""
-    unknown = [p for p in (req.project_ids or []) if p != DEFAULT_PROJECT]
+    unknown = [p for p in (req.project_ids or []) if p != DEFAULT_PROJECT]   # None: every listable project (SDK)
     if unknown:
         raise UnknownProject(f"project {', '.join(unknown)} not found; this server has one project, {DEFAULT_PROJECT!r}")
     if req.owner.type == "user":

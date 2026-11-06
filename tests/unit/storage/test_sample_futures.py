@@ -177,7 +177,7 @@ def test_release_frees_only_finished_samples_of_the_polled_session():
     _reg(s, "pending", seq=2)
     _reg(s, "other", session="elsewhere", seq=1)
     s.complete("other", {"sequences": []}, b"p")
-    key = s.get("done").session
+    key = s.get("done").session   # SampleFutureStore.get, not dict.get
     assert s.release(key, ["done", "pending", "other", "never-seen"]) == 1
     assert s.get("done") is None                 # freed
     assert s.get("pending").status == "pending"  # still running: kept

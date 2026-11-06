@@ -535,7 +535,7 @@ class SessionStatusQuery(BaseModel):
 
 class SearchOwner(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    type: Literal["own", "accessible", "user"] = "own"
+    type: Literal["own", "accessible", "user"] = "own"   # the SDK's default owner (types/search_owner.py)
     owner_urns: Optional[List[str]] = Field(default=None, min_length=1, max_length=10)
 
     @model_validator(mode="after")

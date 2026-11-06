@@ -319,6 +319,7 @@ def _create_via_load(
                 raise ValueError(f"load_weights declares optimizer {request.optimizer_config.type} but {ref.uri} "
                                  f"holds {optimizer_config.type} optimizer state; load it with optimizer=false")
         else:
+            # undeclared: AdamW, as the SDK documents for a weights-only load (types/load_weights_request.py)
             optimizer_config = request.optimizer_config or OptimizerConfig()
         optimizer_config.check()
         model_service.require_optimizer(optimizer_config)
