@@ -31,7 +31,7 @@ def test_client_config_advertises_the_session_poller(server):
 
 def test_sdk_samples_through_the_session_poller(service_client, server):
     a = service_client.create_lora_training_client(base_model="fake/tiny", rank=4)
-    s = a.save_weights_and_get_sampling_client("s")
+    s = a.save_weights_and_get_sampling_client("s").result()
     params = types.SamplingParams(max_tokens=2, temperature=1.0)
     futs = [s.sample(prompt=types.ModelInput.from_ints([1, 2, 3]), num_samples=1, sampling_params=params)
             for _ in range(8)]
@@ -41,7 +41,7 @@ def test_sdk_samples_through_the_session_poller(service_client, server):
 
 def test_session_poll_cursor_semantics(service_client, server):
     a = service_client.create_lora_training_client(base_model="fake/tiny", rank=4)
-    s = a.save_weights_and_get_sampling_client("raw")
+    s = a.save_weights_and_get_sampling_client("raw").result()
     sid = s._sampling_session_id
     ids = [_asample(server, sid, seq) for seq in (1, 2, 3)]
     body = _poll(server, sid, 0, timeout=5)
@@ -63,7 +63,7 @@ def test_session_poll_cursor_semantics(service_client, server):
 
 def test_seq_id_retry_is_idempotent(service_client, server):
     a = service_client.create_lora_training_client(base_model="fake/tiny", rank=4)
-    s = a.save_weights_and_get_sampling_client("idem")
+    s = a.save_weights_and_get_sampling_client("idem").result()
     sid = s._sampling_session_id
     first = _asample(server, sid, 11)
     assert _asample(server, sid, 11) == first
@@ -76,7 +76,7 @@ def test_unknown_session_and_cancel_semantics(service_client, server):
     assert r.status_code == 404
     assert server.post("/api/v1/cancel_future", {"request_id": "nope"}).status_code == 404
     a = service_client.create_lora_training_client(base_model="fake/tiny", rank=4)
-    s = a.save_weights_and_get_sampling_client("c")
+    s = a.save_weights_and_get_sampling_client("c").result()
     rid = _asample(server, s._sampling_session_id, 1)
     _poll(server, s._sampling_session_id, 0, timeout=5)
     assert server.post("/api/v1/cancel_future", {"request_id": rid}).status_code == 204   # terminal: no-op

@@ -25,7 +25,10 @@ from ..models.requests import (
     CreateSessionRequest,
     FinishSessionRequest,
     JoinSamplingSessionRequest,
+    LOCAL_OWNER,
+    DEFAULT_PROJECT,
     SessionHeartbeatRequest,
+    SessionSearchRequest,
 )
 from ..models.responses import (
     CreateSamplingSessionResponse,
@@ -38,12 +41,15 @@ from ..models.responses import (
     ListSessionsResponse,
     ResolveSamplerTargetResponse,
     SessionHeartbeatResponse,
+    SessionSearchResponse,
+    SessionSummary,
 )
 from ..utils.helpers import BASE_MODEL_SAMPLING_UNSUPPORTED, engine_name_of
 from . import routing
 from .decide import Decider, Headers, Reject
 from .forward import EngineResponse, EngineUnreachable, Pool, forward
 from .reaper import ModelReaper
+from .search import UnknownProject, search, status_of
 from .registry import EngineRow, Registry, RegistryConflict, RegistryUnavailable
 from .sessions import SamplerCache, SessionStore
 
@@ -237,7 +243,8 @@ def sdk_face(gateway: Gateway, engines) -> FastAPI:
     @app.post("/api/v1/create_session", response_model=CreateSessionResponse)
     async def create_session(request: CreateSessionRequest, _: None = Depends(require_key)):
         # the SDK may send no metadata; the session reads back {} (its dict shape), as before the split
-        session_id = store.create_session(request.tags, request.user_metadata or {}, request.sdk_version)
+        session_id = store.create_session(request.tags, request.user_metadata or {}, request.sdk_version,
+                                          request.display_name)
         return CreateSessionResponse(session_id=session_id, info_message=None, warning_message=None, error_message=None)
 
     @app.post("/api/v1/session_heartbeat", response_model=SessionHeartbeatResponse)
@@ -310,9 +317,43 @@ def sdk_face(gateway: Gateway, engines) -> FastAPI:
         session = store.get_session(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
-        # the SDK validates dict[str, str] strictly; create_session accepted any JSON value
         return GetSessionResponse(training_run_ids=session.model_ids, sampler_ids=session.sampler_ids,
-                                  user_metadata={k: v if isinstance(v, str) else json.dumps(v) for k, v in session.user_metadata.items()})
+                                  user_metadata=_str_metadata(session.user_metadata), display_name=session.display_name)
+
+    @app.post("/api/v1/sessions/search", response_model=SessionSearchResponse)
+    async def search_sessions(request: SessionSearchRequest, _: None = Depends(require_key)):
+        try:
+            page, next_cursor = search(store.sessions_newest_first(), request)
+        except UnknownProject as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        engine = gateway.registry.only()
+        summaries = []
+        for s in page:
+            summaries.append(SessionSummary(
+                session_id=s.session_id, created_at=s.created_at, owner=LOCAL_OWNER, project_id=DEFAULT_PROJECT,
+                status=status_of(s), checkpoints_count=await _checkpoints_count(engine, s.model_ids),
+                display_name=s.display_name, user_metadata=_str_metadata(s.user_metadata)))
+        return SessionSearchResponse(sessions=summaries, next_cursor=next_cursor)
+
+    async def _checkpoints_count(engine: Optional[EngineRow], model_ids: List[str]) -> int:
+        """Checkpoints of the session's training runs, as the engine lists them. A run the
+        engine no longer holds (404) has none; with no engine registered the count is unknown."""
+        if not model_ids:
+            return 0
+        if engine is None:
+            raise HTTPException(status_code=503, detail="no engine registered")
+        total = 0
+        for model_id in model_ids:
+            try:
+                resp = await gateway.engine_call(engine, "GET", f"/api/v1/training_runs/{model_id}/checkpoints", None)
+            except EngineUnreachable as exc:
+                raise HTTPException(status_code=503, detail=f"engine {engine.name} unreachable: {exc}") from exc
+            if resp.status == 404:
+                continue
+            if resp.status != 200:
+                raise HTTPException(status_code=502, detail=f"engine listed {model_id}'s checkpoints with {resp.status}")
+            total += len(orjson.loads(resp.body)["checkpoints"])
+        return total
 
     @app.get("/api/v1/samplers/{sampler_id}", response_model=GetSamplerResponse)
     async def get_sampler(sampler_id: str, _: None = Depends(require_key)):
@@ -372,6 +413,11 @@ def _response(reply: Reply) -> Response:
 
 
 # ------------------------------------------------------------ the engines face
+
+def _str_metadata(user_metadata: Dict[str, Any]) -> Dict[str, str]:
+    """The SDK validates dict[str, str] strictly; create_session accepted any JSON value."""
+    return {k: v if isinstance(v, str) else json.dumps(v) for k, v in user_metadata.items()}
+
 
 async def _read_all(receive) -> bytes:
     chunks: List[bytes] = []

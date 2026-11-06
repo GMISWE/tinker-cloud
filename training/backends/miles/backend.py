@@ -232,7 +232,7 @@ def _check_miles_clip_config(h: "MilesHandle", loss_fn: str, loss_fn_config: Opt
             suggestion=f"booted with clip ({boot_low:g}, {boot_high:g}); unset SLIME_EPS_CLIP / "
                        "SLIME_EPS_CLIP_HIGH before create_model (default boot is unclipped)",
         )
-    low, high = clip_thresholds(loss_fn_config)
+    low, high = clip_thresholds(loss_fn, loss_fn_config)
     if abs(low - boot_low) > 1e-9 or abs(high - boot_high) > 1e-9:
         raise UnsupportedFeatureError(
             f"ppo clip thresholds ({low}, {high})", backend="miles",

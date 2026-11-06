@@ -25,7 +25,7 @@ def _fake_model(tmp_path, context: int) -> str:
 
 def _client(service_client, name, base_model="fake/tiny"):
     tc = service_client.create_lora_training_client(base_model=base_model, rank=2)
-    return tc, tc.save_weights_and_get_sampling_client(name)
+    return tc, tc.save_weights_and_get_sampling_client(name).result()
 
 
 def test_token_stop_is_last_token(service_client):

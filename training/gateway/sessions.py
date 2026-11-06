@@ -17,7 +17,8 @@ from .dbfile import opened_alone
 
 logger = logging.getLogger(__name__)
 
-SESSION_COLUMNS = "session_id, sdk_version, tags, user_metadata, created_at, last_heartbeat, finished_at, finish_reason, finish_detail"
+SESSION_COLUMNS = ("session_id, sdk_version, tags, user_metadata, created_at, last_heartbeat, finished_at, finish_reason, "
+                   "finish_detail, display_name")
 SAMPLER_COLUMNS = "sampler_id, session_id, model_id, base_model, model_path, pinned_version, client_counter"
 
 
@@ -47,6 +48,7 @@ class Session:
     finished_at: Optional[str]
     finish_reason: Optional[str]
     finish_detail: Optional[str]
+    display_name: Optional[str]   # None: the client gave none
     model_ids: List[str]     # in model_seq_id order
     sampler_ids: List[str]
 
@@ -82,7 +84,8 @@ class SessionStore:
             session_id TEXT NOT NULL, model_id TEXT NOT NULL, model_seq_id INTEGER, base_model TEXT, model_path TEXT,
             created_at TEXT NOT NULL, PRIMARY KEY (session_id, model_id))""")
         # columns added after the first release; a pre-existing file lacks them
-        self._add_missing_columns("sessions", {"finished_at": "TEXT", "finish_reason": "TEXT", "finish_detail": "TEXT"})
+        self._add_missing_columns("sessions", {"finished_at": "TEXT", "finish_reason": "TEXT", "finish_detail": "TEXT",
+                                               "display_name": "TEXT"})
         self._add_missing_columns("samplers", {"client_counter": "INTEGER NOT NULL DEFAULT 0", "pinned_version": "INTEGER"})
         self._add_missing_columns("session_models", {"engine": "TEXT"})
         c.execute("CREATE INDEX IF NOT EXISTS idx_samplers_session ON samplers(session_id)")
@@ -109,11 +112,13 @@ class SessionStore:
 
     # ---------------------------------------------------------------- sessions
 
-    def create_session(self, tags: List[str], user_metadata: Dict[str, Any], sdk_version: str) -> str:
+    def create_session(self, tags: List[str], user_metadata: Dict[str, Any], sdk_version: str,
+                       display_name: Optional[str]) -> str:
         session_id = str(uuid.uuid4())
         now = _now()
-        self._write("INSERT INTO sessions (session_id, sdk_version, tags, user_metadata, created_at, last_heartbeat) VALUES (?, ?, ?, ?, ?, ?)",
-                    (session_id, sdk_version, json.dumps(tags), json.dumps(user_metadata), now, now))
+        self._write("INSERT INTO sessions (session_id, sdk_version, tags, user_metadata, created_at, last_heartbeat, display_name) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (session_id, sdk_version, json.dumps(tags), json.dumps(user_metadata), now, now, display_name))
         return session_id
 
     def exists(self, session_id: str) -> bool:
@@ -123,13 +128,20 @@ class SessionStore:
         rows = self._read(f"SELECT {SESSION_COLUMNS} FROM sessions WHERE session_id = ?", (session_id,))
         if not rows:
             return None
-        r = rows[0]
-        models = self._read("SELECT model_id FROM session_models WHERE session_id = ? ORDER BY model_seq_id ASC", (session_id,))
-        samplers = self._read("SELECT sampler_id FROM samplers WHERE session_id = ? ORDER BY created_at ASC", (session_id,))
+        return self._session(rows[0])
+
+    def _session(self, r: Tuple) -> Session:
+        models = self._read("SELECT model_id FROM session_models WHERE session_id = ? ORDER BY model_seq_id ASC", (r[0],))
+        samplers = self._read("SELECT sampler_id FROM samplers WHERE session_id = ? ORDER BY created_at ASC", (r[0],))
         return Session(session_id=r[0], sdk_version=r[1], tags=json.loads(r[2]), user_metadata=json.loads(r[3]),
                        created_at=r[4], last_heartbeat=r[5],
-                       finished_at=r[6], finish_reason=r[7], finish_detail=r[8],
+                       finished_at=r[6], finish_reason=r[7], finish_detail=r[8], display_name=r[9],
                        model_ids=[m[0] for m in models], sampler_ids=[s[0] for s in samplers])
+
+    def sessions_newest_first(self) -> List[Session]:
+        """Every live session, newest first (ties: session_id descending): the search order."""
+        return [self._session(r) for r in
+                self._read(f"SELECT {SESSION_COLUMNS} FROM sessions ORDER BY created_at DESC, session_id DESC")]
 
     def list_sessions(self, limit: int, offset: int) -> List[str]:
         return [r[0] for r in self._read("SELECT session_id FROM sessions ORDER BY created_at DESC LIMIT ? OFFSET ?", (limit, offset))]
@@ -168,7 +180,7 @@ class SessionStore:
 
     # ------------------------------------------------------------------ models
 
-    def add_model(self, session_id: str, model_id: str, model_seq_id: int, base_model: str, engine: str) -> None:
+    def add_model(self, session_id: str, model_id: str, model_seq_id: int, base_model: Optional[str], engine: str) -> None:
         """Record a model at submit. A create the engine then fails is dropped when the engine reports
         it (a report that itself fails leaves the row to its delete or the reaper); a delete of a model
         the engine never had gets the engine's 404 and drops the row."""

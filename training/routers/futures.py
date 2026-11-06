@@ -222,9 +222,11 @@ async def retrieve_futures(
     sampling session is the gateway's 404; here it is a session with nothing in it.
     """
     target = request.target 
+    key = (target.sampling_session_id, target.cloned_sampler_id)
+    sample_futures.release(key, request.retrieved_request_ids)
     hold = RETRIEVE_FUTURES_HOLD_S if request.timeout is None else request.timeout
     entries, cursor = await sample_futures.poll(
-        (target.sampling_session_id, target.cloned_sampler_id),
+        key,
         request.prev_cursor,
         min(hold, RETRIEVE_FUTURES_MAX_HOLD_S),
     )

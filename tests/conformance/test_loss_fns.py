@@ -25,6 +25,20 @@ def model(service_client):
     return service_client.create_lora_training_client(base_model="fake/tiny", rank=4)
 
 
+@pytest.mark.parametrize("loss_fn,words", [
+    ("stable_reinforce", ["stable_reinforce", "not published", "ppo", "gspo"]),
+    ("custom", ["custom_loss_server_side", "client-side"]),
+])
+def test_losses_whose_meaning_is_not_served_are_400_saying_why(server, model, loss_fn, words):
+    r = server.post("/api/v1/forward_backward", _fb_body(model.model_id, loss_fn))
+    assert r.status_code == 400, (r.status_code, r.text)
+    assert all(w in r.json()["error"] for w in words), r.json()["error"]
+
+
+def test_the_server_keeps_custom_losses_client_side(server):
+    assert server.post("/api/v1/client/config", {}).json()["custom_loss_server_side"] is False
+
+
 @pytest.mark.parametrize("loss_fn,cfg,detail", [
     ("ppo_loss", None, "Unknown loss_fn"),
     ("cross_entropy", {"beta": 0.1}, "not valid for"),
@@ -46,6 +60,7 @@ def test_invalid_loss_requests_are_400(server, model, loss_fn, cfg, detail):
     ("ppo", {"clip_low_threshold": 0.9, "clip_high_threshold": 1.1}),
     ("cispo", {"clip_low_threshold": 0.8, "clip_high_threshold": 1.2}),
     ("dro", {"beta": 0.05}),
+    ("gspo", {"clip_low_threshold": 1 - 3e-4, "clip_high_threshold": 1 + 4e-4}),
 ])
 def test_supported_losses_reach_backend_with_config(service_client, server, model, loss_fn, cfg):
     tokens = list(range(20, 27))

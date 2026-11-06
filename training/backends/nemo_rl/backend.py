@@ -627,7 +627,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
 
             metrics = dict(result.get("metrics", {}))
             if handle.loss_fn_name == "ppo":
-                low, high = clip_thresholds(step_loss_config)
+                low, high = clip_thresholds("ppo", step_loss_config)
                 metrics["clip_low_threshold"] = low
                 metrics["clip_high_threshold"] = high
 
@@ -981,7 +981,7 @@ def _step_loss_fn(h: NemoRLHandle, step_loss_config: Optional[Dict[str, float]])
         return TinkerSumCELoss()
     if h.loss_fn_name == "ppo":
         from .losses import TinkerSumPGLoss
-        low, high = clip_thresholds(step_loss_config)
+        low, high = clip_thresholds("ppo", step_loss_config)
         return TinkerSumPGLoss({
             **h.config["loss_fn"],
             "ratio_clip_min": 1.0 - low,

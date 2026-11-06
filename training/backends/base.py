@@ -93,6 +93,9 @@ class TrainingBackend(ABC, Generic[H]):
     # serves; ModelService refuses a create or load naming another with 400
     # before the backend sees it.
     SUPPORTED_OPTIMIZERS: FrozenSet[str] = frozenset()
+    # Sampler kinds (SaveWeightsForSamplerRequest.kind) this backend serves. "inflight"
+    # needs a backend whose sampler serves the model's newest published weights.
+    SUPPORTED_SAMPLER_KINDS: FrozenSet[str] = frozenset({"snapshot"})
 
     @abstractmethod
     async def create_model(

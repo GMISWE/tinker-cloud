@@ -168,3 +168,17 @@ def test_cursor_survives_log_drop_and_expired_entries_trim_from_the_left():
         entries, cursor = await s.poll(key, 1, 0.01)
         assert [e[0] for e in entries] == ["r3"] and cursor == 3
     asyncio.run(main())
+
+
+def test_release_frees_only_finished_samples_of_the_polled_session():
+    s = SampleFutureStore()
+    _reg(s, "done", seq=1)
+    s.complete("done", {"sequences": []}, b"p")
+    _reg(s, "pending", seq=2)
+    _reg(s, "other", session="elsewhere", seq=1)
+    s.complete("other", {"sequences": []}, b"p")
+    key = s.get("done").session
+    assert s.release(key, ["done", "pending", "other", "never-seen"]) == 1
+    assert s.get("done") is None                 # freed
+    assert s.get("pending").status == "pending"  # still running: kept
+    assert s.get("other") is not None            # another session's: kept

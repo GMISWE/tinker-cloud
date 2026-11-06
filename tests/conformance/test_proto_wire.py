@@ -71,7 +71,8 @@ def test_healthz_and_client_config(server):
     assert r.status_code == 200, r.text
     flags = r.json()
     assert flags["pjwt_auth_enabled"] is False
-    assert flags["create_model_via_load_weights"] is False
+    assert flags["custom_loss_server_side"] is False
+    assert "create_model_via_load_weights" not in flags   # SDK 0.38 always creates via load_weights
     assert flags["proto_compress_fwdbwd"] is zstd_available()
 
 
