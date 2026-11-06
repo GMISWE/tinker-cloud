@@ -47,6 +47,8 @@ extend-exclude = ["training/proto/tinker_public_pb2.py"]
 # attributes). Engine imports (nemo_rl, miles, torch, ray) are not installed
 # where the check runs, so their symbols are Unknown and unchecked.
 include = ["training/backends"]
+# the vLLM endpoint plugin runs in the vLLM env (msgspec, vllm); its tests run in the image build
+exclude = ["training/backends/common/sampling/vllm_plugin"]
 pythonVersion = "3.10"
 typeCheckingMode = "basic"
 reportMissingImports = false
