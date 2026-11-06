@@ -2,9 +2,11 @@
 import asyncio
 import logging
 import os
-from typing import List, Optional
+from typing import Optional
 
 import httpx
+
+from ..config import AuthConfig, EngineConfig
 
 logger = logging.getLogger(__name__)
 
@@ -12,13 +14,16 @@ logger = logging.getLogger(__name__)
 class RegisterClient:
     """Keeps this engine's row current in the gateway's registry. Never raises into the engine."""
 
-    def __init__(self, gateway_socket: str, name: str, backend: str, gpus: Optional[List[int]], socket: str,
-                 interval_s: float) -> None:
-        self._name = name
-        self._row = {"name": name, "backend": backend, "gpus": gpus, "socket": socket, "pid": os.getpid()}
-        self._interval = interval_s
-        self._client = httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(uds=gateway_socket),
-                                         base_url="http://gateway", timeout=5.0)
+    def __init__(self, engine: EngineConfig, auth: AuthConfig, backend: str) -> None:
+        self._name = engine.name
+        self._row = {"name": engine.name, "backend": backend, "gpus": engine.gpus, "socket": engine.socket,
+                     "pid": os.getpid()}
+        self._interval = engine.heartbeat_interval_s
+        # the gateway's engines listener takes the same API key as the SDK face (None: auth off)
+        _, key = auth.parsed_keys()
+        self._client = httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(uds=engine.gateway_socket),
+                                         base_url="http://gateway", timeout=5.0,
+                                         headers={auth.api_key_header: key} if key else None)
         self._task: Optional[asyncio.Task] = None
         self.registered = asyncio.Event()
         self.refused = asyncio.Event()   # the gateway answered 4xx: a conflict or a bad row, not retried

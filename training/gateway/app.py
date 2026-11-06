@@ -102,10 +102,9 @@ class Gateway:
         self.store = store
         self.samplers = SamplerCache(store)
         self.pool = Pool(config.gateway, registry)
-        keys = {k.strip() for k in config.auth.api_key.split(",") if k.strip()} if config.auth.enabled else None
+        keys, self._own_key = config.auth.parsed_keys()   # None, None: auth off, the engine takes bare calls
         if keys is not None and not keys:
             raise ValueError("auth is enabled and the API key setting names no key")
-        self._own_key = next(iter(sorted(keys))) if keys is not None else None   # None: auth off, the engine takes bare calls
         self.decider = Decider(keys, config.auth.api_key_header, registry, self.samplers, store)
         self.reaper = ModelReaper(self.free_model)
         self._tasks: List[asyncio.Task] = []
@@ -502,6 +501,11 @@ def gateway_engines_face(registry: Registry, gateway: Gateway):
     registration, store = engines_face(registry), store_face(gateway)
 
     async def app(scope, receive, send) -> None:
+        # an engine holds the same API key as its SDK clients; without it nobody registers,
+        # unregisters or records anything here, whatever the socket's permissions
+        if not gateway.decider.key_valid(scope["headers"]):
+            await _send_reply(send, _error(401, "an engine request needs the API key", scope["path"]))
+            return
         await (store if _store_route(scope["path"]) else registration)(scope, receive, send)
     return app
 

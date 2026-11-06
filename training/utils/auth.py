@@ -8,6 +8,8 @@ from typing import Optional
 
 from fastapi import HTTPException
 
+from ..config import AuthConfig
+
 logger = logging.getLogger(__name__)
 
 
@@ -19,30 +21,17 @@ class APIKeyAuth:
     and optional authentication bypass for development.
     """
 
-    def __init__(
-        self,
-        api_key: str,
-        enabled: bool = True,
-        header_name: str = "X-API-Key"
-    ):
+    def __init__(self, config: AuthConfig):
         """
         Initialize API key authentication.
 
         Args:
-            api_key: The valid API key (or comma-separated list)
-            enabled: Whether authentication is enabled
-            header_name: Header name for API key
+            config: The auth settings; the valid keys are config.parsed_keys()
         """
-        self.enabled = enabled
-        self.header_name = header_name
-
-        # Support multiple API keys (comma-separated)
-        if api_key:
-            self.valid_keys = set(
-                key.strip() for key in api_key.split(",") if key.strip()
-            )
-        else:
-            self.valid_keys = set()
+        self.enabled = config.enabled
+        self.header_name = config.api_key_header
+        keys, _ = config.parsed_keys()
+        self.valid_keys = set(keys or ())
 
         if not self.valid_keys and self.enabled:
             logger.warning("No API keys configured but authentication is enabled")
@@ -68,7 +57,7 @@ class APIKeyAuth:
             )
 
         if provided_key not in self.valid_keys:
-            logger.warning(f"Invalid API key provided: {provided_key[:8]}...")
+            logger.warning("Invalid API key provided")   # no part of it: a mistyped key is mostly a real one
             raise HTTPException(
                 status_code=401,
                 detail="Invalid API key"
@@ -85,7 +74,7 @@ class APIKeyAuth:
             api_key: API key to add
         """
         self.valid_keys.add(api_key)
-        logger.info(f"Added new API key: {api_key[:8]}...")
+        logger.info("Added an API key")
 
     def remove_key(self, api_key: str) -> bool:
         """
@@ -99,7 +88,7 @@ class APIKeyAuth:
         """
         if api_key in self.valid_keys:
             self.valid_keys.remove(api_key)
-            logger.info(f"Removed API key: {api_key[:8]}...")
+            logger.info("Removed an API key")
             return True
         return False
 

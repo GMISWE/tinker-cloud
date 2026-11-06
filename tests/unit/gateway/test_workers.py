@@ -67,7 +67,8 @@ def test_three_workers_share_the_registry_the_sessions_and_the_samplers(tmp_path
         time.sleep(1.0)   # every worker's registry refresh has run
         statuses = [_fresh(port, "GET", "/health").status_code for _ in range(60)]
         assert statuses == [200] * 60, statuses
-        with httpx.Client(transport=httpx.HTTPTransport(uds=str(gw_sock)), base_url="http://gateway", timeout=5) as eng:
+        with httpx.Client(transport=httpx.HTTPTransport(uds=str(gw_sock)), base_url="http://gateway", timeout=5,
+                          headers={"X-API-Key": KEY}) as eng:
             for _ in range(6):
                 rows = eng.get("/engines").json()["engines"]
                 assert [r["name"] for r in rows] == ["fake"], rows

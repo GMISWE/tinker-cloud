@@ -7,7 +7,7 @@ message). It never awaits; the store it touches is the control path's (sessions 
 `create_model`), and a sampler lookup reads the store only on a cache miss.
 """
 from dataclasses import dataclass
-from typing import List, Optional, Set, Tuple, Union
+from typing import AbstractSet, List, Optional, Tuple, Union
 
 from pydantic import ValidationError
 
@@ -65,7 +65,7 @@ def _header(headers: Headers, name: bytes) -> bytes:
 
 
 class Decider:
-    def __init__(self, keys: Optional[Set[str]], key_header: str, registry: Registry,
+    def __init__(self, keys: Optional[AbstractSet[str]], key_header: str, registry: Registry,
                  samplers: SamplerCache, sessions: SessionStore) -> None:
         self._keys = keys                              # None: auth disabled
         self._key_header = key_header.lower().encode()
@@ -83,6 +83,10 @@ class Decider:
         if key not in self._keys:
             return "Invalid API key"
         return None
+
+    def key_valid(self, headers: Headers) -> bool:
+        """True when auth is off or the request carries one of the keys; no path is exempt."""
+        return self._keys is None or _header(headers, self._key_header).decode("latin-1") in self._keys
 
     def decide(self, path: str, query: bytes, headers: Headers, body: Optional[bytes]) -> Union[Route, Reject]:
         """`body` is the whole body when `routing.reads_body(path)`, else None (it streams past the decision)."""
