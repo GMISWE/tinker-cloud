@@ -75,7 +75,7 @@ class ClientConfigResponse(BaseModel):
 
     pjwt_auth_enabled: bool = Field(default=False, description="False: API keys only, no JWT exchange")
     proto_compress_fwdbwd: bool = Field(default=False, description="True only when the server can zstd-decompress bodies")
-    create_model_via_load_weights: bool = Field(default=False, description="False: create_model then load_weights")
+    custom_loss_server_side: bool = Field(default=False, description="False: the SDK runs custom losses client-side over forward_backward")
     sample_use_retrieve_futures: bool = Field(default=True, description="True: sample completions are delivered by per-session /retrieve_futures poller")
     sample_join_sampling_session: bool = Field(default=True, description="True: an unpickled SamplingClient gets its clone id from /join_sampling_session")
     use_pyqwest_transport: bool = Field(default=False, description="False: the SDK uses its httpx default transport")
@@ -424,6 +424,26 @@ class GetSessionResponse(BaseModel):
     training_run_ids: List[str] = Field(..., description="List of model IDs associated with this session")
     sampler_ids: List[str] = Field(..., description="List of sampler IDs associated with this session")
     user_metadata: Optional[Dict[str, str]] = Field(default=None, description="Metadata the client attached at create_session; values as strings")
+    display_name: Optional[str] = Field(default=None, description="The name given at create_session; None when none was")
+
+
+class SessionSummary(BaseModel):
+    """One search result (SDK types/session_summary.py)."""
+    session_id: str
+    created_at: str
+    owner: str
+    project_id: str
+    status: Optional[Dict[str, Any]] = Field(default=None, description="SDK SessionStatus: active or client_finished here")
+    checkpoints_count: int
+    display_name: Optional[str] = None
+    user_metadata: Optional[Dict[str, str]] = None
+    checkpoint_storage_bytes: Optional[int] = Field(default=None, description="Not tracked by this server")
+
+
+class SessionSearchResponse(BaseModel):
+    """One page of search results, newest first."""
+    sessions: List[SessionSummary]
+    next_cursor: Optional[Dict[str, str]] = None
 
 
 class ListSessionsResponse(BaseModel):

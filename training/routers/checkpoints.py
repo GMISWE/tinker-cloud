@@ -17,10 +17,12 @@ import time
 from datetime import datetime, timezone
 from typing import Dict
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 
 from ..services.checkpoint_service import CheckpointService
+from ..services.model_service import ModelService
 from ..core.task_manager import TaskManager
 from ..config import TrainingConfig
 from ..core.dependencies import (
@@ -28,6 +30,8 @@ from ..core.dependencies import (
     get_checkpoint_store,
     get_config,
     get_checkpoint_service, 
+    get_model_service,
+    get_training_runs_metadata,
     get_metadata_storage, 
     get_futures_storage, 
     get_training_clients,
@@ -36,6 +40,7 @@ from ..checkpoints import CheckpointKind, CheckpointRef, CheckpointStore
 from ..storage import MetadataStorage, FuturesStorage
 from ..models.requests import (
     LoadWeightsRequest,
+    OptimizerConfig,
     SaveWeightsExternalRequest,
     SaveWeightsRequest,
     SaveWeightsForSamplerRequest,
@@ -128,6 +133,14 @@ async def save_weights_for_sampler(
     if request.model_id not in training_clients:
         raise HTTPException(status_code=404, detail=f"Model {request.model_id} not found")
 
+    if request.kind not in service.backend.SUPPORTED_SAMPLER_KINDS:
+        raise HTTPException(status_code=400, detail=f"sampler kind {request.kind!r} is not served by "
+                            f"{type(service.backend).__name__}; {', '.join(sorted(service.backend.SUPPORTED_SAMPLER_KINDS))} are")
+    inflight = request.kind == "inflight"
+    if inflight and (request.sampling_session_seq_id is None or request.path is not None or request.name is not None):
+        raise HTTPException(status_code=400, detail="an inflight save names no checkpoint: it publishes the model's "
+                            "shared weights to a new sampling session (sampling_session_seq_id, no path)")
+
     # Get base_model from training client (use None if missing, not empty string)
     client_info = training_clients[request.model_id]
     base_model = client_info.get("base_model") or None
@@ -143,13 +156,14 @@ async def save_weights_for_sampler(
         )
 
         # An ephemeral sampler is the gateway's to route: it learns of it before the SDK does.
-        # The weight version is pinned at save time so pinned logprob reads are not served
-        # from the live (refit-every-step) engine.
+        # A snapshot's weight version is pinned at save time so pinned logprob reads are not
+        # served from the live (refit-every-step) engine; an inflight one follows the live weights.
         sampling_session_id = result.get("sampling_session_id")
         gateway = http_request.app.state.gateway_client
         if sampling_session_id and gateway is not None:   # None: an engine with no gateway, whose samplers nothing routes to
             await gateway.sampler_created(
-                sampling_session_id, request.model_id, client_info["backend_handle"].weight_version,
+                sampling_session_id, request.model_id,
+                None if inflight else client_info["backend_handle"].weight_version,
                 result["uri"], base_model,
             )
 
@@ -210,12 +224,15 @@ async def save_weights_external(
 @router.post("/api/v1/load_weights", response_model=AsyncOperationResponse)
 async def load_weights(
     request: LoadWeightsRequest,
+    http_request: Request,
     _: None = Depends(verify_api_key_dep),
     service: CheckpointService = Depends(get_checkpoint_service),
+    model_service: ModelService = Depends(get_model_service),
     task_manager: TaskManager = Depends(get_task_manager),
     futures_storage: FuturesStorage = Depends(get_futures_storage),
     metadata_storage: MetadataStorage = Depends(get_metadata_storage),
     training_clients: Dict = Depends(get_training_clients),
+    training_runs_metadata: Dict = Depends(get_training_runs_metadata),
     store: CheckpointStore = Depends(get_checkpoint_store),
 ):
     """Load a saved training checkpoint into a model.
@@ -225,7 +242,16 @@ async def load_weights(
     belong in a fresh model created with checkpoint_path. `optimizer=false`
     restores weights only; `optimizer=true` also restores optimizer state and
     fails the future when the checkpoint or backend cannot provide it.
+    Session addressing creates the model first (`_create_via_load`).
     """
+    try:
+        creates = request.creates()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if creates:
+        return _create_via_load(request, http_request, service, model_service, task_manager, metadata_storage,
+                                training_clients, training_runs_metadata, store)
+    assert request.model_id is not None  # creates() is False only with model_id set
     if request.model_id not in training_clients:
         raise HTTPException(status_code=404, detail=f"Model {request.model_id} not found")
     if futures_storage.has_training_requests(request.model_id):
@@ -257,6 +283,76 @@ async def load_weights(
         seq_id=request.seq_id, task_func=execute,
     )
     return AsyncOperationResponse(request_id=request_id, model_id=request.model_id)
+
+
+def _create_via_load(
+    request: LoadWeightsRequest,
+    http_request: Request,
+    service: CheckpointService,
+    model_service: ModelService,
+    task_manager: TaskManager,
+    metadata_storage: MetadataStorage,
+    training_clients: Dict,
+    training_runs_metadata: Dict,
+    store: CheckpointStore,
+) -> AsyncOperationResponse:
+    """Create the model `{session_id}:train:{model_seq_id}` from the checkpoint and load
+    it, as one future. The SDK derives that id itself and reads no id back. Base model
+    and LoRA config are the checkpoint's run's; the optimizer family is the
+    checkpoint's when its state is restored, else the declared one (AdamW by default)."""
+    assert request.session_id is not None and request.model_seq_id is not None  # creates() checked both
+    model_id = f"{request.session_id}:train:{request.model_seq_id}"
+    if model_id in training_clients:
+        raise HTTPException(status_code=400, detail=f"Model {model_id} already exists: create-via-load creates it")
+    ref = CheckpointRef.parse(request.path)           # 400 on a malformed path
+    store.require(ref, kind=CheckpointKind.WEIGHTS)   # 404 / 425 / 500 / wrong kind, before the future exists
+    source = training_clients.get(ref.model_id) or metadata_storage.load_training_run(ref.model_id)
+    if not source:   # None or {}: the checkpoint's run is known neither live nor stored
+        raise HTTPException(status_code=404, detail=f"Training run {ref.model_id} of {ref.uri} not found")
+    base_model = source["base_model"]
+    if request.base_model is not None and request.base_model != base_model:
+        raise HTTPException(status_code=400, detail=f"base_model {request.base_model!r} is not the checkpoint's ({base_model!r})")
+    try:
+        if request.optimizer:
+            optimizer_config = OptimizerConfig(**store.optimizer_config(ref))
+            if request.optimizer_config is not None and request.optimizer_config.type != optimizer_config.type:
+                raise ValueError(f"load_weights declares optimizer {request.optimizer_config.type} but {ref.uri} "
+                                 f"holds {optimizer_config.type} optimizer state; load it with optimizer=false")
+        else:
+            optimizer_config = request.optimizer_config or OptimizerConfig()
+        optimizer_config.check()
+        model_service.require_optimizer(optimizer_config)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    request_id = generate_request_id()
+
+    async def execute():
+        try:
+            await model_service.create_model(
+                model_id=model_id, request_id=request_id, base_model=base_model,
+                lora_config=source["lora_config"], parallelism_config=None,
+                metadata_storage=metadata_storage, training_clients=training_clients,
+                training_runs_metadata=training_runs_metadata, optimizer_config=optimizer_config,
+            )
+        except Exception:
+            # the gateway recorded the model at submit; a create that fails is reported before the future is
+            gateway = http_request.app.state.gateway_client
+            if gateway is not None:   # None: an engine with no gateway
+                try:
+                    await gateway.model_failed(model_id)
+                except httpx.HTTPError:   # the create's own error is the one to report; the row's fate is logged beside it
+                    logger.exception("Gateway did not drop the failed model %s", model_id)
+            raise
+        return await service.load_weights(
+            model_id=model_id, request_id=request_id, ref=ref, optimizer=request.optimizer,
+            training_clients=training_clients, metadata_storage=metadata_storage,
+        )
+
+    request_id = task_manager.create_task(
+        request_id=request_id, operation="load_weights", model_id=model_id,
+        payload=request.dict(), task_func=execute,
+    )
+    return AsyncOperationResponse(request_id=request_id, model_id=model_id)
 
 
 @router.get("/api/v1/training_runs/{model_id}/checkpoints")

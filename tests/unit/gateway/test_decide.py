@@ -34,7 +34,7 @@ def test_decide_is_synchronous_and_covers_every_shape():
     assert isinstance(r, Reject) and r.status == 400 and "Host" in r.message
     r = d.decide("/api/v1/optim_step", b"", HEADERS, orjson.dumps({"model_id": "model_other_0123456789abcdef"}))
     assert isinstance(r, Reject) and r.status == 404 and "'other'" in r.message
-    sid = store.create_session([], {}, "t")
+    sid = store.create_session([], {}, "t", None)
     store.add_model(sid, MODEL, 0, "fake/tiny", "fake")
     store.add_sampler("s_1", sid, MODEL, "fake/tiny", None, 5)
     r = d.decide("/api/v1/asample", b"", HEADERS, orjson.dumps({"sampling_session_id": "s_1", "prompt": {"tokens": [1]}}))

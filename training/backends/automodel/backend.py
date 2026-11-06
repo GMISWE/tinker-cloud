@@ -128,6 +128,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
     needs_ray = True
     config: AutomodelConfig
     SUPPORTED_LOSS_FNS = frozenset(m.value for m in LossFn)   # the service's table is keyed by the wire string
+    SUPPORTED_SAMPLER_KINDS = frozenset({"snapshot", "inflight"})   # every sample names the newest adapter (D20)
     SUPPORTED_OPTIMIZERS = frozenset({"adamw", "dimuon"})      # dimuon = dion.Muon per LoRA factor (worker.setup)
 
     def __init__(self, overrides: Optional[Dict[str, Any]] = None):
@@ -399,7 +400,8 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         n = group.ranks.num_ranks
         batch = await asyncio.to_thread(coalesce, payloads, n)
         shards = shard(batch, n)
-        clip = clip_thresholds(dict(pk.loss_fn_config)) if batch.loss_fn is LossFn.PPO else None
+        clip = (clip_thresholds(batch.loss_fn.value, dict(pk.loss_fn_config))
+                if batch.loss_fn in (LossFn.PPO, LossFn.GSPO) else None)
         run = group.ranks.forward_backward if pk.kind == "forward_backward" else group.ranks.forward
         try:
             outs = await run(pk.model_id, shards, clip)
@@ -617,20 +619,27 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
 def _per_request(batch: Batch, outs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Rank outputs, in rank order -> one result per request of the batch.
     The swap served the whole pass, so every request reports it."""
-    cat = {k: torch.cat([o[k] for o in outs]) for k in ("row_loss", "logprobs", "elementwise", "clamped")}
+    keys = ("row_loss", "logprobs", "elementwise", "clamped")
+    if batch.loss_fn is LossFn.GSPO:
+        keys += ("seq_log_ratio", "seq_clipped")
+    cat = {k: torch.cat([o[k] for o in outs]) for k in keys}
     swap = _swap_seconds(outs)
     losses = row_sums(batch, cat["row_loss"])
     clamped = row_sums(batch, cat["clamped"])
     logprobs = split_rows(batch, cat["logprobs"])
     elementwise = split_rows(batch, cat["elementwise"])
     results = []
-    for i in range(len(batch.request_rows)):
+    for i, (start, end) in enumerate(batch.request_rows):
         outputs = [{"logprobs": _tensor(lp), "elementwise_loss": _tensor(el)}
                    for lp, el in zip(logprobs[i], elementwise[i])]
+        metrics: Dict[str, Any] = {"loss:sum": losses[i], "clamped_positions:sum": int(clamped[i]), "swap_seconds:max": swap}
+        if batch.loss_fn is LossFn.GSPO:   # Tinker's gspo diagnostics: means over the request's sequences
+            metrics["gspo_sequence_log_ratio:mean"] = float(cat["seq_log_ratio"][start:end].mean())
+            metrics["gspo_clipped_fraction:mean"] = float(cat["seq_clipped"][start:end].mean())
         results.append({
             "loss_fn_output_type": batch.loss_fn.value,
             "loss": losses[i],
-            "metrics": {"loss:sum": losses[i], "clamped_positions:sum": int(clamped[i]), "swap_seconds:max": swap},
+            "metrics": metrics,
             "loss_fn_outputs": outputs,
             "deferred": False,
         })

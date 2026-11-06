@@ -409,6 +409,8 @@ class AutomodelWorker:
             "logprobs": torch.zeros(rows, width),
             "elementwise": torch.zeros(rows, width),
             "clamped": torch.zeros(rows),
+            "seq_log_ratio": torch.zeros(rows),
+            "seq_clipped": torch.zeros(rows),
         }
         for start in range(0, rows, self.micro_batch_rows):
             end = min(start + self.micro_batch_rows, rows)
@@ -425,6 +427,8 @@ class AutomodelWorker:
             out["logprobs"][start:end, :w] = res.logprobs.cpu()
             out["elementwise"][start:end, :w] = res.elementwise.cpu()
             out["clamped"][start:end] = res.clamped.cpu()
+            out["seq_log_ratio"][start:end] = res.seq_log_ratio.cpu()
+            out["seq_clipped"][start:end] = res.seq_clipped.cpu()
         return out
 
 

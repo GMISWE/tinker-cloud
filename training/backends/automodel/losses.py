@@ -5,6 +5,10 @@ Contract (API-CONTRACT F2, BUG-017): a per-token SUM, no mean, at T=1.
   cross_entropy:        -sum_t w_t * lp_t
   importance_sampling:  -sum_t exp(lp_t - q_t) * A_t
   ppo:                  -sum_t min(r_t * A_t, clip(r_t, low, high) * A_t),  r_t = exp(lp_t - q_t)
+  gspo:                 -sum_t min(s_t * A_t, clip(s_t, low, high) * A_t),
+                        s = exp(mean over M of (sg[lp_t] - q_t)), s_t = s * exp(lp_t - sg[lp_t]),
+                        M = the positions sequence_ratio_mask marks (Tinker's reference code,
+                        tinker-docs /tinker/losses/gspo/; no log-ratio clamp there)
 lp_t is the model's logprob of target_tokens[t] from the logits at position t
 (the converter's layout: no shift). q_t are the sampler's logprobs.
 
@@ -84,22 +88,26 @@ class LossOutput:
     logprobs: torch.Tensor       # [R, S] detached: lp_t (0 past each length)
     elementwise: torch.Tensor    # [R, S] detached: each position's term of the sum
     clamped: torch.Tensor        # [R] detached: positions whose log-ratio was clamped (0 for CE)
+    seq_log_ratio: torch.Tensor  # [R] detached: gspo's log s per row (0 for the other losses)
+    seq_clipped: torch.Tensor    # [R] detached: 1 where gspo's s fell outside the clip range
 
 
 def compute_loss(logits: torch.Tensor, shard: Batch,
                  clip: Optional[Tuple[float, float]] = None,
                  chunk_tokens: int = DEFAULT_CHUNK_TOKENS) -> LossOutput:
     """The shard's loss for shard.loss_fn. `clip` = (low, high) ratio bounds,
-    required for ppo and refused for the others."""
-    is_ppo = shard.loss_fn is LossFn.PPO
-    if is_ppo != (clip is not None):
-        raise ValueError(f"clip bounds are {'required' if is_ppo else 'not taken'} by {shard.loss_fn.value}")
+    required for ppo and gspo and refused for the others."""
+    clipped_loss = shard.loss_fn in (LossFn.PPO, LossFn.GSPO)
+    if clipped_loss != (clip is not None):
+        raise ValueError(f"clip bounds are {'required' if clipped_loss else 'not taken'} by {shard.loss_fn.value}")
     width = shard.input_ids.shape[1]
     device = logits.device
     valid = torch.arange(width, device=device)[None, :] < shard.lengths.to(device)[:, None]
     inputs = {k: v.to(device) for k, v in shard.inputs.items()}
     lp = token_logprobs(logits, inputs["target_tokens"], chunk_tokens)
     zero = torch.zeros((), dtype=torch.float32, device=device)
+    seq_log_ratio = torch.zeros(lp.shape[0], dtype=torch.float32, device=device)
+    seq_clipped = torch.zeros(lp.shape[0], dtype=torch.float32, device=device)
 
     if shard.loss_fn is LossFn.CROSS_ENTROPY:
         active = valid
@@ -111,12 +119,26 @@ def compute_loss(logits: torch.Tensor, shard: Batch,
         log_ratio = torch.where(active, lp - inputs["logprobs"], zero)
         clamped = (log_ratio.abs() > RATIO_LOG_CLAMP).sum(dim=1).float()
         ratio = torch.exp(log_ratio.clamp(-RATIO_LOG_CLAMP, RATIO_LOG_CLAMP))
-        if is_ppo:
+        if shard.loss_fn is LossFn.PPO:
             assert clip is not None  # checked on entry
             low, high = clip
             terms = -torch.minimum(ratio * adv, ratio.clamp(low, high) * adv)
         else:
             terms = -(ratio * adv)
+    elif shard.loss_fn is LossFn.GSPO:
+        assert clip is not None  # checked on entry
+        low, high = clip
+        adv = inputs["advantages"]
+        active = valid
+        in_ratio = valid & (inputs["sequence_ratio_mask"] != 0)
+        token_log_ratio = torch.where(in_ratio, lp.detach() - inputs["logprobs"], zero)
+        # a real row marks >= 1 position (the converter refuses none); padding rows mark 0
+        seq_log_ratio = token_log_ratio.sum(dim=1) / in_ratio.sum(dim=1).clamp(min=1)
+        ratio = torch.exp(seq_log_ratio[:, None] + lp - lp.detach())
+        terms = -torch.minimum(ratio * adv, ratio.clamp(low, high) * adv)
+        clamped = torch.zeros(lp.shape[0], dtype=torch.float32, device=device)
+        s = torch.exp(seq_log_ratio)
+        seq_clipped = (((s < low) | (s > high)) & (shard.lengths.to(device) > 0)).float()
     else:
         assert_never(shard.loss_fn)  # a new LossFn member needs a branch here; pyright enforces it
 
@@ -128,4 +150,6 @@ def compute_loss(logits: torch.Tensor, shard: Batch,
         logprobs=torch.where(valid, lp, zero).detach(),
         elementwise=terms.detach(),
         clamped=clamped.detach(),
+        seq_log_ratio=seq_log_ratio.detach(),
+        seq_clipped=seq_clipped.detach(),
     )

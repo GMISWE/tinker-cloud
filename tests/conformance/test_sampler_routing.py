@@ -12,8 +12,8 @@ def _sample_ops(server, model_id):
 def test_sampler_routes_to_its_own_model(service_client, server):
     a = service_client.create_lora_training_client(base_model="fake/tiny", rank=4)
     b = service_client.create_lora_training_client(base_model="fake/tiny", rank=4)
-    sa = a.save_weights_and_get_sampling_client("sa")
-    sb = b.save_weights_and_get_sampling_client("sb")
+    sa = a.save_weights_and_get_sampling_client("sa").result()
+    sb = b.save_weights_and_get_sampling_client("sb").result()
     params = types.SamplingParams(max_tokens=3, temperature=1.0)
     prompt = types.ModelInput.from_ints([1, 2, 3])
     ra = sa.sample(prompt=prompt, num_samples=2, sampling_params=params).result()
@@ -27,7 +27,7 @@ def test_model_path_names_the_model(service_client, server):
     a = service_client.create_lora_training_client(base_model="fake/tiny", rank=4)
     b = service_client.create_lora_training_client(base_model="fake/tiny", rank=4)
     path = b.save_weights_for_sampler("byname").result().path
-    sc = service_client.create_sampling_client(model_path=path)  # create_sampling_session bound to b
+    sc = service_client.create_sampling_client(model_path=path).result()  # create_sampling_session bound to b
     sc.sample(prompt=types.ModelInput.from_ints([4, 5]), num_samples=1,
               sampling_params=types.SamplingParams(max_tokens=2)).result()
     assert len(_sample_ops(server, b.model_id)) == 1
@@ -38,7 +38,7 @@ def test_pinned_version_travels_with_the_sampler(service_client, server):
     a = service_client.create_lora_training_client(base_model="fake/tiny", rank=4)
     a.forward_backward([make_datum([1, 2, 3, 4])], "cross_entropy")
     a.optim_step(types.AdamParams(learning_rate=0.1)).result()
-    s1 = a.save_weights_and_get_sampling_client("v1")  # weight_version 1
+    s1 = a.save_weights_and_get_sampling_client("v1").result()  # weight_version 1
     a.forward_backward([make_datum([1, 2, 3, 4])], "cross_entropy")
     a.optim_step(types.AdamParams(learning_rate=0.1)).result()
     s1.sample(prompt=types.ModelInput.from_ints([9]), num_samples=1,
@@ -48,7 +48,7 @@ def test_pinned_version_travels_with_the_sampler(service_client, server):
 
 def test_base_model_only_is_rejected(service_client, server):
     with pytest.raises(Exception) as ei:
-        service_client.create_sampling_client(base_model="fake/tiny")
+        service_client.create_sampling_client(base_model="fake/tiny").result()
     assert "base-model sampling is not supported" in str(ei.value)
     r = server.post("/api/v1/asample", {"prompt": {"tokens": [1]}, "num_samples": 1, "base_model": "fake/tiny"})
     assert r.status_code == 400 and "base-model sampling" in r.json()["error"]
@@ -69,7 +69,7 @@ def test_unknown_sampler_and_model_are_404(service_client, server):
 
 def test_sampler_of_unloaded_model_is_404(service_client, server):
     a = service_client.create_lora_training_client(base_model="fake/tiny", rank=4)
-    sa = a.save_weights_and_get_sampling_client("gone")
+    sa = a.save_weights_and_get_sampling_client("gone").result()
     rid = server.post("/api/v1/unload_model", {"model_id": a.model_id}).json()["request_id"]
     assert server.post("/api/v1/retrieve_future", {"request_id": rid}, timeout=60).status_code == 200
     r = server.post("/api/v1/asample", {"prompt": {"tokens": [1]}, "num_samples": 1,

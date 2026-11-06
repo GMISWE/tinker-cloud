@@ -4,6 +4,7 @@ Request models for the training API.
 This module defines Pydantic models for all API request payloads,
 providing validation and documentation.
 """
+from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, validator, model_validator
@@ -127,13 +128,38 @@ class SaveWeightsExternalRequest(BaseModel):
 
 
 class LoadWeightsRequest(BaseModel):
-    """Request to load model weights (permitted only as a model's first request)."""
+    """Request to load model weights, addressed one of two ways (the SDK's own split):
+    `model_id` (+ `seq_id`): into a model just created, as its first request;
+    `session_id` + `model_seq_id`: create-via-load, the load creates the model
+    `{session_id}:train:{model_seq_id}` with the checkpoint's base model and LoRA config."""
 
-    model_id: str = Field(..., description="Model ID")
+    model_id: Optional[str] = Field(default=None, description="Model to load into (legacy addressing)")
+    seq_id: Optional[int] = Field(default=None, description="Sequence ID for ordering")
+    session_id: Optional[str] = Field(default=None, description="Create-via-load: the session that owns the new model")
+    model_seq_id: Optional[int] = Field(default=None, description="Create-via-load: the new model's sequence id in its session")
+    base_model: Optional[str] = Field(default=None, description="Create-via-load: must be the checkpoint's base model")
+    user_metadata: Optional[Dict[str, Any]] = Field(default=None, description="Create-via-load: user metadata of the new model")
+    weights_access_token: Optional[str] = Field(default=None, description="Another account's token; no accounts are served")
     path: str = Field(..., description="tinker://<run>/weights/<name> to load from")
     optimizer: bool = Field(default=False, description="Also restore optimizer state (the checkpoint must carry it)")
     optimizer_config: Optional[OptimizerConfig] = Field(default=None, description="Optimizer family of the restored run; must be the model's own")
-    seq_id: Optional[int] = Field(default=None, description="Sequence ID for ordering")
+
+    def creates(self) -> bool:
+        """True for create-via-load addressing. Raises ValueError (a 400) when the
+        request mixes the two forms, or names an account token."""
+        legacy = self.model_id is not None or self.seq_id is not None
+        session = self.session_id is not None or self.model_seq_id is not None
+        if legacy == session:
+            raise ValueError("load_weights takes either model_id (+ seq_id) or session_id + model_seq_id, not both or neither")
+        if session and (self.session_id is None or self.model_seq_id is None):
+            raise ValueError("create-via-load needs both session_id and model_seq_id")
+        if legacy and self.model_id is None:
+            raise ValueError("seq_id without model_id")
+        if not session and (self.base_model is not None or self.user_metadata is not None):
+            raise ValueError("base_model and user_metadata are create-via-load fields; the model already exists")
+        if self.weights_access_token is not None:
+            raise ValueError("weights_access_token names another account; this server serves one account")
+        return session
 
 
 class RetrieveFutureRequest(BaseModel):
@@ -194,6 +220,7 @@ class SessionFuturesPollRequest(BaseModel):
     target: SamplingSessionFuturesTarget
     prev_cursor: int = Field(default=0, ge=0, description="Cursor from the preious response; entries below it are acknowledged")
     timeout: Optional[float] = Field(default=None, ge=0, description="Requested hold in seconds; the server caps it")
+    retrieved_request_ids: List[str] = Field(default_factory=list, description="Results the client has fetched; the server frees them")
 
 class CancelFutureRequest(BaseModel):
     """Cancel an in-flight sample the SDK has abandaned."""
@@ -343,6 +370,8 @@ class SaveWeightsForSamplerRequest(BaseModel):
     path: Optional[str] = Field(default=None, description="Checkpoint path/name")
     seq_id: Optional[int] = Field(default=None, description="Sequence ID for ordering")
     sampling_session_seq_id: Optional[int] = Field(default=None, description="Sampling session sequence ID for ephemeral saves")
+    # the SDK (>= 0.38) always sends it; "snapshot" is its default (types/sampling_client_kind.py)
+    kind: Literal["snapshot", "inflight"] = Field(default="snapshot", description="snapshot: fixed weights; inflight: the model's shared, moving weights")
 
 
 # ============= Updated Request Models (New Format) =============
@@ -488,7 +517,49 @@ class CreateSessionRequest(BaseModel):
     tags: List[str] = Field(default_factory=list, description="Session tags")
     user_metadata: Optional[Dict[str, Any]] = Field(default=None, description="Custom metadata")
     sdk_version: str = Field(default="unknown", description="SDK version")
+    display_name: Optional[str] = Field(default=None, description="Non-unique name for display and search")
     type: str = Field(default="create_session", description="Request type")
+
+
+# Session search (SDK >= 0.38 types/session_search_request.py): the server mirrors the SDK's
+# defaults and bounds. One implicit owner and project: this server has no accounts.
+LOCAL_OWNER = "urn:tinkercloud:owner:local"
+DEFAULT_PROJECT = "default"
+
+
+class SessionStatusQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["active", "cancelled", "failed", "client_finished"]
+    reasons: Optional[List[Literal["success", "errored", "interrupted"]]] = Field(default=None, min_length=1)
+
+
+class SearchOwner(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["own", "accessible", "user"] = "own"
+    owner_urns: Optional[List[str]] = Field(default=None, min_length=1, max_length=10)
+
+    @model_validator(mode="after")
+    def _urns_with_user(self) -> "SearchOwner":
+        if (self.type == "user") != (self.owner_urns is not None):
+            raise ValueError("owner_urns is given exactly when owner type is 'user'")
+        return self
+
+
+class SessionSearchCursor(BaseModel):
+    last_created_at: datetime
+    last_session_id: str
+
+
+class SessionSearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    session_id: Optional[str] = None
+    project_ids: Optional[List[str]] = None
+    user_metadata: Dict[str, str] = Field(default_factory=dict)
+    display_name: Optional[str] = Field(default=None, min_length=1)
+    owner: SearchOwner = Field(default_factory=SearchOwner)
+    statuses: Optional[List[SessionStatusQuery]] = Field(default=None, min_length=1)
+    limit: int = Field(default=50, ge=1, le=200)
+    cursor: Optional[SessionSearchCursor] = None
 
 
 class SessionHeartbeatRequest(BaseModel):

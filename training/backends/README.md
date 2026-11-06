@@ -18,6 +18,7 @@ as `TensorData`. The per-token fields and their native names:
 | `advantages`             | `advantages`                      | `advantages`                       | `advantages`                  |
 | `logprobs`               | `log_probs`                       | `prev_logprobs`                    | `logprobs`                    |
 | `target_tokens`          | appended as the final target      | shifted labels                     | `target_tokens`               |
+| `sequence_ratio_mask` (gspo) | not served (400)             | not served (400)                   | `sequence_ratio_mask`, ≥1 mark per datum |
 | (computed)               | padding to the DP width           | `input_lengths` [B], `sample_mask` [B] | row sums, rank shards     |
 
 The unit tests under `tests/unit/backends/<name>/test_converter.py` are the

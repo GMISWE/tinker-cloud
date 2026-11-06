@@ -51,7 +51,7 @@ def test_finish_rejects_unknown_reason(server):
 def test_sdk_close_finishes_the_session(server):
     import tinker
     sc = tinker.ServiceClient(base_url=server.base_url, api_key=API_KEY)
-    tc = sc.create_lora_training_client(base_model="fake/tiny", rank=2)
+    tc = sc.create_lora_training_client(base_model="fake/tiny", rank=2).result()
     sid = sc._session_holder.get_session_id()
     sc.close("success", detail="protocol test").result()
     # models are untouched by finish
@@ -63,7 +63,7 @@ def test_sdk_close_finishes_the_session(server):
 
 def test_join_counter_sequence_and_404(service_client, server):
     tc = service_client.create_lora_training_client(base_model="fake/tiny", rank=2)
-    sampler = tc.save_weights_and_get_sampling_client("join")
+    sampler = tc.save_weights_and_get_sampling_client("join").result()
     sampler_id = sampler._sampling_session_id
     counters = [server.post("/api/v1/join_sampling_session", {"sampling_session_id": sampler_id}).json()["client_counter"]
                 for _ in range(3)]
@@ -74,7 +74,7 @@ def test_join_counter_sequence_and_404(service_client, server):
 
 def test_unpickled_sampling_client_joins(service_client, server):
     tc = service_client.create_lora_training_client(base_model="fake/tiny", rank=2)
-    sampler = tc.save_weights_and_get_sampling_client("clone")
+    sampler = tc.save_weights_and_get_sampling_client("clone").result()
     clone = pickle.loads(pickle.dumps(sampler))
     assert clone._cloned_sampler_id is None  # waits for the server-allocated id
     out = clone.sample(prompt=types.ModelInput.from_ints([1, 2]), num_samples=1,
@@ -123,3 +123,9 @@ def test_checkpoint_storage_usage_aggregates_completed_saves(service_client, ser
     assert row.project_id == "proj-x" and row.estimated_monthly_cost_usd is None
     raw = _get(server, "/api/v1/billing/usage/checkpoints/current")
     assert raw.status_code == 200 and raw.json()["data"][0]["project_id"] is None
+
+
+def test_copy_weights_is_not_served(server):
+    # Tinker copies into a project; this server has no projects (SDK rest_client.copy_weights)
+    r = server.post("/api/v1/copy_weights", {"source_path": "tinker://m/weights/x", "destination_project_id": "p"})
+    assert r.status_code == 404, r.text

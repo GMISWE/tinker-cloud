@@ -86,6 +86,7 @@ def topk_for(tokens: List[int], k: int) -> List[List[Tuple[int, float]]]:
 class FakeBackend(TrainingBackend[FakeHandle]):
     needs_ray = False
     SUPPORTED_LOSS_FNS = frozenset(LOSS_FNS)
+    SUPPORTED_SAMPLER_KINDS = frozenset({"snapshot", "inflight"})
     SUPPORTED_OPTIMIZERS = frozenset(OPTIMIZER_FAMILIES)   # both, so the protocol suite covers the family seam
 
     def __init__(self, overrides: Optional[Dict[str, Any]] = None):

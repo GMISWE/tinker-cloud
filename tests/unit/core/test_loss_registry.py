@@ -39,8 +39,8 @@ def test_clip_thresholds_bracket_one():
 
 
 def test_clip_thresholds_defaults():
-    assert loss_registry.clip_thresholds(None) == (0.8, 1.2)
-    assert loss_registry.clip_thresholds({"clip_high_threshold": 1.3}) == (0.8, 1.3)
+    assert loss_registry.clip_thresholds("ppo", None) == (0.8, 1.2)
+    assert loss_registry.clip_thresholds("ppo", {"clip_high_threshold": 1.3}) == (0.8, 1.3)
 
 
 class _Stub(TrainingBackend):

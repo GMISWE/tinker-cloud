@@ -165,6 +165,18 @@ class SampleFutureStore:
         fut = self._futures[request_id]
         if fut.retrieved_at is None:
             fut.retrieved_at = time.monotonic()
+    def release(self, key: SessionKey, request_ids: List[str]) -> int:
+        """Free the payloads of finished samples of session `key` the client has
+        fetched (the SDK's retrieved_request_ids; Tinker's server "may delete" them).
+        An id already swept, pending, or of another session is left as it is."""
+        freed = 0
+        for rid in request_ids:
+            fut = self._futures.get(rid)
+            if fut is not None and fut.session == key and fut.status != "pending":
+                del self._futures[rid]
+                freed += 1
+        return freed
+
     def cancel(self, request_id: str, reason: str = "cancelled by client") -> bool:
         """Cancel a pending sample; False if it had already finished. KeyError if unknown."""
         fut = self._futures[request_id]

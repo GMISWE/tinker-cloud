@@ -17,6 +17,7 @@ LOSS_FNS: Dict[str, FrozenSet[str]] = {
     "ppo": CLIP_KEYS,
     "cispo": CLIP_KEYS,
     "dro": frozenset({"beta"}),
+    "gspo": CLIP_KEYS,
     "classification_ce": frozenset(),
 }
 
@@ -27,11 +28,27 @@ TEXT_KEYS: Dict[str, FrozenSet[str]] = {}
 # Tinker's documented PPO/CISPO defaults (epsilon 0.2 either side).
 DEFAULT_CLIP_LOW = 0.8
 DEFAULT_CLIP_HIGH = 1.2
+# Tinker's gspo defaults, the GSPO paper's range (tinker-docs /tinker/losses/gspo/).
+GSPO_CLIP_LOW = 1 - 3e-4
+GSPO_CLIP_HIGH = 1 + 4e-4
+
+# Loss names the SDK can send whose meaning this server does not serve, with the reason.
+UNSERVED_LOSS_FNS: Dict[str, str] = {
+    "stable_reinforce": (
+        "loss_fn 'stable_reinforce' is not served: Tinker has not published its objective (only its KL "
+        "term), so no implementation here could mean what Tinker's does; for off-policy data use 'ppo' "
+        "or 'gspo'"),
+    "custom": (
+        "loss_fn 'custom' (a server-side custom loss) is not served: this server sends "
+        "custom_loss_server_side=false, so the SDK runs custom losses client-side over forward_backward"),
+}
 
 
 def validate(loss_fn: str, loss_fn_config: Optional[Mapping[str, Any]] = None) -> None:
     """Raise ValueError if `loss_fn` is unknown or `loss_fn_config` carries a key it does not take
     (or a value of the wrong kind for the key)."""
+    if loss_fn in UNSERVED_LOSS_FNS:
+        raise ValueError(UNSERVED_LOSS_FNS[loss_fn])
     allowed = LOSS_FNS.get(loss_fn)
     if allowed is None:
         raise ValueError(f"Unknown loss_fn {loss_fn!r}; supported: {', '.join(sorted(LOSS_FNS))}")
@@ -46,16 +63,15 @@ def validate(loss_fn: str, loss_fn_config: Optional[Mapping[str, Any]] = None) -
         elif not isinstance(value, (int, float)) or isinstance(value, bool):
             raise ValueError(f"loss_fn_config[{key!r}] must be a number, got {type(value).__name__}")
     if loss_fn_config and CLIP_KEYS & set(loss_fn_config):
-        low = loss_fn_config.get("clip_low_threshold", DEFAULT_CLIP_LOW)
-        high = loss_fn_config.get("clip_high_threshold", DEFAULT_CLIP_HIGH)
+        low, high = clip_thresholds(loss_fn, loss_fn_config)
         if not (0.0 <= low <= 1.0 <= high):
             raise ValueError(
                 f"clip thresholds must satisfy 0 <= clip_low_threshold <= 1 <= clip_high_threshold, got {low}, {high}"
             )
 
 
-def clip_thresholds(loss_fn_config: Optional[Mapping[str, float]]) -> tuple:
-    """(low, high) with Tinker's defaults filled in."""
+def clip_thresholds(loss_fn: str, loss_fn_config: Optional[Mapping[str, Any]]) -> tuple:
+    """(low, high) for a clipped loss, with Tinker's per-loss defaults filled in."""
+    low, high = (GSPO_CLIP_LOW, GSPO_CLIP_HIGH) if loss_fn == "gspo" else (DEFAULT_CLIP_LOW, DEFAULT_CLIP_HIGH)
     cfg = loss_fn_config or {}
-    return (float(cfg.get("clip_low_threshold", DEFAULT_CLIP_LOW)),
-            float(cfg.get("clip_high_threshold", DEFAULT_CLIP_HIGH)))
+    return (float(cfg.get("clip_low_threshold", low)), float(cfg.get("clip_high_threshold", high)))

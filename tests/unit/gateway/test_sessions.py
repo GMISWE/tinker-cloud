@@ -109,5 +109,5 @@ def test_many_workers_open_one_new_store_file_at_once(tmp_path):
         t.join()
     assert errors == []
     store = SessionStore(path)
-    sid = store.create_session([], {}, "t")
+    sid = store.create_session([], {}, "t", None)
     assert store.get_session(sid) is not None

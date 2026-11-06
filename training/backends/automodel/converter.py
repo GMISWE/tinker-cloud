@@ -31,6 +31,7 @@ class LossFn(str, Enum):
     CROSS_ENTROPY = "cross_entropy"
     IMPORTANCE_SAMPLING = "importance_sampling"
     PPO = "ppo"
+    GSPO = "gspo"
 
 
 # loss_fn -> the loss_fn_inputs it reads; every one is required and no other
@@ -39,9 +40,10 @@ LOSS_INPUTS: Dict[LossFn, Tuple[str, ...]] = {
     LossFn.CROSS_ENTROPY: ("target_tokens", "weights"),
     LossFn.IMPORTANCE_SAMPLING: ("target_tokens", "logprobs", "advantages"),
     LossFn.PPO: ("target_tokens", "logprobs", "advantages"),
+    LossFn.GSPO: ("target_tokens", "logprobs", "advantages", "sequence_ratio_mask"),
 }
 
-_FLOAT_INPUTS = ("weights", "logprobs", "advantages")
+_FLOAT_INPUTS = ("weights", "logprobs", "advantages", "sequence_ratio_mask")
 
 
 @dataclass(frozen=True)
@@ -100,6 +102,8 @@ def convert_request(data: Sequence[Datum], loss_fn: str) -> RequestRows:
             if values.numel() != ids.numel():
                 raise ValueError(f"datum {i}: {key} has {values.numel()} entries for {ids.numel()} tokens")
             inputs[key].append(values)
+        if fn is LossFn.GSPO and not bool((inputs["sequence_ratio_mask"][-1] != 0).any()):
+            raise ValueError(f"datum {i}: sequence_ratio_mask marks no token; gspo takes its ratio over at least one")
         tokens.append(ids)
     return RequestRows(loss_fn=fn, tokens=tokens, inputs=inputs)
 

@@ -11,7 +11,7 @@ from typing import List, Optional, Set, Tuple, Union
 
 from pydantic import ValidationError
 
-from ..models.requests import CreateModelRequest
+from ..models.requests import CreateModelRequest, LoadWeightsRequest
 from ..utils.helpers import BASE_MODEL_SAMPLING_UNSUPPORTED, MODEL_ID_HEADER, PINNED_VERSION_HEADER, mint_id
 from . import routing
 from .registry import EngineRow, Registry
@@ -25,6 +25,7 @@ PUBLIC_PATHS = frozenset({
 })
 PUBLIC_PREFIXES = ("/api/v1/external_weights/",)   # signed URLs carry their own token
 CREATE_MODEL = "/api/v1/create_model"
+LOAD_WEIGHTS = "/api/v1/load_weights"
 SAMPLE_OPS = frozenset({"/api/v1/asample", "/api/v1/sample", "/api/v1/create_sampling_client"})
 RETRIEVE_FUTURES = "/api/v1/retrieve_futures"
 DROP_MODEL_OPS = frozenset({"/api/v1/delete_model", "/api/v1/unload_model"})
@@ -38,7 +39,7 @@ class ModelRecord:
     model_id: str
     session_id: str
     model_seq_id: int
-    base_model: str
+    base_model: Optional[str]   # None: a create-via-load that names none (the checkpoint's)
 
 
 @dataclass(frozen=True)
@@ -111,6 +112,8 @@ class Decider:
             return Route(engine, [])
         if path == CREATE_MODEL:
             return self._create_model(engine, doc)
+        if path == LOAD_WEIGHTS and "session_id" in doc:
+            return self._create_via_load(engine, doc)
         if path in DROP_MODEL_OPS:
             model_id = doc.get("model_id")   # absent: the engine's 422, and no row is named
             return Route(engine, [], drop_model=model_id if isinstance(model_id, str) else None)
@@ -144,3 +147,20 @@ class Decider:
         model_id = mint_id("model", engine.name)
         return Route(engine, [(_MODEL_ID_HEADER, model_id.encode())],
                      record=ModelRecord(model_id, req.session_id, req.model_seq_id, req.base_model))
+
+    def _create_via_load(self, engine: EngineRow, doc: dict) -> Union[Route, Reject]:
+        """A load addressed by session creates its model: the SDK derives the id
+        `{session_id}:train:{model_seq_id}` and the gateway records it under that id.
+        A body the engine would refuse is its 400 or 422, and nothing is recorded."""
+        try:
+            req = LoadWeightsRequest.model_validate(doc)
+            creates = req.creates()
+        except (ValidationError, ValueError):
+            return Route(engine, [])
+        if not creates:
+            return Route(engine, [])
+        assert req.session_id is not None and req.model_seq_id is not None  # creates() checked both
+        if not self._sessions.exists(req.session_id):
+            return Reject(404, f"Session not found: {req.session_id}")
+        model_id = f"{req.session_id}:train:{req.model_seq_id}"
+        return Route(engine, [], record=ModelRecord(model_id, req.session_id, req.model_seq_id, req.base_model))
