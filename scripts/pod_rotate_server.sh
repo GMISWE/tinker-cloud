@@ -20,9 +20,15 @@ EXTRA_ENV=("$@")
 # shellcheck source=scripts/lib/cluster.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE, EX, EX_TIMEOUT
 require_tunnel
-POD="${POD:-tinkercloud-miles}"
+# no defaults: a default pod or backend boots the wrong server on the right pod
+POD="${POD:?set POD (scripts/pod_state.sh lists the pods)}"
+BACKEND="${BACKEND:?set BACKEND (the backend this pod serves, e.g. nemo_rl)}"
 GPUS="${GPUS:-4}"
-BACKEND="${BACKEND:-miles}"
+# nemo_rl's server shares the Ray head's pod and versions, so it connects as a driver: the
+# client proxy forks a per-client server mid-gRPC and the child can abort (ev_epoll1_linux.cc
+# "Check failed: next_worker->state == KICKED"), failing the server's start.
+RAY_ADDR="ray://localhost:10001"
+[ "$BACKEND" = nemo_rl ] && RAY_ADDR=auto
 SERVER_LOG="/data/${LOG_NAME}.log"
 
 
@@ -68,7 +74,7 @@ for kv in "${EXTRA_ENV[@]:-}"; do
 done
 EX "rm -f $SERVER_LOG"
 EX_TIMEOUT 30 "
-export PYTHONPATH=/app NUM_GPUS=$GPUS RAY_ADDRESS=ray://localhost:10001
+export PYTHONPATH=/app NUM_GPUS=$GPUS RAY_ADDRESS=$RAY_ADDR
 export HF_TOKEN=\$(cat /tmp/hf_token.txt) HF_HOME=/data/.cache/huggingface
 export TINKER_API_KEY=tml-dev-key TINKERCLOUD_BACKEND=$BACKEND ALLOW_PARTIAL_BATCHES=true
 $ENV_LINES

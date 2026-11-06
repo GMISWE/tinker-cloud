@@ -30,3 +30,31 @@ kx() {
 }
 EX() { kubectl -n "$NS" exec "$POD" -- bash -c "$1"; }
 EX_TIMEOUT() { timeout "$1" kubectl -n "$NS" exec "$POD" -- bash -c "$2" || true; }
+
+# require_server_env KEY=VAL ...: refuse unless the running API server on $POD has every
+# KEY=VAL in its own environment (read from /proc, not from the boot command).
+require_server_env() {
+  local envs kv
+  envs=$(EX "p=\$(pgrep -f '^python3 -m trainin[g]' | head -1); [ -n \"\$p\" ] && tr '\0' '\n' < /proc/\$p/environ") \
+    || { echo "ERROR: no API server running on $POD" >&2; exit 1; }
+  for kv in "$@"; do
+    grep -qx -- "$kv" <<< "$envs" || {
+      echo "ERROR: the server on $POD lacks $kv (has: $(grep -- "^${kv%%=*}=" <<< "$envs" || echo unset))" >&2
+      echo "  rotate it with that setting: scripts/pod_rotate_server.sh <log> $kv ..." >&2
+      exit 1; }
+  done
+}
+
+# refuse_if_gpus_busy: refuse when any GPU on $POD holds memory (a probe or model is resident);
+# FORCE=1 overrides. A test sharing GPUs with a run skews its memory readings or OOMs it.
+refuse_if_gpus_busy() {
+  local used
+  [ "${FORCE:-0}" = 1 ] && return 0
+  used=$(EX "nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | awk '\$1>0' | wc -l") \
+    || { echo "ERROR: could not read GPU memory on $POD" >&2; exit 1; }
+  if [ "$used" != 0 ]; then
+    echo "ERROR: $used GPU(s) on $POD hold memory; a run is resident (FORCE=1 to share them):" >&2
+    EX "nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader | head -4" >&2
+    exit 1
+  fi
+}
