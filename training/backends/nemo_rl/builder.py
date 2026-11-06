@@ -301,21 +301,12 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
         # E2 arm (specs/013 round-6): lower the same declaration onto NeMo RL's
         # Megatron path — LoRA attaches to the FUSED linear_qkv/linear_fc1
         # modules, the other side of the lowering partition. Explicit opt-in
-        # (NEMORL_MEGATRON=1); default path is unchanged. The Megatron worker
-        # has no set_learning_rate, so the client's per-step LR is reproduced
-        # server-side by the scheduler (linear lr0*(1-t/T), matching
-        # q5_conv_migration.lr_at); verify delivered lr in train metrics.
+        # (NEMORL_MEGATRON=1); default path is unchanged. The client's lr
+        # reaches the optimizer per step through the worker's set_learning_rate,
+        # which pins each group's max/min lr: the scheduler is constant with no
+        # warmup and its lr is a placeholder, as on the DTensor path.
         if self.cfg.megatron:
-            meg_lr = self.cfg.megatron_lr
-            meg_iters = self.cfg.megatron_lr_decay_iters
             policy_config["dtensor_cfg"] = {"enabled": False}
-            # The bridge scheduler converts lr_decay_iters to SAMPLE units by
-            # multiplying with config train_global_batch_size at init, while
-            # the worker steps it by the ACTUAL per-call batch. Pin the config
-            # gbs to the actual per-step batch so decay is exact (measured:
-            # 4096 vs 128 slowed decay 32x — delivered lr 1.99972e-4 vs
-            # declared 1.99099e-4 at step 1).
-            policy_config["train_global_batch_size"] = self.cfg.megatron_gbs
             if lora_config and lora_config.get("rank", 0) > 0:
                 meg_peft = {
                     "enabled": True,
@@ -361,11 +352,12 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
                 "apply_rope_fusion": True,
                 "bias_activation_fusion": True,
                 "defer_fp32_logits": False,
-                "train_iters": meg_iters,
+                # the worker drives train() itself; no run ends at train_iters
+                "train_iters": 1_000_000,
                 "peft": meg_peft,
                 "optimizer": {
                     "optimizer": "adam",
-                    "lr": meg_lr,
+                    "lr": 5.0e-6,
                     "min_lr": 0.0,
                     "weight_decay": 0.0,
                     "bf16": True,
@@ -382,14 +374,14 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
                     # RL submodule checkout — supply both.
                     "optimizer_cpu_offload": False,
                     "optimizer_offload_fraction": 0.0,
-                    "clip_grad": 1.0,
+                    "clip_grad": NO_GRAD_CLIP,  # the API's default: no clipping
                 },
                 "scheduler": {
                     "start_weight_decay": 0.0,
                     "end_weight_decay": 0.0,
                     "weight_decay_incr_style": "constant",
-                    "lr_decay_style": "linear",
-                    "lr_decay_iters": meg_iters,
+                    "lr_decay_style": "constant",
+                    "lr_decay_iters": None,
                     "lr_warmup_iters": 0,
                     "lr_warmup_init": 0.0,
                 },
