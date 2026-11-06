@@ -124,16 +124,19 @@ $PIP install -q distro pyqwest orjson 'zstandard>=0.24' 'protobuf>=4.21' click \
   'httpx[http2]' sympy pylatexenc math-verify pytest-timeout
 
 # NeMo RL's non-colocated refit (NEMORL_COLOCATED=0) builds its NCCL group
-# through nccl4py inside the vLLM and policy worker venvs; the base image
-# predates that dependency (RL fork pyproject pins it). With TP > 1 vLLM's
-# Ray executor spawns the TP ranks from the sync worker's venv.
+# through nccl4py inside the vLLM and policy worker venvs. Images before
+# v0.7.0 lack it; v0.7.0 ships nccl4py 0.2.0 in every venv, which an install
+# here would downgrade. With TP > 1 vLLM's Ray executor spawns the TP ranks
+# from the sync worker's venv.
 if [ "$PROFILE" = nemo_rl ]; then
   UV=$(command -v uv || echo /root/.local/bin/uv)
   for w in nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker \
            nemo_rl.models.generation.vllm.vllm_worker.VllmGenerationWorker \
-           nemo_rl.models.policy.workers.dtensor_policy_worker_v2.DTensorPolicyWorkerV2; do
+           nemo_rl.models.policy.workers.dtensor_policy_worker_v2.DTensorPolicyWorkerV2 \
+           nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker; do
     V=/opt/ray_venvs/$w/bin/python
-    [ -x "$V" ] && "$UV" pip install --python "$V" -q 'nccl4py==0.1.1'
+    [ -x "$V" ] || continue
+    "$V" -c 'import importlib.metadata as m; m.version("nccl4py")' 2>/dev/null || "$UV" pip install --python "$V" -q 'nccl4py==0.1.1'
   done
 fi
 
