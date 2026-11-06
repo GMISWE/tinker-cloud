@@ -362,7 +362,8 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
                 "apply_rope_fusion": True,
                 "bias_activation_fusion": True,
                 "defer_fp32_logits": False,
-                # the worker drives train() itself; no run ends at train_iters
+                # required by NeMo RL's Megatron setup; its worker drives train() itself
+                # and never reads it
                 "train_iters": 1_000_000,
                 "peft": meg_peft,
                 "optimizer": {

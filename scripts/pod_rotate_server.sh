@@ -75,7 +75,7 @@ for _ in $(seq 1 20); do
   if EX "grep -q 'error while attempting to bind' $SERVER_LOG 2>/dev/null"; then
     echo "ERROR: bind failed — a zombie server still owns :8000"; EX "tail -5 $SERVER_LOG"; exit 1
   fi
-  # the server prints no "Uvicorn running" line since the API/engine split
+  # the server's log carries "Application startup complete" but no "Uvicorn running" line
   if EX "grep -q 'Application startup complete' $SERVER_LOG 2>/dev/null"; then
     CODE=$(EX "curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://localhost:8000/health" || echo 000)
     if [ "$CODE" = 200 ]; then echo "==> server healthy ($SERVER_LOG)"; exit 0; fi
