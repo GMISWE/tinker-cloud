@@ -153,6 +153,7 @@ HF_CACHE_HOSTPATH="${HF_CACHE_HOSTPATH:-}"
 # default StorageClass), so checkpoints, metadata and logs outlive the pod.
 # Blank keeps /data an emptyDir. The claim is left in place when the pod goes.
 DATA_PVC_SIZE="${DATA_PVC_SIZE:-}"
+POD_MEMORY_LIMIT="${POD_MEMORY_LIMIT:-256Gi}"   # host-RAM ceiling of the pod (k8s target)
 # k8s
 # docker
 DATA_DIR="${DATA_DIR:-/opt/dlami/nvme/$USER}"
@@ -181,7 +182,7 @@ if [ "$TARGET" = k8s ]; then
   # `kubectl apply` changes only the image, so an older pod keeps its old set.
   POD_CAPS="SYS_PTRACE"
   check_pod_caps() {
-    local live cap pvc gpus hf image
+    local live cap pvc gpus hf image mem
     live=$(kx get pod "$POD" -o jsonpath='{.spec.containers[0].securityContext.capabilities.add}') \
       || { echo "ERROR: could not read pod $POD's capabilities"; exit 1; }
     for cap in $POD_CAPS; do
@@ -191,10 +192,11 @@ if [ "$TARGET" = k8s ]; then
         # without DATA_PVC_SIZE the new pod mounts an empty emptyDir at /data
         gpus=$(kx get pod "$POD" -o jsonpath='{.spec.containers[0].resources.limits.nvidia\.com/gpu}')
         image=$(kx get pod "$POD" -o jsonpath='{.spec.containers[0].image}')
+        mem=$(kx get pod "$POD" -o jsonpath='{.spec.containers[0].resources.limits.memory}')
         hf=$(kx get pod "$POD" -o jsonpath='{.spec.volumes[?(@.name=="hfcache")].hostPath.path}')
         pvc=$(kx get pod "$POD" -o jsonpath='{.spec.volumes[?(@.name=="data")].persistentVolumeClaim.claimName}')
         [ -n "$pvc" ] && pvc=$(kx get pvc "$pvc" -o jsonpath='{.spec.resources.requests.storage}')
-        echo "  recreate it: kubectl -n $NS delete pod $POD && POD=$POD GPUS=$gpus IMAGE=$image" \
+        echo "  recreate it: kubectl -n $NS delete pod $POD && POD=$POD GPUS=$gpus IMAGE=$image POD_MEMORY_LIMIT=$mem" \
              "${pvc:+DATA_PVC_SIZE=$pvc }${hf:+HF_CACHE_HOSTPATH=$hf }$0 --profile $PROFILE"
         [ -n "$pvc" ] || echo "  (its /data is an emptyDir: the recreate loses it)"
         exit 1 ;;
@@ -282,7 +284,7 @@ spec:
     - {name: NCCL_IGNORE_DISABLED_P2P, value: "1"}
     resources:
       requests: {cpu: "16", memory: 128Gi, nvidia.com/gpu: $GPUS}
-      limits: {cpu: "48", memory: 256Gi, nvidia.com/gpu: $GPUS}
+      limits: {cpu: "48", memory: $POD_MEMORY_LIMIT, nvidia.com/gpu: $GPUS}
     volumeMounts:
     - {mountPath: /dev/shm, name: shm}
     - {mountPath: /data, name: data}
