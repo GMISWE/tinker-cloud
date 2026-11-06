@@ -242,6 +242,10 @@ spec:
   - name: tinkercloud
     image: $IMAGE
     command: [sleep, infinity]
+    # py-spy dump / ray stack attach to non-child processes (Ray workers);
+    # the runtime's default capability set omits it and the host's Yama
+    # ptrace_scope=1 then refuses the attach
+    securityContext: {capabilities: {add: [SYS_PTRACE]}}
     env:
     - {name: PYTHONUNBUFFERED, value: "1"}
     - {name: TOKENIZERS_PARALLELISM, value: "false"}
