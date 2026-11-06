@@ -83,8 +83,7 @@ async def serve(config: TrainingConfig, sock, also_stop: Sequence[uvicorn.Server
     app = create_app(config)
     register: Optional[RegisterClient] = None
     if config.engine.gateway_socket:
-        register = RegisterClient(config.engine.gateway_socket, name, config.backend.backend_type,
-                                  config.engine.gpus, socket_path, config.engine.heartbeat_interval_s)
+        register = RegisterClient(config.engine, config.auth, config.backend.backend_type)
     app.state.gateway_client = register   # the routers announce the samplers they mint through it
     server = uvicorn.Server(uvicorn.Config(
         app, uds=socket_path, log_level=config.server.log_level.lower(),

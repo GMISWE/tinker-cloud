@@ -135,7 +135,8 @@ class Harness:
         self.app = build_app(self.cfg, self.registry, self.store)
         self.gateway = self.app.state.gateway
         self.sdk = httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app), base_url="http://gateway", timeout=30)
-        self.engines = httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app.state.engines), base_url="http://gateway")
+        self.engines = httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app.state.engines), base_url="http://gateway",
+                                         headers={"X-API-Key": API_KEY})   # engines hold the key too
         self.engine = RecordingEngine()
         self.engine_socket = os.path.join(tmp, "fake.sock")
 

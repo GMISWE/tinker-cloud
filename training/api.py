@@ -134,10 +134,7 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
         if backend_cfg is not None:
             logger.info("Effective %s backend config (value, source):\n%s", backend_type, backend_cfg.describe())
 
-        auth = APIKeyAuth(
-            api_key=config_obj.auth.api_key,
-            enabled=config_obj.auth.enabled,
-        )
+        auth = APIKeyAuth(config_obj.auth)
 
         # Store in app state for dependency injection
         application.state.futures_storage = futures_storage

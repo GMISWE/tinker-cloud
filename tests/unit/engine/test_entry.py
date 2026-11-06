@@ -101,7 +101,8 @@ def test_sigterm_at_the_first_healthy_answer_still_unregisters(tmp_path):
         deadline = time.time() + 60
         while not gw_sock.exists() and time.time() < deadline:
             time.sleep(0.1)
-        engines = httpx.Client(transport=httpx.HTTPTransport(uds=str(gw_sock)), base_url="http://gateway", timeout=5)
+        engines = httpx.Client(transport=httpx.HTTPTransport(uds=str(gw_sock)), base_url="http://gateway", timeout=5,
+                               headers={"X-API-Key": "k"})
         for trial in range(3):
             sock = tmp_path / f"e{trial}.sock"
             proc = subprocess.Popen([sys.executable, "-m", "training.engine", "--name", "t", "--backend", "fake",

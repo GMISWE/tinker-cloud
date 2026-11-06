@@ -8,7 +8,8 @@ class SocketBusy(RuntimeError):
 
 
 def bind_unix_socket(path: str, backlog: int = 4096) -> socket.socket:
-    """Bind and listen on `path`. A stale file (nothing accepts) is replaced; a live listener raises SocketBusy."""
+    """Bind and listen on `path`. A stale file (nothing accepts) is replaced; a live listener raises SocketBusy.
+    Owner-only: whoever can connect can register an engine or call one."""
     if os.path.exists(path):
         probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
@@ -24,7 +25,7 @@ def bind_unix_socket(path: str, backlog: int = 4096) -> socket.socket:
         os.makedirs(parent, exist_ok=True)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.bind(path)
-    os.chmod(path, 0o666)
+    os.chmod(path, 0o600)
     sock.listen(backlog)
     return sock
 

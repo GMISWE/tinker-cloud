@@ -9,7 +9,7 @@ import logging
 import os
 import secrets
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, FrozenSet, List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, Field, validator
 
@@ -180,6 +180,15 @@ class AuthConfig(BaseModel):
                 raise ValueError("Production requires a secure API key")
             logger.warning("Using default development API key")
         return v
+
+    def parsed_keys(self) -> Tuple[Optional[FrozenSet[str]], Optional[str]]:
+        """The keys a request may carry (the setting, comma-separated, each stripped) and the one
+        key an engine and the gateway send each other: the first in sorted order, None when the
+        setting names none. (None, None) when auth is off."""
+        if not self.enabled:
+            return None, None
+        keys = frozenset(k.strip() for k in self.api_key.split(",") if k.strip())
+        return keys, min(keys) if keys else None
 
 
 class ExternalWeightsConfig(BaseModel):
