@@ -8,21 +8,21 @@
 # The base's /usr/local/cuda is untouched. Neither env is rebuilt.
 # Start vLLM only through /opt/vllm-env/bin/vllm-api-server: it applies the
 # vLLM image's environment to that process and to no other process.
-# The vLLM env also gets TinkerCloud's endpoint plugin (vllm_plugin/); its
+# The vLLM env also gets TinkerCloud's endpoint plugin (training/backends/common/sampling/vllm_plugin/); its
 # tests run in the build.
 #
-#   docker build -f docker/automodel/Dockerfile -t <repo>/tinkercloud-automodel:<tag> .
+#   docker build -f training/backends/automodel/docker/Dockerfile -t <repo>/tinkercloud-automodel:<tag> .
 ARG AUTOMODEL_IMAGE=nvcr.io/nvidia/nemo-automodel:26.08.00
 ARG VLLM_IMAGE=nvcr.io/nvidia/vllm:26.09-py3
 
 FROM ${AUTOMODEL_IMAGE} AS base_libs
-COPY docker/automodel/libs-manifest.sh /libs-manifest.sh
+COPY training/backends/automodel/docker/libs-manifest.sh /libs-manifest.sh
 RUN sh /libs-manifest.sh > /base_libs.txt
 
 # System libraries the base lacks or ships with different content, flattened
 # into one directory. glibc is excluded: it must match the base's ld.so.
 FROM ${VLLM_IMAGE} AS vllm_libs
-COPY docker/automodel/libs-manifest.sh /libs-manifest.sh
+COPY training/backends/automodel/docker/libs-manifest.sh /libs-manifest.sh
 COPY --from=base_libs /base_libs.txt /base_libs.txt
 RUN sh /libs-manifest.sh > /vllm_libs.txt \
  && LC_ALL=C comm -23 /vllm_libs.txt /base_libs.txt | cut -d' ' -f1 \
@@ -71,8 +71,8 @@ COPY --from=vllm /opt/ffmpeg-safe /opt/ffmpeg-safe
 COPY --from=vllm /opt/ffmpeg-safe-cv2-shim-v5 /opt/ffmpeg-safe-cv2-shim-v5
 COPY --from=vllm /opt/ffmpeg-safe-cv2-shim-v8 /opt/ffmpeg-safe-cv2-shim-v8
 COPY --from=vllm_libs /out /opt/vllm-syslib
-COPY docker/automodel/vllm-api-server /opt/vllm-env/bin/vllm-api-server
-COPY vllm_plugin /tmp/vllm_plugin
+COPY training/backends/automodel/docker/vllm-api-server /opt/vllm-env/bin/vllm-api-server
+COPY training/backends/common/sampling/vllm_plugin /tmp/vllm_plugin
 RUN chmod 755 /opt/vllm-env/bin/vllm-api-server \
  && test -x /usr/local/bin/cudaCheck \
  && /opt/vllm-env/bin/vllm-api-server --check \

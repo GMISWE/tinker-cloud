@@ -1,7 +1,7 @@
 """
 One base model's vLLM (Q5, R4): a placement group of one {GPU:1, CPU:1}
 bundle, a SamplerHost actor in it, and the vLLM server the actor runs as a
-subprocess from /opt/vllm-env (docker/automodel). The training env never
+subprocess from /opt/vllm-env (image: backends/automodel/docker). The training env never
 imports vLLM; the backend talks to the server over HTTP and loads tenant
 adapters into it by name (backend.py).
 

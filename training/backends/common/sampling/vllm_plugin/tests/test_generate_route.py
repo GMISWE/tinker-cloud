@@ -1,7 +1,7 @@
 """The generate route over a fake engine, with vLLM's own output types.
 
 Runs in the vLLM env, which has no pytest:
-    python -m unittest discover -s vllm_plugin/tests
+    python -m unittest discover -s training/backends/common/sampling/vllm_plugin/tests
 """
 
 import math

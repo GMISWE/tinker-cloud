@@ -23,7 +23,7 @@
 #            Needs a pull secret for the private image: IMAGE_PULL_SECRET (default
 #            gcp-secret) must exist in namespace $NS.
 #   automodel  Automodel backend env (specs/027). Image built from
-#            docker/automodel: nemo-automodel training env in /opt/venv plus the
+#            training/backends/automodel/docker: nemo-automodel training env in /opt/venv plus the
 #            NGC vLLM env in /opt/vllm-env (the backend starts it per base model).
 #            Private registry image (pull secret gar-secret). Installs the server,
 #            SDK and cookbook into /opt/venv, starts Ray head + `python3 -m training`
@@ -117,7 +117,7 @@ case "$PROFILE" in
     IMAGE_PULL_SECRET="${IMAGE_PULL_SECRET:-gcp-secret}"
     RUN_SERVER=1 ;;   # Ray head + `python3 -m training` (TINKERCLOUD_BACKEND=miles)
   automodel)
-    # Built from docker/automodel. Training runs from /opt/venv, vLLM from
+    # Built from training/backends/automodel/docker. Training runs from /opt/venv, vLLM from
     # /opt/vllm-env; the deploy installs pure-Python packages into the first
     # only (setup_container.sh) and never touches the second.
     IMAGE="${IMAGE:-us-west1-docker.pkg.dev/devv-404803/gmi-test-repo/tinkercloud-automodel:26.08.00-vllm26.09-plugin}"
