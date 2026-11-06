@@ -82,8 +82,8 @@ Server-wide settings (`training/config.py`):
 | `TINKERCLOUD_BACKEND` | `miles`, `nemo_rl`, `verl`, `megatron_bridge`, `fake` (also `python -m training --backend B`) | `miles` |
 | `TINKERCLOUD_BACKEND_OVERRIDES` | JSON object of backend config fields, applied over the environment | unset |
 | `TRAINING_HOST` / `TRAINING_PORT` | Bind address | `0.0.0.0` / `8000` |
-| `TINKER_API_KEY` | API auth key | `tml-dev-key` |
-| `RAY_ADDRESS` / `RAY_NAMESPACE` | Ray cluster endpoint / namespace | auto (local head) / `default` |
+| `TINKER_API_KEY` | API auth key (comma-separated for several); `ENV=production` refuses to start with the default or an empty one | `tml-dev-key` |
+| `RAY_ADDRESS` / `RAY_NAMESPACE` | Ray cluster endpoint / namespace | auto (`ray://$RAY_HEAD_SERVICE_HOST:$RAY_HEAD_SERVICE_PORT_CLIENT` when a Kubernetes service sets them, else a local head) / `default` |
 | `METADATA_DIR` | Futures DB, sessions DB, checkpoint metadata | `/data/metadata` |
 | `TINKERCLOUD_CHECKPOINT_BASE` | Root of every model's checkpoints (`<model>/{weights,sampler_weights,external_weights}/<name>/`) and native area (`<model>/native/`) | `/data/checkpoints` |
 | `TINKERCLOUD_URL_SIGNING_KEY` | HMAC key for the signed per-file download URLs of `save_weights_external` exports; unset = random per process (URLs die with it); required when `ENV=production` | unset |

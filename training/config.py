@@ -15,6 +15,11 @@ from pydantic import BaseModel, Field, validator
 
 logger = logging.getLogger(__name__)
 
+# The backend names, in the order the CLI lists them. training.backends.factory maps
+# each to its class and refuses to load if the two disagree; the list lives here so
+# validating TINKERCLOUD_BACKEND imports no backend (the gateway process stays light).
+BACKEND_NAMES = ("miles", "nemo_rl", "verl", "megatron_bridge", "automodel", "fake")
+
 
 class ModelInfo(BaseModel):
     """Information about a supported model."""
@@ -85,18 +90,17 @@ class RayConfig(BaseModel):
         description="Ignore Ray re-initialization errors"
     )
 
-    @validator("address")
+    @validator("address", always=True)
     def validate_address(cls, v):
-        """Ensure Ray address is provided."""
-        if not v:
-            # Try common patterns
-            if os.getenv("RAY_HEAD_SERVICE_HOST"):
-                host = os.getenv("RAY_HEAD_SERVICE_HOST")
-                port = os.getenv("RAY_HEAD_SERVICE_PORT_CLIENT", "10001")
-                return f"ray://{host}:{port}"
-            # Default to local Ray
-            return "ray://localhost:10001"
-        return v
+        """RAY_ADDRESS when set; else the Ray head a Kubernetes service advertises;
+        else None, which ray.init resolves to a local head (the documented default)."""
+        if v:
+            return v
+        host = os.getenv("RAY_HEAD_SERVICE_HOST")
+        if host:
+            port = os.getenv("RAY_HEAD_SERVICE_PORT_CLIENT", "10001")
+            return f"ray://{host}:{port}"
+        return None
 
 
 class ParallelismConfig(BaseModel):
@@ -171,7 +175,7 @@ class AuthConfig(BaseModel):
         description="Enable API key authentication"
     )
 
-    @validator("api_key")
+    @validator("api_key", always=True)
     def validate_api_key(cls, v):
         """Ensure API key is not empty in production."""
         if not v or v == "tml-dev-key":
@@ -217,7 +221,7 @@ class ExternalWeightsConfig(BaseModel):
         logger.warning("TINKERCLOUD_URL_SIGNING_KEY unset: signed download URLs are valid for this process only")
         return secrets.token_hex(32)
 
-    @validator("public_base_url")
+    @validator("public_base_url", always=True)
     def no_trailing_slash(cls, v):
         return v.rstrip("/") if v else v
 
@@ -247,13 +251,12 @@ class BackendConfig(BaseModel):
             raise ValueError("TINKERCLOUD_BACKEND_OVERRIDES must be a JSON object")
         return parsed
 
-    @validator("backend_type")
+    @validator("backend_type", always=True)
     def validate_backend_type(cls, v):
-        """Ensure backend type is supported (single allow-list lives in the factory)."""
-        from .backends.factory import SUPPORTED_BACKENDS
-        if v not in SUPPORTED_BACKENDS:
+        """Ensure backend type is supported (BACKEND_NAMES, which the factory checks itself against)."""
+        if v not in BACKEND_NAMES:
             raise ValueError(
-                f"Unsupported backend: {v!r}. Supported: {', '.join(SUPPORTED_BACKENDS)}"
+                f"Unsupported backend: {v!r}. Supported: {', '.join(BACKEND_NAMES)}"
             )
         return v
 
