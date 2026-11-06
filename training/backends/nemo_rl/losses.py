@@ -21,8 +21,11 @@ class TinkerSumCELoss(NLLLossFn):
 
     def __call__(self, next_token_logprobs, data, global_valid_seqs, global_valid_toks, **kwargs):
         one = torch.ones_like(global_valid_toks) if torch.is_tensor(global_valid_toks) else 1.0
-        return super().__call__(next_token_logprobs=next_token_logprobs, data=data,
-                                global_valid_seqs=global_valid_seqs, global_valid_toks=one, **kwargs)
+        loss, metrics = super().__call__(next_token_logprobs=next_token_logprobs, data=data,
+                                         global_valid_seqs=global_valid_seqs, global_valid_toks=one, **kwargs)
+        # per-token logprobs for the optimizer step's loss_fn_outputs, as the PG loss returns them
+        metrics["_curr_logprobs"] = next_token_logprobs.detach().cpu()
+        return loss, metrics
 
 
 class TinkerSumPGLoss(ClippedPGLossFn):
