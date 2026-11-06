@@ -56,9 +56,15 @@ esac
 
 # 4. boot the new server (detached; all fds redirected; timeout-wrapped exec)
 echo "==> booting server ($SERVER_LOG)"
+# Each KEY=VAL is exported after the defaults below, so it wins; quoted (%q) so a value
+# with spaces or "$" reaches the server unchanged. A replaced default is named, not silent.
+DEFAULT_KEYS=" PYTHONPATH NUM_GPUS RAY_ADDRESS HF_TOKEN HF_HOME TINKER_API_KEY TINKERCLOUD_BACKEND ALLOW_PARTIAL_BATCHES "
 ENV_LINES=""
 for kv in "${EXTRA_ENV[@]:-}"; do
-  [ -n "$kv" ] && ENV_LINES+="export $kv"$'\n'
+  [ -n "$kv" ] || continue
+  case "$kv" in *=*) ;; *) echo "ERROR: '$kv' is not KEY=VAL"; exit 1 ;; esac
+  [[ "$DEFAULT_KEYS" == *" ${kv%%=*} "* ]] && echo "==> $kv replaces the default ${kv%%=*}"
+  ENV_LINES+="export ${kv%%=*}=$(printf '%q' "${kv#*=}")"$'\n'
 done
 EX "rm -f $SERVER_LOG"
 EX_TIMEOUT 30 "
