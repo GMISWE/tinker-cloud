@@ -113,15 +113,16 @@ SETUPTOOLS_SCM_PRETEND_VERSION=${SETUPTOOLS_SCM_PRETEND_VERSION:-0.1.0} \
   $PIP install -e /work/tinker-cookbook --no-deps -q
 
 # deps missing from the base image that --no-deps skips
-# (distro/pyqwest/orjson/zstandard/protobuf/click: SDK >= 0.25 — proto wire,
-#  zstd request bodies, pyqwest transport; orjson also the server's response
-#  encoder; chz/termcolor/blobfile/tiktoken: cookbook; sympy/pylatexenc/
-#  math-verify: math_rl recipe extras; pytest-timeout: the suites' per-test
-#  limit, pyproject [tool.pytest.ini_options]). All pure Python or self-contained
-#  wheels: none pulls torch, transformers or numpy along.
+# (distro/pyqwest/orjson/zstandard/protobuf/click/sniffio: SDK >= 0.25 — proto
+#  wire, zstd request bodies, pyqwest transport; orjson also the server's
+#  response encoder; chz/termcolor/blobfile/tiktoken/pyrage/tml-renderers: cookbook; sympy/
+#  pylatexenc/math-verify: math_rl recipe extras; pytest-timeout: the suites'
+#  per-test limit, pyproject [tool.pytest.ini_options]). All pure Python or
+#  self-contained wheels: none pulls torch, transformers or numpy along.
 $PIP install -q distro pyqwest orjson 'zstandard>=0.24' 'protobuf>=4.21' click \
   chz termcolor blobfile tiktoken cloudpickle rich anyio \
-  'httpx[http2]' sympy pylatexenc math-verify pytest-timeout
+  'httpx[http2]' sympy pylatexenc math-verify pytest-timeout \
+  sniffio 'pyrage>=1.4.0' 'tml-renderers>=0.4.0'
 
 # NeMo RL's non-colocated refit (NEMORL_COLOCATED=0) builds its NCCL group
 # through nccl4py inside the vLLM and policy worker venvs. Images before
