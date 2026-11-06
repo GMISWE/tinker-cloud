@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 
 from ..base import ArgumentBuilder
 from .config import NemoRLConfig
-from ...utils.model_config import derive_max_seq_len, detect_num_gpus, read_raw_hf_config
+from ...utils.model_config import derive_max_seq_len, detect_num_gpus, read_raw_hf_config, remote_code_trusted
 from .loss_config import NO_GRAD_CLIP, TINKER_PG_LOSS_DEFAULTS
 
 logger = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
         is_vlm = False
         try:
             from transformers import AutoConfig
-            cfg = AutoConfig.from_pretrained(hf_path, trust_remote_code=True)
+            cfg = AutoConfig.from_pretrained(hf_path, trust_remote_code=remote_code_trusted(hf_path))
             is_vlm = (
                 hasattr(cfg, "vision_config")
                 or "VL" in cfg.__class__.__name__

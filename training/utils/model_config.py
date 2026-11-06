@@ -13,21 +13,42 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+# Model ids / paths whose repository code transformers may import (trust_remote_code).
+# base_model is the client's choice, so by default no model is trusted.
+TRUST_REMOTE_CODE_ENV = "TINKERCLOUD_TRUST_REMOTE_CODE_MODELS"
+
+
+def remote_code_trusted(model: str) -> bool:
+    """True only for a model the operator lists in TINKERCLOUD_TRUST_REMOTE_CODE_MODELS
+    (comma-separated, matched exactly against the id or path being loaded)."""
+    listed = {m.strip() for m in os.getenv(TRUST_REMOTE_CODE_ENV, "").split(",") if m.strip()}
+    return model in listed
+
 
 def read_raw_hf_config(base_model: str) -> Dict[str, Any]:
     """The model's config.json as written: a local directory's file, else the hub's.
 
     Raw on purpose. transformers fills defaults when it loads a config
     (num_labels=2, for one), and a default must never pass as a declaration.
+
+    Every backend reads it before its engine loads the model, so it also refuses
+    a config that declares custom code (`auto_map`) for a model the operator does
+    not trust: an engine may load it with trust_remote_code, importing that code.
     """
     hf_path = base_model.replace("_torch_dist", "")
     local = Path(hf_path) / "config.json"
     if local.is_file():
         with local.open() as f:
-            return json.load(f)
-    from huggingface_hub import hf_hub_download
-    with open(hf_hub_download(hf_path, "config.json")) as f:
-        return json.load(f)
+            raw = json.load(f)
+    else:
+        from huggingface_hub import hf_hub_download
+        with open(hf_hub_download(hf_path, "config.json")) as f:
+            raw = json.load(f)
+    if raw.get("auto_map") and not (remote_code_trusted(base_model) or remote_code_trusted(hf_path)):
+        raise ValueError(
+            f"{base_model!r} declares custom model code (config.json auto_map); the server runs a model "
+            f"repository's code only for models the operator lists in {TRUST_REMOTE_CODE_ENV}")
+    return raw
 
 
 _CONTEXT_LENGTH_KEYS = (
@@ -135,7 +156,7 @@ def load_model_config(base_model: str) -> Dict[str, Any]:
     hf_model_path = base_model.replace('_torch_dist', '')
 
     try:
-        config = AutoConfig.from_pretrained(hf_model_path, trust_remote_code=True)
+        config = AutoConfig.from_pretrained(hf_model_path, trust_remote_code=remote_code_trusted(hf_model_path))
 
         return {
             'num_layers': config.num_hidden_layers,
