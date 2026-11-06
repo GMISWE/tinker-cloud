@@ -31,6 +31,8 @@ GPU_RUN=0
 case " $* " in
   *" tests/gpu"*) GPU_RUN=1; case " $* " in *" -x "*|*" --maxfail"*) ;; *) set -- "$@" -x ;; esac ;;
 esac
+# a GPU suite on GPUs a run already holds skews the run or OOMs it
+[ "$GPU_RUN" = 1 ] && refuse_if_gpus_busy
 # kubectl calls time out at KX_TIMEOUT seconds; a GPU suite needs the long default
 KX_TIMEOUT="${KX_TIMEOUT:-$([ "$GPU_RUN" = 1 ] && echo 1800 || echo 600)}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

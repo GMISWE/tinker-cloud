@@ -418,10 +418,13 @@ ray status 2>/dev/null | grep GPU || true"
 
 # --- 6. server ---------------------------------------------------------------
 echo "==> [6/6] starting API server (log: $SERVER_LOG)"
+# nemo_rl's server connects to the head as a driver; see pod_rotate_server.sh for why
+RAY_ADDR="ray://localhost:10001"
+[ "$BACKEND" = nemo_rl ] && RAY_ADDR=auto
 # NB: the detached child must have ALL fds redirected or the exec hangs (143);
 # even then the launch usually succeeded — verified below with a fresh probe.
 EX_TIMEOUT "
-export PYTHONPATH=/app NUM_GPUS=$GPUS RAY_ADDRESS=ray://localhost:10001
+export PYTHONPATH=/app NUM_GPUS=$GPUS RAY_ADDRESS=$RAY_ADDR
 export HF_TOKEN=\$(cat /tmp/hf_token.txt) HF_HOME=/data/.cache/huggingface \
        TINKER_API_KEY=tml-dev-key TINKERCLOUD_BACKEND=$BACKEND ALLOW_PARTIAL_BATCHES=true $BACKEND_ENV
 cd /app && setsid nohup python3 -m training > $SERVER_LOG 2>&1 < /dev/null &
