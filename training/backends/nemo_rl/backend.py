@@ -691,13 +691,21 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                            else {"checkpointing_cfg": handle.config["checkpointing"]})
 
             # Optimizer state rides beside the weights so load_weights(optimizer=true)
-            # can restore it; LoRA moments are small.
-            await asyncio.to_thread(
-                handle.policy.save_checkpoint,
-                weights_path=weights_path,
-                optimizer_path=f"{local_path}/optimizer",
-                **save_format,
-            )
+            # can restore it; LoRA moments are small. The save reads the training
+            # state: after a refit it is offloaded, and the Megatron worker's offload
+            # frees its parameter buffers (storage resized to 0), so make it resident
+            # first, as forward() does and as NeMo RL does before every save.
+            async with handle._training_lock:
+                await _take_engine_for_training(handle)
+                if not handle.training_resident:
+                    await asyncio.to_thread(handle.policy.prepare_for_training)
+                    handle.training_resident = True
+                await asyncio.to_thread(
+                    handle.policy.save_checkpoint,
+                    weights_path=weights_path,
+                    optimizer_path=f"{local_path}/optimizer",
+                    **save_format,
+                )
 
             # LoRA runs write the PEFT pair under <weights>/model; publish it
             # as the cross-backend interchange artifact (specs/007 §2.1).
