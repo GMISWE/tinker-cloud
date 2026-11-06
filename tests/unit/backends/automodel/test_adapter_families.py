@@ -27,15 +27,9 @@ def test_dimuon_state_round_trips_keyed_as_the_adapter(tmp_path):
 def test_the_adamw_file_is_the_adamw_family(tmp_path):
     key = am.peft_key(A)
     state = {key: {"exp_avg": torch.zeros(2, 2), "exp_avg_sq": torch.ones(2, 2), "step": torch.tensor(1.0)}}
-    am.write_adam_state(state, tmp_path / "optimizer")
+    am.write_optimizer_state("adamw", state, tmp_path / "optimizer")
     family, back = am.read_optimizer_state(tmp_path / "optimizer")
-    assert family == "adamw" and set(back[key]) == set(am.ADAM_STATE_KEYS)
-
-
-def test_a_dimuon_directory_is_not_adamw_state(tmp_path):
-    am.write_optimizer_state("dimuon", {am.peft_key(A): {"momentum": torch.zeros(1)}}, tmp_path / "optimizer")
-    with pytest.raises(ValueError, match="dimuon state, not adamw"):
-        am.read_adam_state(tmp_path / "optimizer")
+    assert family == "adamw" and set(back[key]) == set(am.STATE_KEYS["adamw"])
 
 
 def test_a_dimuon_file_with_adamw_fields_is_refused(tmp_path):
@@ -56,6 +50,6 @@ def test_zero_or_two_state_files_are_refused(tmp_path):
 
 
 def test_write_replaces_the_other_familys_file(tmp_path):
-    am.write_adam_state({}, tmp_path / "optimizer")
+    am.write_optimizer_state("adamw", {}, tmp_path / "optimizer")
     am.write_optimizer_state("dimuon", {}, tmp_path / "optimizer")
     assert am.optimizer_state_family(tmp_path / "optimizer") == "dimuon"

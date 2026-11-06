@@ -21,7 +21,7 @@ import torch  # noqa: E402
 if torch.cuda.device_count() < 4:
     pytest.skip("needs >= 4 GPUs", allow_module_level=True)
 
-from tinkercloud.training.backends.automodel.adapter import OPTIMIZER_DIRNAME, OPTIMIZER_FILE, peft_key  # noqa: E402
+from tinkercloud.training.backends.automodel.adapter import OPTIMIZER_DIRNAME, OPTIMIZER_FILES, peft_key  # noqa: E402
 from tinkercloud.training.backends.automodel.converter import coalesce, convert_request, row_sums, shard  # noqa: E402
 from tinkercloud.training.checkpoints import interchange as ci  # noqa: E402
 from tinkercloud.training.backends.automodel.lora import LoraSpec, lora_spec  # noqa: E402
@@ -242,7 +242,7 @@ def test_checkpoint_round_trip_restores_weights_and_optimizer(tmp_path):
     saved = load_file(f"{adapter}/{ci.ADAPTER_WEIGHTS_FILE}")
     assert set(saved) == {peft_key(k) for k in s1}
     assert all(saved[peft_key(k)].dtype == torch.float32 and torch.equal(saved[peft_key(k)], s1[k]) for k in s1)
-    assert (root / OPTIMIZER_DIRNAME / OPTIMIZER_FILE).is_file()
+    assert (root / OPTIMIZER_DIRNAME / OPTIMIZER_FILES["adamw"]).is_file()
 
     grp = Group(2, 2)
     try:
@@ -333,7 +333,7 @@ def test_tenant_interleaved_passes_equal_the_solo_run_and_leave_the_other_untouc
         shared.call("save_state", before=("b", str(tmp_path / "b")))
         saved = load_file(str(tmp_path / "b" / ci.HF_ADAPTER_DIRNAME / ci.ADAPTER_WEIGHTS_FILE))
         assert all(torch.equal(saved[peft_key(k)], init_b[k]) for k in init_b)
-        assert load_file(str(tmp_path / "b" / OPTIMIZER_DIRNAME / OPTIMIZER_FILE)) == {}, "b has not stepped"
+        assert load_file(str(tmp_path / "b" / OPTIMIZER_DIRNAME / OPTIMIZER_FILES["adamw"])) == {}, "b has not stepped"
         assert shared.optim(ADAM, "b") == norm_b
     finally:
         shared.kill()
@@ -425,7 +425,6 @@ def test_tenant_export_and_save_read_the_slot_without_swap(tmp_path):
 import dataclasses  # noqa: E402
 import math  # noqa: E402
 
-from tinkercloud.training.backends.automodel.adapter import OPTIMIZER_FILES  # noqa: E402
 from tinkercloud.training.backends.automodel.errors import StateMismatch  # noqa: E402
 from tinkercloud.training.models.requests import DimuonParams  # noqa: E402
 

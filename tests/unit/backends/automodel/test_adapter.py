@@ -30,22 +30,23 @@ def test_peft_adapter_is_the_interchange_layout(tmp_path):
 def test_adam_state_round_trips_keyed_as_the_adapter(tmp_path):
     key = am.peft_key(A)
     state = {key: {"exp_avg": torch.full((4, 8), 0.5), "exp_avg_sq": torch.full((4, 8), 0.25), "step": torch.tensor(3.0)}}
-    am.write_adam_state(state, tmp_path / "optimizer")
-    flat = load_file(str(tmp_path / "optimizer" / am.OPTIMIZER_FILE))
+    am.write_optimizer_state("adamw", state, tmp_path / "optimizer")
+    flat = load_file(str(tmp_path / "optimizer" / am.OPTIMIZER_FILES["adamw"]))
     assert set(flat) == {f"{key}.exp_avg", f"{key}.exp_avg_sq", f"{key}.step"}
-    back = am.read_adam_state(tmp_path / "optimizer")
-    assert set(back) == {key} and all(torch.equal(back[key][f], state[key][f]) for f in am.ADAM_STATE_KEYS)
+    family, back = am.read_optimizer_state(tmp_path / "optimizer")
+    assert family == "adamw"
+    assert set(back) == {key} and all(torch.equal(back[key][f], state[key][f]) for f in am.STATE_KEYS["adamw"])
     # before the first step: a file with no tensors, read back as no state
-    am.write_adam_state({}, tmp_path / "optimizer")
-    assert am.read_adam_state(tmp_path / "optimizer") == {}
+    am.write_optimizer_state("adamw", {}, tmp_path / "optimizer")
+    assert am.read_optimizer_state(tmp_path / "optimizer") == ("adamw", {})
 
 
 def test_adam_state_file_with_a_foreign_key_is_refused(tmp_path):
     from safetensors.torch import save_file
     (tmp_path / "optimizer").mkdir()
-    save_file({"exp_avg": torch.zeros(1)}, str(tmp_path / "optimizer" / am.OPTIMIZER_FILE))
+    save_file({"exp_avg": torch.zeros(1)}, str(tmp_path / "optimizer" / am.OPTIMIZER_FILES["adamw"]))
     with pytest.raises(ValueError, match="is not <PEFT key>"):
-        am.read_adam_state(tmp_path / "optimizer")
-    save_file({f"{am.peft_key(A)}.exp_avg": torch.zeros(1)}, str(tmp_path / "optimizer" / am.OPTIMIZER_FILE))
+        am.read_optimizer_state(tmp_path / "optimizer")
+    save_file({f"{am.peft_key(A)}.exp_avg": torch.zeros(1)}, str(tmp_path / "optimizer" / am.OPTIMIZER_FILES["adamw"]))
     with pytest.raises(ValueError, match="has fields"):
-        am.read_adam_state(tmp_path / "optimizer")
+        am.read_optimizer_state(tmp_path / "optimizer")
