@@ -34,3 +34,16 @@ def test_an_unknown_project_is_refused_by_name():
 def test_user_owner_needs_urns():
     with pytest.raises(ValueError):
         SessionSearchRequest.model_validate({"owner": {"type": "user"}})
+
+
+def test_metadata_matches_in_the_encoding_the_sdk_reads():
+    store = SessionStore(None)
+    sid = store.create_session([], {"flag": True, "n": 3}, "t", None)
+    page, _ = search(store.sessions_newest_first(), SessionSearchRequest(user_metadata={"flag": "true", "n": "3"}))
+    assert [s.session_id for s in page] == [sid]
+
+
+def test_a_naive_cursor_time_is_refused():
+    with pytest.raises(ValueError):
+        SessionSearchRequest.model_validate(
+            {"cursor": {"last_created_at": "2026-11-06T00:00:00", "last_session_id": "x"}})

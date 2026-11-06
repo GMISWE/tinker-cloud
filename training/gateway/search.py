@@ -2,11 +2,18 @@
 session_id exact, display_name case-insensitive with every word present (either one
 matching when both are given), user_metadata every pair exact, statuses any-of,
 newest first, a (created_at, session_id) cursor. Pure: the route adds checkpoint counts."""
+import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..models.requests import DEFAULT_PROJECT, LOCAL_OWNER, SessionSearchRequest, SessionStatusQuery
 from .sessions import Session
+
+
+def str_metadata(user_metadata: Dict[str, Any]) -> Dict[str, str]:
+    """user_metadata as the SDK reads it (dict[str, str]): create_session accepted any JSON
+    value, so a non-string is its JSON text. Search matches against the same encoding."""
+    return {k: v if isinstance(v, str) else json.dumps(v) for k, v in user_metadata.items()}
 
 
 class UnknownProject(ValueError):
@@ -46,7 +53,8 @@ def _identity_matches(s: Session, req: SessionSearchRequest) -> bool:
 
 
 def _metadata_matches(s: Session, wanted: Dict[str, str]) -> bool:
-    return all(k in s.user_metadata and str(s.user_metadata[k]) == v for k, v in wanted.items())
+    encoded = str_metadata(s.user_metadata)
+    return all(k in encoded and encoded[k] == v for k, v in wanted.items())
 
 
 def _after_cursor(s: Session, req: SessionSearchRequest) -> bool:
