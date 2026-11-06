@@ -446,6 +446,11 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
 
         if self.overrides:
             _deep_merge(config_dict, self.overrides)
+        if config_dict["policy"]["sequence_packing"]["enabled"]:
+            # the workers collect the step's per-sample logprobs as one [rows, seq-1]
+            # tensor per microbatch; a packed microbatch has no such rows
+            raise ValueError("sequence_packing cannot be enabled: the optimizer step's "
+                             "per-sample logprobs are not collected from packed microbatches")
 
         logger.info(
             "NeMo RL config built: model=%s, num_gpus=%d (train %d, inference %d), "
