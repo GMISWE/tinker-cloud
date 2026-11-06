@@ -29,7 +29,7 @@ class NemoRLConfig(EnvConfig):
     # IPC refit) or owns `inference_gpus` of create_model's num_gpus (NCCL refit).
     colocated: bool = Field(True, description="vLLM shares the training GPUs; False = separate inference GPUs")
     inference_gpus: Optional[int] = Field(None, description="GPUs vLLM owns when colocated=False, taken from num_gpus")
-    inference_tp: int = Field(1, description="vLLM tensor parallel size when colocated=False; leaders = inference_gpus / inference_tp")
+    inference_tp: Optional[int] = Field(None, ge=1, description="vLLM tensor parallel size (pipeline 1); None = the trainer's TP and PP when colocated, 1 when colocated=False; split leaders = inference_gpus / TP")
 
     ENV = {
         "max_seq_len_cap": "TINKERCLOUD_MAX_SEQ_LEN_CAP",
@@ -59,6 +59,20 @@ class NemoRLConfig(EnvConfig):
         assert self.inference_gpus is not None  # _check_inference_split
         return self.inference_gpus
 
+    @property
+    def split_inference_tp(self) -> int:
+        """vLLM TP on its own GPUs (colocated=False): inference_tp, 1 when unset."""
+        assert not self.colocated
+        return 1 if self.inference_tp is None else self.inference_tp
+
+    def vllm_layout(self, train_tp: int, train_pp: int) -> Tuple[int, int]:
+        """(tensor, pipeline) parallel sizes of each vLLM engine."""
+        if not self.colocated:
+            return self.split_inference_tp, 1
+        if self.inference_tp is None:
+            return train_tp, train_pp  # one engine per training model-parallel group
+        return self.inference_tp, 1
+
     @model_validator(mode="after")
     def _check_inference_split(self) -> "NemoRLConfig":
         if self.colocated:
@@ -67,9 +81,9 @@ class NemoRLConfig(EnvConfig):
             return self
         if self.inference_gpus is None or self.inference_gpus < 1:
             raise ValueError("colocated=False needs inference_gpus >= 1")
-        if self.inference_tp < 1 or self.inference_gpus % self.inference_tp != 0:
+        if self.inference_gpus % self.split_inference_tp != 0:
             raise ValueError(
-                f"inference_gpus={self.inference_gpus} is not a multiple of inference_tp={self.inference_tp}"
+                f"inference_gpus={self.inference_gpus} is not a multiple of inference_tp={self.split_inference_tp}"
             )
         return self
 

@@ -180,12 +180,12 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             if not colocated_inference and policy_generation is not None:
                 # The leader count is the contract the sampler relies on (D13):
                 # one HTTP server per TP group of the inference GPUs.
-                expected = self.config.inference_gpu_count // self.config.inference_tp
+                expected = self.config.inference_gpu_count // self.config.split_inference_tp
                 if len(inference_endpoints) != expected:
                     raise BackendError(
                         f"{len(inference_endpoints)} vLLM leader(s) reported, expected "
                         f"{expected} (inference_gpus={self.config.inference_gpus}, "
-                        f"inference_tp={self.config.inference_tp})",
+                        f"inference_tp={self.config.split_inference_tp})",
                         backend="nemo_rl", operation="create_model",
                     )
 

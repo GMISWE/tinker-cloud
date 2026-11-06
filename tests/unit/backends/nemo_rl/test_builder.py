@@ -179,6 +179,26 @@ class TestNemoRLArgumentBuilder:
         with pytest.raises(ValueError, match="sequence_packing"):
             builder.build_args(base_model="meta-llama/Llama-3.1-8B", num_gpus=2)
 
+    @pytest.mark.parametrize("inference_tp, layout", [(None, (2, 1)), (4, (4, 1))])
+    def test_colocated_vllm_tp_follows_the_trainer_unless_set(self, inference_tp, layout):
+        # unset, each engine spans one training model-parallel group; set, its own TP
+        from tinkercloud.training.backends.nemo_rl.builder import NemoRLArgumentBuilder
+        from tinkercloud.training.backends.nemo_rl.config import NemoRLConfig
+        cfg = NemoRLConfig.from_env({"inference_tp": inference_tp}, environ={})
+        config_dict, _ = NemoRLArgumentBuilder(config=cfg).build_args(
+            base_model="meta-llama/Llama-3.1-8B", num_gpus=8, parallelism={"tensor_parallel": 2},
+        )
+        vllm = config_dict["policy"]["generation"]["vllm_cfg"]
+        assert (vllm["tensor_parallel_size"], vllm["pipeline_parallel_size"]) == layout
+        assert config_dict["policy"]["dtensor_cfg"]["tensor_parallel_size"] == 2
+
+    def test_colocated_vllm_tp_must_divide_the_gpus(self):
+        from tinkercloud.training.backends.nemo_rl.builder import NemoRLArgumentBuilder
+        from tinkercloud.training.backends.nemo_rl.config import NemoRLConfig
+        cfg = NemoRLConfig.from_env({"inference_tp": 3}, environ={})
+        with pytest.raises(ValueError, match="vLLM TP"):
+            NemoRLArgumentBuilder(config=cfg).build_args(base_model="meta-llama/Llama-3.1-8B", num_gpus=8)
+
     def test_split_layout_refuses_when_no_training_gpu_remains(self):
         from tinkercloud.training.backends.nemo_rl.builder import NemoRLArgumentBuilder
         from tinkercloud.training.backends.nemo_rl.config import NemoRLConfig

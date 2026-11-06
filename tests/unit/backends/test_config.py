@@ -53,7 +53,7 @@ def test_nemo_rl_splits_known_keys_from_raw_config_overrides():
 
 def test_nemo_rl_split_needs_inference_gpus_and_rejects_them_when_colocated():
     cfg = NemoRLConfig.from_env(environ={"NEMORL_COLOCATED": "0", "NEMORL_INFERENCE_GPUS": "2"})
-    assert (cfg.colocated, cfg.inference_gpus, cfg.inference_tp) == (False, 2, 1)
+    assert (cfg.colocated, cfg.inference_gpus, cfg.split_inference_tp) == (False, 2, 1)
     with pytest.raises(ValidationError, match="inference_gpus >= 1"):
         NemoRLConfig.from_env({"colocated": False}, environ={})
     with pytest.raises(ValidationError, match="not a multiple"):
