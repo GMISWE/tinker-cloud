@@ -100,6 +100,13 @@ class TestNemoRLArgumentBuilder:
         assert meg["optimizer"]["clip_grad"] == NO_GRAD_CLIP
         assert config_dict["policy"]["dtensor_cfg"] == {"enabled": False}
 
+    def test_sequence_packing_is_refused(self):
+        # the step's per-sample logprobs are not collected from packed microbatches
+        from tinkercloud.training.backends.nemo_rl.builder import NemoRLArgumentBuilder
+        builder = NemoRLArgumentBuilder(overrides={"policy": {"sequence_packing": {"enabled": True}}})
+        with pytest.raises(ValueError, match="sequence_packing"):
+            builder.build_args(base_model="meta-llama/Llama-3.1-8B", num_gpus=2)
+
     def test_split_layout_refuses_when_no_training_gpu_remains(self):
         from tinkercloud.training.backends.nemo_rl.builder import NemoRLArgumentBuilder
         from tinkercloud.training.backends.nemo_rl.config import NemoRLConfig

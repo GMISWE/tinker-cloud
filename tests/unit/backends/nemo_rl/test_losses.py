@@ -88,3 +88,10 @@ def test_builder_defaults_follow_the_api():
     assert (lf["ratio_clip_min"], lf["ratio_clip_max"], lf["ratio_clip_c"]) == (NO_CLIP["ratio_clip_min"], NO_CLIP["ratio_clip_max"], None)
     assert lf["use_importance_sampling_correction"] is False and lf["disable_ppo_ratio"] is False
     assert cfg["policy"]["max_grad_norm"] == NO_GRAD_CLIP  # never binds; None would zero the reported grad norm
+
+
+def test_pg_loss_returns_the_per_token_logprobs_it_trained_on():
+    # the optimizer step's loss_fn_outputs come from this output
+    logits, data, curr, prev, adv, mask = _batch()
+    _, metrics = TinkerSumPGLoss(TINKER_PG_LOSS_DEFAULTS)(curr, data, torch.tensor(float(B), device=DEV), mask.sum())
+    torch.testing.assert_close(metrics["_curr_logprobs"], curr.cpu())
