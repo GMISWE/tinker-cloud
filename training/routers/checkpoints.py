@@ -247,7 +247,7 @@ async def load_weights(
     try:
         creates = request.creates()
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     if creates:
         return _create_via_load(request, http_request, service, model_service, task_manager, metadata_storage,
                                 training_clients, training_runs_metadata, store)
@@ -306,8 +306,8 @@ def _create_via_load(
         raise HTTPException(status_code=400, detail=f"Model {model_id} already exists: create-via-load creates it")
     ref = CheckpointRef.parse(request.path)           # 400 on a malformed path
     store.require(ref, kind=CheckpointKind.WEIGHTS)   # 404 / 425 / 500 / wrong kind, before the future exists
-    source = training_clients.get(ref.model_id) or metadata_storage.load_training_run(ref.model_id)
-    if not source:   # None or {}: the checkpoint's run is known neither live nor stored
+    source = metadata_storage.load_training_run(ref.model_id)   # written at every create, kept past unload
+    if source is None:
         raise HTTPException(status_code=404, detail=f"Training run {ref.model_id} of {ref.uri} not found")
     base_model = source["base_model"]
     if request.base_model is not None and request.base_model != base_model:
@@ -324,7 +324,7 @@ def _create_via_load(
         optimizer_config.check()
         model_service.require_optimizer(optimizer_config)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     request_id = generate_request_id()
 
     async def execute():

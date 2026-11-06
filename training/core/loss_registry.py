@@ -36,7 +36,7 @@ GSPO_CLIP_HIGH = 1 + 4e-4
 UNSERVED_LOSS_FNS: Dict[str, str] = {
     "stable_reinforce": (
         "loss_fn 'stable_reinforce' is not served: Tinker has not published its objective (only its KL "
-        "term), so no implementation here could mean what Tinker's does; for off-policy data use 'ppo' "
+        "term; tinker-docs /tinker/losses/stable-reinforce/, SDK 0.38.0), so no implementation here could mean what Tinker's does; for off-policy data use 'ppo' "
         "or 'gspo'"),
     "custom": (
         "loss_fn 'custom' (a server-side custom loss) is not served: this server sends "

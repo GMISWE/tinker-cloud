@@ -151,7 +151,7 @@ class Decider:
     def _create_via_load(self, engine: EngineRow, doc: dict) -> Union[Route, Reject]:
         """A load addressed by session creates its model: the SDK derives the id
         `{session_id}:train:{model_seq_id}` and the gateway records it under that id.
-        A body the engine would refuse is its 400 or 422, and nothing is recorded."""
+        A body that fails LoadWeightsRequest is the engine's 400 or 422 and records nothing."""
         try:
             req = LoadWeightsRequest.model_validate(doc)
             creates = req.creates()

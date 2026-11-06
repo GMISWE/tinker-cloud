@@ -7,7 +7,6 @@ heartbeat, unregister and the samplers an engine mints. Both faces share one `Ga
 """
 import asyncio
 import contextlib
-import json
 import logging
 import re
 import time
@@ -49,7 +48,7 @@ from . import routing
 from .decide import Decider, Headers, Reject
 from .forward import EngineResponse, EngineUnreachable, Pool, forward
 from .reaper import ModelReaper
-from .search import UnknownProject, search, status_of
+from .search import UnknownProject, search, status_of, str_metadata
 from .registry import EngineRow, Registry, RegistryConflict, RegistryUnavailable
 from .sessions import SamplerCache, SessionStore
 
@@ -171,6 +170,8 @@ class Gateway:
             return _error(503, f"engine {decision.engine.name} unreachable: {exc}", path)
         if decision.drop_model is not None and (200 <= resp.status < 300 or resp.status == 404):
             self.store.remove_model(decision.drop_model)
+        if decision.record is not None and not 200 <= resp.status < 300:
+            self.store.remove_model(decision.record.model_id)   # the engine refused the create: no model exists
         return Reply(resp.status, resp.headers, resp.body)
 
     # ------------------------------------------------------------ the gateway's own calls
@@ -318,21 +319,21 @@ def sdk_face(gateway: Gateway, engines) -> FastAPI:
         if session is None:
             raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
         return GetSessionResponse(training_run_ids=session.model_ids, sampler_ids=session.sampler_ids,
-                                  user_metadata=_str_metadata(session.user_metadata), display_name=session.display_name)
+                                  user_metadata=str_metadata(session.user_metadata), display_name=session.display_name)
 
     @app.post("/api/v1/sessions/search", response_model=SessionSearchResponse)
     async def search_sessions(request: SessionSearchRequest, _: None = Depends(require_key)):
         try:
             page, next_cursor = search(store.sessions_newest_first(), request)
         except UnknownProject as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=str(e)) from e
         engine = gateway.registry.only()
         summaries = []
         for s in page:
             summaries.append(SessionSummary(
                 session_id=s.session_id, created_at=s.created_at, owner=LOCAL_OWNER, project_id=DEFAULT_PROJECT,
                 status=status_of(s), checkpoints_count=await _checkpoints_count(engine, s.model_ids),
-                display_name=s.display_name, user_metadata=_str_metadata(s.user_metadata)))
+                display_name=s.display_name, user_metadata=str_metadata(s.user_metadata)))
         return SessionSearchResponse(sessions=summaries, next_cursor=next_cursor)
 
     async def _checkpoints_count(engine: Optional[EngineRow], model_ids: List[str]) -> int:
@@ -413,11 +414,6 @@ def _response(reply: Reply) -> Response:
 
 
 # ------------------------------------------------------------ the engines face
-
-def _str_metadata(user_metadata: Dict[str, Any]) -> Dict[str, str]:
-    """The SDK validates dict[str, str] strictly; create_session accepted any JSON value."""
-    return {k: v if isinstance(v, str) else json.dumps(v) for k, v in user_metadata.items()}
-
 
 async def _read_all(receive) -> bytes:
     chunks: List[bytes] = []

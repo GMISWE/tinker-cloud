@@ -128,7 +128,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
     needs_ray = True
     config: AutomodelConfig
     SUPPORTED_LOSS_FNS = frozenset(m.value for m in LossFn)   # the service's table is keyed by the wire string
-    SUPPORTED_SAMPLER_KINDS = frozenset({"snapshot", "inflight"})   # every sample names the newest adapter (D20)
+    SUPPORTED_SAMPLER_KINDS = frozenset({"snapshot", "inflight"})   # every sample names the newest adapter
     SUPPORTED_OPTIMIZERS = frozenset({"adamw", "dimuon"})      # dimuon = dion.Muon per LoRA factor (worker.setup)
 
     def __init__(self, overrides: Optional[Dict[str, Any]] = None):

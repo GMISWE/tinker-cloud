@@ -4,10 +4,9 @@ Request models for the training API.
 This module defines Pydantic models for all API request payloads,
 providing validation and documentation.
 """
-from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, validator, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StrictInt, ValidationError, validator, model_validator
 
 # loss_fn_config values: numbers, or text on the keys core.loss_registry declares
 # as text (the SDK's loss_fn_config_v2 carries both).
@@ -138,7 +137,7 @@ class LoadWeightsRequest(BaseModel):
     session_id: Optional[str] = Field(default=None, description="Create-via-load: the session that owns the new model")
     model_seq_id: Optional[int] = Field(default=None, description="Create-via-load: the new model's sequence id in its session")
     base_model: Optional[str] = Field(default=None, description="Create-via-load: must be the checkpoint's base model")
-    user_metadata: Optional[Dict[str, Any]] = Field(default=None, description="Create-via-load: user metadata of the new model")
+    user_metadata: Optional[Dict[str, Any]] = Field(default=None, description="Create-via-load: accepted and not stored, as on create_model")
     weights_access_token: Optional[str] = Field(default=None, description="Another account's token; no accounts are served")
     path: str = Field(..., description="tinker://<run>/weights/<name> to load from")
     optimizer: bool = Field(default=False, description="Also restore optimizer state (the checkpoint must carry it)")
@@ -546,7 +545,7 @@ class SearchOwner(BaseModel):
 
 
 class SessionSearchCursor(BaseModel):
-    last_created_at: datetime
+    last_created_at: AwareDatetime
     last_session_id: str
 
 

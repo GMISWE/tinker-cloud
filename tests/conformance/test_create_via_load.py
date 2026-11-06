@@ -93,3 +93,14 @@ def test_the_new_model_steps_and_saves_under_its_id(server, checkpoint):
                                               "path": checkpoint, "optimizer": False})
     assert r.status_code == 400, r.text
     assert "already exists" in r.text
+
+
+def test_a_refused_create_via_load_leaves_no_model_in_the_session(server, checkpoint):
+    import requests
+    from .conftest import API_KEY
+    session_id = _session(server)
+    r = server.post("/api/v1/load_weights", {"session_id": session_id, "model_seq_id": 0, "path": checkpoint,
+                                              "optimizer": False, "base_model": "other/base"})
+    assert r.status_code == 400, r.text
+    s = requests.get(f"{server.base_url}/api/v1/sessions/{session_id}", headers={"X-API-Key": API_KEY}, timeout=30)
+    assert s.json()["training_run_ids"] == []
