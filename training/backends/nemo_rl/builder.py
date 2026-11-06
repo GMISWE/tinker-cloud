@@ -128,6 +128,10 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
                 f"{train_gpus} training GPU(s) not divisible by "
                 f"TP*PP*CP={model_parallel} (tp={tp_size}, pp={pp_size}, cp={cp_size})"
             )
+        vllm_tp, vllm_pp = self.cfg.vllm_layout(tp_size, pp_size)
+        if self.cfg.colocated and train_gpus % (vllm_tp * vllm_pp) != 0:
+            raise ValueError(f"{train_gpus} GPU(s) not divisible by vLLM TP*PP={vllm_tp * vllm_pp} "
+                             f"(NEMORL_INFERENCE_TP={self.cfg.inference_tp})")
 
         # GBS = samples per train() call; grad-accum steps = GBS / (MBS * DP)
         # bridge the gap. MBS=1 (the old default) is a measured perf bug at
@@ -219,8 +223,8 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
                     "expose_http_server": True,
                     "precision": "bfloat16",
                     "kv_cache_dtype": "auto",
-                    "tensor_parallel_size": tp_size if self.cfg.colocated else self.cfg.inference_tp,
-                    "pipeline_parallel_size": pp_size if self.cfg.colocated else 1,
+                    "tensor_parallel_size": vllm_tp,
+                    "pipeline_parallel_size": vllm_pp,
                     "expert_parallel_size": 1,
                     "gpu_memory_utilization": 0.6,
                     "max_model_len": max_seq_len,
