@@ -320,8 +320,9 @@ class AutomodelWorker:
         """The tenant's family and its full optimizer state per LoRA parameter
         on CPU, keyed as the adapter is; empty until its first step. Both
         optimizers create a parameter's state at its first step with a grad
-        (`torch/optim/adam.py` and dion's `muon.py` `_create_ortho_tasks`, each
-        `if p.grad is not None`), so the state is all or none here, every LoRA
+        (`torch/optim/adam.py`, and `Muon._create_muon_tasks` in dion's `muon.py`
+        at 7452a58, the commit nemo_automodel's lock pins; each filters on
+        `p.grad is not None`), so the state is all or none here, every LoRA
         parameter being in the forward path; a partial state is a bug and is
         refused, never written."""
         self._require_tenant(tenant)
