@@ -30,8 +30,6 @@ OPTIMIZER_DIRNAME = "optimizer"
 OPTIMIZER_FILES = {"adamw": "adamw.safetensors", "dimuon": "dimuon.safetensors"}
 STATE_KEYS = {"adamw": ("exp_avg", "exp_avg_sq", "step"), "dimuon": ("momentum",)}
 SHARD_KEYS = {"adamw": ("exp_avg", "exp_avg_sq"), "dimuon": ("momentum",)}
-OPTIMIZER_FILE = OPTIMIZER_FILES["adamw"]
-ADAM_STATE_KEYS = STATE_KEYS["adamw"]
 
 # Wrapper segments torch.compile and activation checkpointing put into module
 # names; PEFT and vLLM address the module underneath.
@@ -108,16 +106,3 @@ def read_optimizer_state(src: Path) -> Tuple[str, Dict[str, Dict[str, torch.Tens
         if set(fields) != set(keys):
             raise ValueError(f"{path}: {name} has fields {sorted(fields)}, not {sorted(keys)}")
     return family, state
-
-
-def write_adam_state(state: Dict[str, Dict[str, torch.Tensor]], dest: Path) -> None:
-    """write_optimizer_state for the AdamW family."""
-    write_optimizer_state("adamw", state, dest)
-
-
-def read_adam_state(src: Path) -> Dict[str, Dict[str, torch.Tensor]]:
-    """read_optimizer_state of a directory holding the AdamW file."""
-    family, state = read_optimizer_state(src)
-    if family != "adamw":
-        raise ValueError(f"{src} holds {family} state, not adamw")
-    return state

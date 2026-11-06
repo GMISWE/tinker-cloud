@@ -387,7 +387,7 @@ class ForwardBackwardRequest(BaseModel):
 
 class AdamParams(BaseModel):
     """One AdamW step's hyperparameters (SDK `AdamParams`, sent as `adam_params`)."""
-    type: Literal["adamw"] = "adamw"
+    type: Literal["adamw"] = "adamw"   # the SDK's adam_params carry no type: the field names the family
     learning_rate: float = Field(default=0.0001, description="Learning rate")
     beta1: float = Field(default=0.9, description="Beta1 coefficient")
     beta2: float = Field(default=0.95, description="Beta2 coefficient")
@@ -401,7 +401,7 @@ class DimuonParams(BaseModel):
     `optimizer_params`); the constraints are the SDK's."""
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
-    type: Literal["dimuon"] = "dimuon"
+    type: Literal["dimuon"] = "dimuon"   # the SDK's own default: one value, the family's name
     learning_rate: float = Field(..., ge=0, description="Step size")
     beta1: float = Field(default=0.9, ge=0, lt=1, description="Momentum EMA coefficient")
     grad_clip_norm: float = Field(default=0.0, description="Max global grad norm; a nonpositive value disables clipping")
