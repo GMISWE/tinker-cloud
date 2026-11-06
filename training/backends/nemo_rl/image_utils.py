@@ -4,6 +4,8 @@ import torch
 from PIL import Image
 from io import BytesIO
 
+from ...utils.model_config import remote_code_trusted
+
 logger = logging.getLogger(__name__)
 class ImagePreprocessor:
     def __init__(self, hf_path: str):
@@ -15,7 +17,7 @@ class ImagePreprocessor:
     def processor(self):
         if self._processor is None:
             from transformers import AutoProcessor
-            self._processor = AutoProcessor.from_pretrained(self.hf_path,trust_remote_code=True)
+            self._processor = AutoProcessor.from_pretrained(self.hf_path, trust_remote_code=remote_code_trusted(self.hf_path))
             logger.info(f"Loaded image processor from {self.hf_path}")
         return self._processor
 

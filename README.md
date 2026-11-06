@@ -46,7 +46,7 @@ still hold their allocation), or kubelet rejects the pod.
 ```bash
 # docker target (k8s: same command via kubectl -n <namespace> exec <pod> -- bash -c '...')
 docker exec -d tinkercloud-nemorl bash -c '
-export TINKER_API_KEY=tml-dev-key TINKER_BASE_URL=http://localhost:8000
+export TINKER_API_KEY=$(cat /data/tinkercloud_api_key) TINKER_BASE_URL=http://localhost:8000
 python -m tinker_cookbook.recipes.math_rl.train \
   model_name=meta-llama/Llama-3.2-1B \
   group_size=16 \
@@ -93,6 +93,7 @@ Server-wide settings (`training/config.py`):
 | `ALLOW_PARTIAL_BATCHES` | Pad batches smaller than the DP size | `false` |
 | `KGATEWAY_LOG_LEVEL` / `KGATEWAY_ACCESS_LOG` | Log level / HTTP access log | `INFO` / `false` |
 | `HF_HOME` | HuggingFace model cache | `/data/models` |
+| `TINKERCLOUD_TRUST_REMOTE_CODE_MODELS` | Comma-separated model ids / paths whose repository code transformers may import (`trust_remote_code`); a model whose `config.json` declares custom code (`auto_map`) is refused unless listed | unset (none) |
 
 Per-backend knobs are declared fields with typed defaults in
 `training/backends/miles/config.py` (`SLIME_*`, `TINKERCLOUD_MILES_*`),

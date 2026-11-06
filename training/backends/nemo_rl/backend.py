@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from ..base import BackendError, BackendHandle, SampleRequestError, TrainingBackend
-from ...utils.model_config import read_raw_hf_config
+from ...utils.model_config import read_raw_hf_config, remote_code_trusted
 from ..objectives import classification_spec
 from ..http_pool import HttpClientPool
 from ...models.requests import Datum, OptimParams
@@ -224,7 +224,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             # Detect VLM via config (cheap — only reads config.json)
             try:
                 from transformers import AutoConfig
-                cfg = AutoConfig.from_pretrained(hf_path, trust_remote_code=True)
+                cfg = AutoConfig.from_pretrained(hf_path, trust_remote_code=remote_code_trusted(hf_path))
                 is_vlm = (
                     hasattr(cfg, "vision_config")
                     or "VL" in cfg.__class__.__name__
