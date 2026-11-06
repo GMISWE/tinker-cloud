@@ -84,6 +84,22 @@ class TestNemoRLArgumentBuilder:
         assert gen["vllm_cfg"]["pipeline_parallel_size"] == 1
         assert config_dict["policy"]["dtensor_cfg"]["tensor_parallel_size"] == 2
 
+    def test_megatron_trains_at_the_client_lr_without_clipping(self):
+        # The worker's set_learning_rate pins each group's max/min lr per step; that
+        # holds only under a scheduler without warmup. Grad clipping is off by default.
+        from tinkercloud.training.backends.nemo_rl.builder import NemoRLArgumentBuilder
+        from tinkercloud.training.backends.nemo_rl.config import NemoRLConfig
+        from tinkercloud.training.backends.nemo_rl.loss_config import NO_GRAD_CLIP
+        cfg = NemoRLConfig.from_env({"megatron": True}, environ={})
+        config_dict, _ = NemoRLArgumentBuilder(config=cfg).build_args(
+            base_model="meta-llama/Llama-3.1-8B", num_gpus=2, lora_config={"rank": 16},
+        )
+        meg = config_dict["policy"]["megatron_cfg"]
+        assert meg["scheduler"]["lr_decay_style"] == "constant"
+        assert meg["scheduler"]["lr_warmup_iters"] == 0
+        assert meg["optimizer"]["clip_grad"] == NO_GRAD_CLIP
+        assert config_dict["policy"]["dtensor_cfg"] == {"enabled": False}
+
     def test_split_layout_refuses_when_no_training_gpu_remains(self):
         from tinkercloud.training.backends.nemo_rl.builder import NemoRLArgumentBuilder
         from tinkercloud.training.backends.nemo_rl.config import NemoRLConfig
