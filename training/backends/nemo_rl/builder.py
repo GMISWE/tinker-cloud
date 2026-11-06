@@ -330,7 +330,17 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
                 "enabled": True,
                 "empty_unused_memory_level": 1,
                 "activation_checkpointing": False,
-                "converter_type": "Qwen2ForCausalLM",
+                # NeMo RL 0.7 reads these unconditionally; values are its
+                # examples/configs/sft.yaml defaults (all off or inert here)
+                "recompute_granularity": "full",
+                "recompute_modules": None,
+                "gradient_accumulation_fusion": False,
+                "use_fused_weighted_squared_relu": False,
+                "use_linear_ce_fusion_loss": False,
+                "linear_ce_fusion_chunk_size": 256,
+                "force_reconvert_from_hf": False,
+                "env_vars": {},
+                "fp8_cfg": {"enabled": False, "fp8": "e4m3", "fp8_recipe": "blockwise", "fp8_param": False},
                 "tensor_model_parallel_size": tp_size,
                 "expert_tensor_parallel_size": 1,
                 "expert_model_parallel_size": 1,
