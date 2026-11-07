@@ -442,7 +442,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         if classification is not None:
             raise ValueError(f"base model {base_model!r} is not served: it declares a "
                              f"{classification.objective.value} head, not a language model")
-        try:   # what base_model_handle reads to boot the vLLM
+        try:   # the config fields base_model_handle reads to boot the vLLM
             model_context_length(raw)
             vllm_lora_rank(self.config.max_lora_rank * vllm_rank_factor(raw))
         except ValueError as e:
@@ -480,8 +480,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         the adapter version published at submission; the result reports it as
         weight_version and the current weights as latest_weight_version. A
         base-model sampler's handle (no LoRA) names the base model: no adapter, no version."""
-        if sampling_params is None:   # a generation has no length without max_tokens
-            raise BackendError("sample needs sampling_params", backend=BACKEND, operation="sample")
+        assert sampling_params is not None, "the sampling service refuses a request without max_tokens"
         if handle.lora is None:   # vLLM serves the base weights under the name it was started with (--model)
             return await sample_over_http(
                 handle, self._http_pool, request_id, prompt_tokens, num_samples, sampling_params,

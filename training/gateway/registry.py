@@ -68,9 +68,9 @@ class Registry:
             name TEXT PRIMARY KEY, backend TEXT NOT NULL, gpus TEXT, socket TEXT NOT NULL, pid INTEGER NOT NULL,
             registered_at REAL NOT NULL, last_heartbeat REAL NOT NULL,
             base_model_sampling INTEGER NOT NULL)""")
-        # a file written before engines declared base_model_sampling (Gavin's ruling: migrate it):
-        # an old row reads 0, so the gateway refuses base-model sampling on that engine (400)
-        # until it registers again, which a heartbeat answered 404 or an engine restart does
+        # a file written before engines declared base_model_sampling is migrated: an old row reads
+        # 0, so the gateway refuses base-model sampling on that engine (400) until the engine
+        # restarts and registers again
         columns = {r[1] for r in self._conn.execute("PRAGMA table_info(engines)").fetchall()}
         if "base_model_sampling" not in columns:
             self._conn.execute("ALTER TABLE engines ADD COLUMN base_model_sampling INTEGER NOT NULL DEFAULT 0")

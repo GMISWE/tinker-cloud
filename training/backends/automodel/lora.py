@@ -25,8 +25,10 @@ DELTANET_MODULES = ("in_proj_qkv", "in_proj_z", "out_proj")
 # layer types whose attention is q/k/v/o_proj: a sliding layer changes the mask, not the modules
 # (nemo_automodel's GptOssAttention is one class for both, sliding_window set per layer type)
 _SOFTMAX_LAYER_TYPES = ("full_attention", "sliding_attention")
-# keys other hybrid families declare their layer kinds under (Jamba, Nemotron-H); not mapped here
-_OTHER_LAYER_KEYS = ("layers_block_type", "hybrid_override_pattern")
+# dense families whose config.json declares no layer_types: every layer is q/k/v/o_proj attention
+# (Qwen2.5 and Qwen3 checkpoints declare none). A hybrid family declares its layer kinds under
+# keys of its own, so a model outside this list without layer_types is refused, not guessed.
+_DENSE_MODEL_TYPES = ("llama", "mistral", "qwen2", "qwen3")
 
 
 @dataclass(frozen=True)
@@ -40,7 +42,6 @@ class LoraSpec:
     optimizer: str   # "adamw" | "dimuon", one of the backend's SUPPORTED_OPTIMIZERS
     # (module name, output widths): a target that carries one LoRA pair of this rank per
     # slice of its output. Empty for a model with no such module.
-    # () is the layout of a model with no per-slice module; model_lora adds Qwen3.5's
     slices: Tuple[Tuple[str, Tuple[int, ...]], ...] = ()
 
     @property
@@ -79,11 +80,14 @@ def model_lora(spec: LoraSpec, raw: Dict[str, Any]) -> LoraSpec:
     text_config for a composite model). Raises ValueError for a layer type whose
     modules are not known here."""
     text = raw["text_config"] if "text_config" in raw else raw
-    other = [k for k in _OTHER_LAYER_KEYS if k in text]
-    if other:
-        raise ValueError(f"layer kinds declared under {other} have no LoRA target mapping in the automodel backend")
-    # a dense config (Llama, Qwen2, Qwen3) declares no layer kinds: every layer is softmax attention
-    types = set(text["layer_types"]) if "layer_types" in text else {"full_attention"}
+    if "layer_types" in text:
+        types = set(text["layer_types"])
+    else:
+        model_type = text.get("model_type")   # a config may omit model_type: None is not a dense family
+        if model_type not in _DENSE_MODEL_TYPES:
+            raise ValueError(f"model type {model_type!r} declares no layer_types and is not a dense family "
+                             f"the automodel backend maps ({', '.join(_DENSE_MODEL_TYPES)})")
+        types = {"full_attention"}
     unknown = types - set(_SOFTMAX_LAYER_TYPES) - {"linear_attention"}
     if unknown:
         raise ValueError(f"layer types {sorted(unknown)} have no LoRA target mapping in the automodel backend")

@@ -86,10 +86,12 @@ class SlicedLinearLoRA(LinearLoRA):
 
 def patch_sliced(linear: nn.Linear, widths: Sequence[int], config: PeftConfig) -> SlicedLinearLoRA:
     """Make `linear` (in place, as Automodel's patch_linear_module does) a
-    SlicedLinearLoRA with slices of `widths`, each pair built from `config` as a
-    LinearLoRA is; its weight and bias freeze."""
+    SlicedLinearLoRA with slices of `widths`, each pair of config.dim with config's alpha,
+    dropout, dropout position, dtype and A init; its weight and bias freeze."""
     if config.use_dora or config.use_triton:
         raise ValueError("a per-slice LoRA implements neither DoRA nor the Triton kernel")
+    if not isinstance(config.lora_dtype, torch.dtype):
+        raise ValueError(f"a per-slice LoRA needs lora_dtype as a torch.dtype, not {config.lora_dtype!r}")
     if type(linear) is not nn.Linear:
         raise TypeError(f"a per-slice LoRA patches an nn.Linear, not {type(linear).__name__}")
     if sum(widths) != linear.out_features:
