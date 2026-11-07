@@ -58,6 +58,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Variables the caller set, before any profile default fills one in (--code-only, below).
+CALLER_ENV=" $(compgen -e | tr '\n' ' ') "
 PROFILE="${PROFILE:-nemo_rl}"
 SOURCE=dev
 TARGET=k8s
@@ -218,6 +220,32 @@ fi
 if [ "$CODE_ONLY" = 0 ] && [ "$RUN_SERVER" = 1 ] && [ ! -s "$HF_TOKEN_FILE" ]; then
   echo "ERROR: a new $PROFILE target needs an HF token: HF_TOKEN_FILE='${HF_TOKEN_FILE}' is missing or empty"
   exit 1
+fi
+
+# --code-only keeps the running server's layout: NUM_GPUS and every BACKEND_ENV knob the
+# caller did not set take the live server's value, not the profile default (a default
+# AUTOMODEL_TRAIN_GPUS=2 on an 8-GPU server silently halves the training group).
+if [ "$CODE_ONLY" = 1 ] && [ "$RUN_SERVER" = 1 ]; then
+  live_env=$(EX "for p in \$(pgrep -f 'python3 -m trainin[g]'); do tr '\0' '\n' < /proc/\$p/environ; done") \
+    || { echo "ERROR: could not read the running server's environment on $TARGET"; exit 1; }
+  if [ -z "$live_env" ]; then
+    echo "==> --code-only: no server running; using the profile's layout"
+  else
+    live_of() { printf '%s\n' "$live_env" | sed -n "s/^$1=//p" | head -1; }
+    keep() {  # $1 caller's variable name, $2 key in the server env, $3 value this deploy would use
+      local live; live=$(live_of "$2")
+      if [ -z "$live" ] || [ "$live" = "$3" ]; then printf '%s' "$3"
+      elif [[ "$CALLER_ENV" == *" $1 "* ]]; then echo "==> --code-only: $2 $live -> $3 (set by the caller)" >&2; printf '%s' "$3"
+      else echo "==> --code-only: keeping the running server's $2=$live (profile default $3)" >&2; printf '%s' "$live"
+      fi
+    }
+    GPUS=$(keep GPUS NUM_GPUS "$GPUS")
+    kept=""
+    for kv in $BACKEND_ENV; do
+      kept="$kept ${kv%%=*}=$(keep "${kv%%=*}" "${kv%%=*}" "${kv#*=}")"
+    done
+    BACKEND_ENV="${kept# }"
+  fi
 fi
 
 # --- 1. create the pod / container -----------------------------------------
