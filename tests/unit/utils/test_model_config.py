@@ -33,3 +33,10 @@ def test_declared_mtp_layers_reads_text_config_and_defaults_to_none():
     assert declared_mtp_layers({"num_hidden_layers": 28}) == 0
     with pytest.raises(ValueError, match="not a layer count"):
         declared_mtp_layers({"mtp_num_hidden_layers": "1"})
+
+
+@pytest.mark.parametrize("value", [True, False, -1, 1.0])
+def test_declared_mtp_layers_refuses_a_value_that_is_not_a_count(value):
+    from tinkercloud.training.utils.model_config import declared_mtp_layers
+    with pytest.raises(ValueError, match="not a layer count"):
+        declared_mtp_layers({"text_config": {"mtp_num_hidden_layers": value}})
