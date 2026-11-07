@@ -21,12 +21,13 @@ the bytes can never disagree about where the bytes are.
 Records live under MetadataStorage as ``<kind>--<name>.json`` per model. A
 save is ``pending`` between ``begin_save`` and ``complete``/``fail``; a read
 through ``require`` refuses anything but ``completed``, and a completed record
-past its ``expires_at`` (the client's ttl_seconds) reads as not found. Nothing
-reaps expired bytes yet. Pending rows left behind by a crash are marked failed
-at boot (``sweep_pending``).
+past its ``expires_at`` (the client's ttl_seconds) reads as not found. Expired
+records and bytes are swept in the background. Pending rows left behind by a
+crash are marked failed at boot (``sweep_pending``).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import shutil
@@ -42,6 +43,7 @@ logger = logging.getLogger(__name__)
 
 SCHEME = "tinker://"
 NATIVE_DIRNAME = "native"
+EXPIRED_SWEEP_INTERVAL_S = 60.0
 
 
 class CheckpointKind(str, Enum):
@@ -275,6 +277,25 @@ class CheckpointStore:
                     self.fail(ref, "server restarted while the save was in flight")
                     n += 1
         return n
+
+    def sweep_expired(self) -> int:
+        """Remove expired terminal checkpoints and their bytes."""
+        n = 0
+        now = datetime.now(timezone.utc)
+        for model_id in self.model_ids():
+            for rec in self.records(model_id):
+                if rec.get("status") != CheckpointStatus.PENDING.value and is_expired(rec, now):
+                    ref = CheckpointRef.make(rec["model_id"], rec["kind"], rec["name"])
+                    if self.delete(ref):
+                        n += 1
+        return n
+
+    async def sweep_forever(self) -> None:
+        while True:
+            await asyncio.sleep(EXPIRED_SWEEP_INTERVAL_S)
+            n = self.sweep_expired()
+            if n:
+                logger.info("Deleted %d expired checkpoint(s)", n)
 
     # reads -------------------------------------------------------------------
 
