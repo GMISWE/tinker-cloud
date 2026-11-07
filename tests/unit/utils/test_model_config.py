@@ -22,3 +22,14 @@ def test_gpu_count_env_still_wins(monkeypatch):
     from tinkercloud.training.utils import model_config
     monkeypatch.setenv("NUM_GPUS", "4")
     assert model_config.detect_num_gpus() == 4
+
+
+def test_declared_mtp_layers_reads_text_config_and_defaults_to_none():
+    from tinkercloud.training.utils.model_config import declared_mtp_layers
+    # Qwen3.5: composite config, MTP under text_config
+    assert declared_mtp_layers({"text_config": {"mtp_num_hidden_layers": 1}}) == 1
+    # DeepSeek-style top-level key wins over the nested one
+    assert declared_mtp_layers({"num_nextn_predict_layers": 2, "text_config": {"mtp_num_hidden_layers": 1}}) == 2
+    assert declared_mtp_layers({"num_hidden_layers": 28}) == 0
+    with pytest.raises(ValueError, match="not a layer count"):
+        declared_mtp_layers({"mtp_num_hidden_layers": "1"})

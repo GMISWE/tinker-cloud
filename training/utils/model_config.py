@@ -52,6 +52,25 @@ def model_context_length(raw: Dict[str, Any]) -> int:
     )
 
 
+_MTP_LAYER_KEYS = ("num_nextn_predict_layers", "mtp_num_hidden_layers")
+
+
+def declared_mtp_layers(raw: Dict[str, Any]) -> int:
+    """Multi-token-prediction layers a raw config declares (text_config for composite
+    models); 0 when it declares none, i.e. the model has no MTP head."""
+    nested = raw.get("text_config")
+    for cfg in (raw, nested if isinstance(nested, dict) else None):
+        if not cfg:
+            continue
+        for key in _MTP_LAYER_KEYS:
+            if key in cfg:
+                value = cfg[key]
+                if not isinstance(value, int) or value < 0:
+                    raise ValueError(f"config.json {key}={value!r} is not a layer count")
+                return value
+    return 0
+
+
 def derive_max_seq_len(raw: Dict[str, Any], cap: int, override: Optional[int]) -> int:
     """The sequence length a backend sizes itself for: the operator's explicit
     override, else the model's own context capped by the server ceiling."""
