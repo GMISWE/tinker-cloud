@@ -59,12 +59,14 @@ if [ "$DRAINED" != 1 ]; then
   exit 1
 fi
 
-# 3. Ray head must show 0 GPU in use (leaked PGs = footgun 12) — else recycle it
+# 3. Ray head must show 0 GPU in use (leaked PGs = footgun 12) out of $GPUS
+#    (a head started with another --num-gpus gives the server the wrong
+#    layout with no error) — else recycle it
 RAY_OK=$(EX "ray status 2>/dev/null | grep -Eo '[0-9.]+/[0-9.]+ GPU' | head -1" || true)
 case "$RAY_OK" in
-  0.0/*) : ;;
+  "0.0/$GPUS.0 GPU") : ;;
   *)
-    echo "==> Ray head unhealthy ($RAY_OK); recycling"
+    echo "==> Ray head unhealthy or not $GPUS GPUs ($RAY_OK); recycling"
     EX "ray stop --force >/dev/null 2>&1 || true; rm -rf /tmp/ray; ray start --head --num-gpus $GPUS --disable-usage-stats > /tmp/ray_start.log 2>&1 < /dev/null; sleep 5" ;;
 esac
 
