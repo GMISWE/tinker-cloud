@@ -136,9 +136,10 @@ class SamplerGroup:
         self.host: Optional[Any] = None
         self.url: Optional[str] = None
 
-    async def start(self, base_model: str, max_model_len: int, config: AutomodelConfig) -> str:
-        """Place the bundle, start the host, boot vLLM; returns its URL. A
-        failure stops what was started, then re-raises (R5)."""
+    async def start(self, base_model: str, max_model_len: int, max_lora_rank: int, config: AutomodelConfig) -> str:
+        """Place the bundle, start the host, boot vLLM holding adapters up to
+        `max_lora_rank`; returns its URL. A failure stops what was started, then
+        re-raises."""
         try:
             pg = placement_group([{"GPU": 1, "CPU": 1}], strategy="PACK", name=self.name)
             self.pg = pg
@@ -155,7 +156,7 @@ class SamplerGroup:
             self.host = host
             try:
                 url: str = await host.start.remote(
-                    base_model, max_model_len, config.max_loras, config.max_lora_rank, config.max_cpu_loras)
+                    base_model, max_model_len, config.max_loras, max_lora_rank, config.max_cpu_loras)
             except RayTaskError as e:
                 # the host's own sentence (with the log tail), not Ray's traceback
                 raise BackendError(str(e.cause), backend="automodel", operation="create_model") from e

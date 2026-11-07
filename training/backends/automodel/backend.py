@@ -57,11 +57,11 @@ from ..common.sampling.vllm_client import VllmLoraClient
 from ..http_pool import HttpClientPool
 from ..objectives import classification_spec
 from .adapter import OPTIMIZER_DIRNAME, OPTIMIZER_FILES
-from .config import AutomodelConfig
+from .config import AutomodelConfig, vllm_lora_rank
 from .converter import Batch, LossFn, RequestRows, coalesce, convert_request, row_sums, shard, split_rows
 from .errors import NonFiniteGradNorm, StateMismatch
 from .group import TrainingGroup, sweep_leftovers
-from .lora import LoraSpec, lora_spec, spec_mismatch, tenant_seed
+from .lora import LoraSpec, lora_spec, model_lora, spec_mismatch, tenant_seed, vllm_rank_factor
 from .sampler import MAX_LOGPROBS, SamplerGroup
 from .scheduler import GroupScheduler, PassKey, pass_key
 
@@ -163,8 +163,11 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
             raise BackendError("create_model needs native_root: the adapter exports vLLM loads live there",
                                backend=BACKEND, operation="create_model")
         config = LoraConfig.model_validate(lora_config)
+        raw = await asyncio.to_thread(read_raw_hf_config, base_model)
         try:
-            lora = lora_spec(config, optimizer)
+            lora = model_lora(lora_spec(config, optimizer), raw)
+            # one vLLM serves every tenant of the base model: it holds the largest export
+            sampler_rank = vllm_lora_rank(self.config.max_lora_rank * vllm_rank_factor(raw))
         except ValueError as e:
             raise BackendError(str(e), backend=BACKEND, operation="create_model") from e
         if lora.rank > self.config.max_lora_rank:
@@ -174,7 +177,6 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
             raise BackendError(f"LoRA rank {lora.rank} does not divide over the server's {self.config.train_gpus} "
                                "training ranks (train_gpus): each LoRA factor is sharded across them",
                                backend=BACKEND, operation="create_model")
-        raw = await asyncio.to_thread(read_raw_hf_config, base_model)
         classification = classification_spec(raw)
         if classification is not None:
             raise BackendError(
@@ -202,7 +204,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         try:
             from transformers import AutoTokenizer   # the training env's transformers
             tokenizer = await asyncio.to_thread(AutoTokenizer.from_pretrained, base_model)
-            sampler = await self._sampler_for(base_model, context_length, request_id)
+            sampler = await self._sampler_for(base_model, context_length, sampler_rank, request_id)
         except BaseException:   # a failed create cleans up what it started (R5)
             await self._drop_tenant(key, model_id, "create_model", f"create_model of {model_id} failed")
             raise
@@ -292,7 +294,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
                 raise
             # the group was lost while the leave waited in its queue: the slot went with the ranks
 
-    async def _sampler_for(self, base_model: str, max_model_len: int, request_id: str) -> _Sampler:
+    async def _sampler_for(self, base_model: str, max_model_len: int, max_lora_rank: int, request_id: str) -> _Sampler:
         """The base model's sampler, booted on first use."""
         key = sampler_key(base_model)
         if key not in self._sampler_boots:
@@ -302,7 +304,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
                 return self._samplers[key]
             host = SamplerGroup(key)
             logger.info("[%s] starting vLLM for %s (sampler %s)", request_id, base_model, key)
-            url = await host.start(base_model, max_model_len, self.config)
+            url = await host.start(base_model, max_model_len, max_lora_rank, self.config)
             self._samplers[key] = _Sampler(key, host, url)
             logger.info("[%s] vLLM for %s up at %s", request_id, base_model, url)
             return self._samplers[key]

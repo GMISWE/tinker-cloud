@@ -237,7 +237,7 @@ def creatable(monkeypatch):
             super().__init__()
             self.key = key
 
-        async def start(self, base_model, max_model_len, config):
+        async def start(self, base_model, max_model_len, max_lora_rank, config):
             return VLLM
 
     monkeypatch.setattr(mod, "TrainingGroup", Group)
