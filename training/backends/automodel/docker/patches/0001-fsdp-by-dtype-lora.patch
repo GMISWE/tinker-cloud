@@ -1,0 +1,46 @@
+Automodel r0.6.0 (922e83e42) + GavinZhu-GMI/Automodel 035-fsdp-by-dtype-lora 74ba17c8f 27735eff7: fully_shard_by_dtype lets a module own the one dtype key its uniform subtrees leave uncovered (fp32 LoRA on Qwen3.5).
+
+diff --git a/nemo_automodel/components/distributed/parallelizer_utils.py b/nemo_automodel/components/distributed/parallelizer_utils.py
+index 19551cc77..72e906996 100644
+--- a/nemo_automodel/components/distributed/parallelizer_utils.py
++++ b/nemo_automodel/components/distributed/parallelizer_utils.py
+@@ -398,13 +398,25 @@ def fully_shard_by_dtype(
+                 return_paths=True,
+             )
+         )
++        # When exactly one key has parameters that no uniform subtree covers (e.g. a
++        # LinearLoRA's bf16 weight beside its fp32 lora_A/lora_B), the module itself owns
++        # that key, whatever its count. Otherwise two keys keep the minority-subtree rule
++        # and 3+ keys shard every uniform subtree.
++        subtree_param_ids = {id(param) for _, subtree, _ in uniform_subtrees for param in subtree.parameters()}
++        uncovered_keys = {
++            key for key, params in grouped_params.items() if any(id(param) not in subtree_param_ids for param in params)
++        }
++        if len(uncovered_keys) == 1:
++            parent_key = next(iter(uncovered_keys))
++        elif len(grouped_params) == 2:
++            parent_key = next(key for key in grouped_params if key != least_items_key)
++        else:
++            parent_key = None
+         selected_subtrees = [
+-            (path, key, subtree)
+-            for path, subtree, key in uniform_subtrees
+-            if (len(grouped_params) == 2 and key == least_items_key) or len(grouped_params) > 2
++            (path, key, subtree) for path, subtree, key in uniform_subtrees if parent_key is None or key != parent_key
+         ]
+ 
+-        expected_keys = {least_items_key} if len(grouped_params) == 2 else set(grouped_params)
++        expected_keys = set(grouped_params) - ({parent_key} if parent_key is not None else set())
+         expected_param_ids = {id(param) for key in expected_keys for param in grouped_params[key]}
+         covered_param_ids = {
+             id(param)
+@@ -432,8 +444,7 @@ def fully_shard_by_dtype(
+             if fully_shard_fn is not None:
+                 subtree_kwargs["fully_shard_fn"] = fully_shard_fn
+             _fully_shard(_get_module_from_path(module, path), **subtree_kwargs)
+-        if len(grouped_params) == 2:
+-            parent_key = next(key for key in grouped_params if key != least_items_key)
++        if parent_key is not None:
+             _call_fully_shard(
+                 module,
+                 mesh,
