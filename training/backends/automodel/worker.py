@@ -422,10 +422,10 @@ class AutomodelWorker:
             if backward:
                 # FSDP2 averages grads over ranks; this restores the sum (losses.py)
                 (res.loss * self.world_size).backward()
-            w = mb.input_ids.shape[1]
+            w = min(mb.input_ids.shape[1], width)   # a micro-batch padded past the shard's width
             out["row_loss"][start:end] = res.row_loss.cpu()
-            out["logprobs"][start:end, :w] = res.logprobs.cpu()
-            out["elementwise"][start:end, :w] = res.elementwise.cpu()
+            out["logprobs"][start:end, :w] = res.logprobs[:, :w].cpu()
+            out["elementwise"][start:end, :w] = res.elementwise[:, :w].cpu()
             out["clamped"][start:end] = res.clamped.cpu()
             out["seq_log_ratio"][start:end] = res.seq_log_ratio.cpu()
             out["seq_clipped"][start:end] = res.seq_clipped.cpu()
@@ -445,15 +445,27 @@ def _reshard(model: torch.nn.Module) -> None:
             m.reshard()
 
 
+# Transformer Engine's fused attention (Qwen3.5's full-attention layers) refuses a backward
+# at sequence length 1 ("cuDNN Error: s_q = s_kv = 1 is not supported"); one rank raising
+# there leaves its peers in a collective. Columns past a row's length are masked out of the loss.
+MIN_MICRO_BATCH_WIDTH = 2
+
+
 def _micro_batch(shard: Batch, start: int, end: int) -> Batch:
-    """Rows [start, end), cut to their longest row (at least 1 column, so an
-    all-padding micro-batch still runs)."""
-    width = max(1, int(shard.lengths[start:end].max()))
+    """Rows [start, end), cut to their longest row but at least
+    MIN_MICRO_BATCH_WIDTH columns (an all-padding micro-batch still runs), with
+    zero columns added when the shard is narrower."""
+    width = max(MIN_MICRO_BATCH_WIDTH, int(shard.lengths[start:end].max()))
+    pad = max(0, width - shard.input_ids.shape[1])
+
+    def cut(t: torch.Tensor) -> torch.Tensor:
+        return torch.nn.functional.pad(t[start:end, :width], (0, pad))
+
     return Batch(
         loss_fn=shard.loss_fn,
-        input_ids=shard.input_ids[start:end, :width],
+        input_ids=cut(shard.input_ids),
         lengths=shard.lengths[start:end],
-        inputs={k: v[start:end, :width] for k, v in shard.inputs.items()},
+        inputs={k: cut(v) for k, v in shard.inputs.items()},
         request_rows=(),
     )
 
