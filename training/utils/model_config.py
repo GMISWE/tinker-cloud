@@ -62,7 +62,7 @@ def declared_mtp_layers(raw: Dict[str, Any]) -> int:
         for key in _MTP_LAYER_KEYS:
             if key in cfg:
                 value = cfg[key]
-                if not isinstance(value, int) or value < 0:
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:   # a bool is an int
                     raise ValueError(f"config.json {key}={value!r} is not a layer count")
                 return value
     return 0
