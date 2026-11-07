@@ -316,8 +316,14 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
             if num_experts == 0 or num_experts % self.cfg.megatron_ep:
                 raise ValueError(f"NEMORL_MEGATRON_EP={self.cfg.megatron_ep} does not divide the "
                                  f"model's {num_experts} experts")
+        if not self.cfg.megatron and (self.cfg.megatron_recompute or self.cfg.megatron_logprob_chunk_size
+                                      or self.cfg.megatron_alloc_conf):
+            raise ValueError("NEMORL_MEGATRON_RECOMPUTE, NEMORL_MEGATRON_LOGPROB_CHUNK_SIZE and "
+                             "NEMORL_MEGATRON_ALLOC_CONF need the Megatron worker (NEMORL_MEGATRON=1)")
         if self.cfg.megatron:
             policy_config["dtensor_cfg"] = {"enabled": False}
+            # NeMo RL chunks only logits that are still bf16 (policy/__init__.py: defer_fp32_logits)
+            policy_config["logprob_chunk_size"] = self.cfg.megatron_logprob_chunk_size
             if lora_config and lora_config.get("rank", 0) > 0:
                 meg_peft = {
                     "enabled": True,
@@ -330,6 +336,9 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
                     # experts, separate gate and up; matches nothing on a dense model.
                     "experts_shared_outer_loras": True,
                     "experts_shared_outer_separate_gate_up": True,
+                    # Tinker's attention LoRA: separate q, k, v adapters on the
+                    # fused linear_qkv (its per-rank attention count decodes so)
+                    "split_qkv_adapters": True,
                     "dim": lora_config.get("rank", 8),
                     "alpha": lora_config.get("alpha") or lora_config.get("rank", 8),
                     "dropout": lora_config.get("dropout", 0.0),
@@ -344,17 +353,20 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
             policy_config["megatron_cfg"] = {
                 "enabled": True,
                 "empty_unused_memory_level": 1,
-                "activation_checkpointing": False,
+                # full granularity: NeMo RL then recomputes uniformly, one layer at a time
+                "activation_checkpointing": self.cfg.megatron_recompute,
+                "recompute_granularity": "full",
                 # NeMo RL 0.7 reads these unconditionally; values are its
                 # examples/configs/sft.yaml defaults (all off or inert here)
-                "recompute_granularity": "full",
                 "recompute_modules": None,
                 "gradient_accumulation_fusion": False,
                 "use_fused_weighted_squared_relu": False,
                 "use_linear_ce_fusion_loss": False,
                 "linear_ce_fusion_chunk_size": 256,
                 "force_reconvert_from_hf": False,
-                "env_vars": {},
+                # NeMo RL passes these to each Megatron worker (lm_policy.py)
+                "env_vars": ({"PYTORCH_CUDA_ALLOC_CONF": self.cfg.megatron_alloc_conf}
+                             if self.cfg.megatron_alloc_conf is not None else {}),
                 "fp8_cfg": {"enabled": False, "fp8": "e4m3", "fp8_recipe": "blockwise", "fp8_param": False},
                 "tensor_model_parallel_size": tp_size,
                 "expert_tensor_parallel_size": 1,  # the separate gate/up adapter raises otherwise
@@ -378,7 +390,7 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
                 "moe_per_layer_logging": False,
                 "apply_rope_fusion": True,
                 "bias_activation_fusion": True,
-                "defer_fp32_logits": False,
+                "defer_fp32_logits": self.cfg.megatron_logprob_chunk_size is not None,
                 # required by NeMo RL's Megatron setup; its worker drives train() itself
                 # and never reads it
                 "train_iters": 1_000_000,
