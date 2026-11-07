@@ -120,6 +120,7 @@ class TestNemoRLArgumentBuilder:
         assert peft["target_modules"] == targets
         assert peft["experts_shared_outer_loras"] is True
         assert peft["experts_shared_outer_separate_gate_up"] is True
+        assert peft["split_qkv_adapters"] is True
 
     def test_megatron_lora_refuses_no_target(self):
         from tinkercloud.training.backends.nemo_rl.builder import NemoRLArgumentBuilder
@@ -148,6 +149,52 @@ class TestNemoRLArgumentBuilder:
         assert meg["moe_token_dispatcher_type"] == "alltoall"
         assert meg["moe_permute_fusion"] is True
         assert config_dict["policy"]["generation"]["vllm_kwargs"]["moe_backend"] == "triton"
+
+    @pytest.mark.parametrize("environ, expected", [({}, False), ({"NEMORL_MEGATRON_RECOMPUTE": "1"}, True)])
+    def test_megatron_recompute_follows_its_knob(self, environ, expected):
+        from tinkercloud.training.backends.nemo_rl.builder import NemoRLArgumentBuilder
+        from tinkercloud.training.backends.nemo_rl.config import NemoRLConfig
+        cfg = NemoRLConfig.from_env({"megatron": True}, environ=environ)
+        config_dict, _ = NemoRLArgumentBuilder(config=cfg).build_args(
+            base_model="meta-llama/Llama-3.1-8B", num_gpus=2, lora_config=LORA16,
+        )
+        meg = config_dict["policy"]["megatron_cfg"]
+        assert meg["activation_checkpointing"] is expected
+        assert meg["recompute_granularity"] == "full"
+
+    @pytest.mark.parametrize("environ, chunk", [({}, None), ({"NEMORL_MEGATRON_LOGPROB_CHUNK_SIZE": "2048"}, 2048)])
+    def test_megatron_logprob_chunking_defers_fp32_logits(self, environ, chunk):
+        from tinkercloud.training.backends.nemo_rl.builder import NemoRLArgumentBuilder
+        from tinkercloud.training.backends.nemo_rl.config import NemoRLConfig
+        cfg = NemoRLConfig.from_env({"megatron": True}, environ=environ)
+        config_dict, _ = NemoRLArgumentBuilder(config=cfg).build_args(
+            base_model="meta-llama/Llama-3.1-8B", num_gpus=2, lora_config=LORA16,
+        )
+        assert config_dict["policy"]["logprob_chunk_size"] == chunk
+        assert config_dict["policy"]["megatron_cfg"]["defer_fp32_logits"] is (chunk is not None)
+
+    @pytest.mark.parametrize("environ, env_vars", [
+        ({}, {}),
+        ({"NEMORL_MEGATRON_ALLOC_CONF": "expandable_segments:True"},
+         {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}),
+    ])
+    def test_megatron_alloc_conf_reaches_the_worker_env(self, environ, env_vars):
+        from tinkercloud.training.backends.nemo_rl.builder import NemoRLArgumentBuilder
+        from tinkercloud.training.backends.nemo_rl.config import NemoRLConfig
+        cfg = NemoRLConfig.from_env({"megatron": True}, environ=environ)
+        config_dict, _ = NemoRLArgumentBuilder(config=cfg).build_args(
+            base_model="meta-llama/Llama-3.1-8B", num_gpus=2, lora_config=LORA16,
+        )
+        assert config_dict["policy"]["megatron_cfg"]["env_vars"] == env_vars
+
+    @pytest.mark.parametrize("overrides", [{"megatron_recompute": True}, {"megatron_logprob_chunk_size": 2048},
+                                           {"megatron_alloc_conf": "expandable_segments:True"}])
+    def test_megatron_memory_knobs_are_refused_on_dtensor(self, overrides):
+        from tinkercloud.training.backends.nemo_rl.builder import NemoRLArgumentBuilder
+        from tinkercloud.training.backends.nemo_rl.config import NemoRLConfig
+        cfg = NemoRLConfig.from_env(overrides, environ={})
+        with pytest.raises(ValueError, match="need the Megatron worker"):
+            NemoRLArgumentBuilder(config=cfg).build_args(base_model="meta-llama/Llama-3.1-8B", num_gpus=2)
 
     def test_dense_model_keeps_the_dense_moe_settings(self):
         from tinkercloud.training.backends.nemo_rl.builder import NemoRLArgumentBuilder
