@@ -58,10 +58,7 @@ _MTP_LAYER_KEYS = ("num_nextn_predict_layers", "mtp_num_hidden_layers")
 def declared_mtp_layers(raw: Dict[str, Any]) -> int:
     """Multi-token-prediction layers a raw config declares (text_config for composite
     models); 0 when it declares none, i.e. the model has no MTP head."""
-    nested = raw.get("text_config")
-    for cfg in (raw, nested if isinstance(nested, dict) else None):
-        if not cfg:
-            continue
+    for cfg in (raw, raw["text_config"]) if "text_config" in raw else (raw,):
         for key in _MTP_LAYER_KEYS:
             if key in cfg:
                 value = cfg[key]

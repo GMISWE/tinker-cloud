@@ -1,4 +1,4 @@
-Automodel r0.6.0 (922e83e42) + GavinZhu-GMI/Automodel 035-fsdp-by-dtype-lora 74ba17c8f 27735eff7: fully_shard_by_dtype lets a module own the one dtype key its uniform subtrees leave uncovered (fp32 LoRA on Qwen3.5).
+Automodel r0.6.0 (922e83e42) + GavinZhu-GMI/Automodel 74ba17c8f 27735eff7: fully_shard_by_dtype lets a module own the one dtype key its uniform subtrees leave uncovered (fp32 LoRA on Qwen3.5).
 
 diff --git a/nemo_automodel/components/distributed/parallelizer_utils.py b/nemo_automodel/components/distributed/parallelizer_utils.py
 index 19551cc77..72e906996 100644

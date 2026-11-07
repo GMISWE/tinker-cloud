@@ -442,6 +442,11 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         if classification is not None:
             raise ValueError(f"base model {base_model!r} is not served: it declares a "
                              f"{classification.objective.value} head, not a language model")
+        try:   # what base_model_handle reads to boot the vLLM
+            model_context_length(raw)
+            vllm_lora_rank(self.config.max_lora_rank * vllm_rank_factor(raw))
+        except ValueError as e:
+            raise ValueError(f"base model {base_model!r} is not served: {e}") from e
 
     async def base_model_handle(self, base_model: str) -> AutomodelHandle:
         """The base model's vLLM, shared with its LoRA tenants, sampled with no adapter.
@@ -461,7 +466,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
             handle = AutomodelHandle(
                 model_id=key, context_length=context_length, max_topk_logprobs=MAX_LOGPROBS, hf_path=base_model,
                 inference_endpoints=(sampler.url,), base_model=base_model, sampler_key=sampler.key,
-                tokenizer=tokenizer, generation_synced_version=0)
+                tokenizer=tokenizer)
             routing.table.publish(key, routing.InferenceEndpoint(handle.inference_endpoints))
             self._bases[key] = handle
             return handle
@@ -475,9 +480,11 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         the adapter version published at submission; the result reports it as
         weight_version and the current weights as latest_weight_version. A
         base-model sampler's handle (no LoRA) names the base model: no adapter, no version."""
+        if sampling_params is None:   # a generation has no length without max_tokens
+            raise BackendError("sample needs sampling_params", backend=BACKEND, operation="sample")
         if handle.lora is None:   # vLLM serves the base weights under the name it was started with (--model)
             return await sample_over_http(
-                handle, self._http_pool, request_id, prompt_tokens, num_samples, sampling_params or {},
+                handle, self._http_pool, request_id, prompt_tokens, num_samples, sampling_params,
                 prompt_logprobs, topk_sample_logprobs=topk_sample_logprobs, topk_prompt_logprobs=topk_prompt_logprobs,
                 model=handle.base_model)
         await self._ensure_published(handle, "sample")
@@ -491,7 +498,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         try:
             result = await sample_over_http(
                 handle, self._http_pool, request_id, prompt_tokens, num_samples,
-                sampling_params or {}, prompt_logprobs,
+                sampling_params, prompt_logprobs,
                 topk_sample_logprobs=topk_sample_logprobs, topk_prompt_logprobs=topk_prompt_logprobs,
                 model=adapter_name(handle.model_id, served))
         finally:

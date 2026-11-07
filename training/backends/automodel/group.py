@@ -38,8 +38,9 @@ NAME_PREFIX = "am-"
 # The cluster is static: bundles not placed within this time will not be
 # placed later, so the create fails instead of hanging.
 PG_READY_TIMEOUT_S = 60.0
-# A rank's peers that raise the same verdict answer within seconds of it; one
-# still running after this is waiting in a collective that will not complete.
+# Expected, not measured: peers reaching the same verdict (an all-reduced norm)
+# answer within seconds of each other, so a rank still running after this is
+# taken to wait in a collective that will not complete.
 RANK_GRACE_S = 30.0
 
 

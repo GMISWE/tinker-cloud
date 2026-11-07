@@ -22,8 +22,11 @@ ATTN_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj")
 MLP_MODULES = ("gate_proj", "up_proj", "down_proj")
 # Gated DeltaNet's projections that train_attn adapts; in_proj_b/in_proj_a are not
 DELTANET_MODULES = ("in_proj_qkv", "in_proj_z", "out_proj")
-# layer types whose attention is q/k/v/o_proj (sliding windows change the mask, not the modules)
+# layer types whose attention is q/k/v/o_proj: a sliding layer changes the mask, not the modules
+# (nemo_automodel's GptOssAttention is one class for both, sliding_window set per layer type)
 _SOFTMAX_LAYER_TYPES = ("full_attention", "sliding_attention")
+# keys other hybrid families declare their layer kinds under (Jamba, Nemotron-H); not mapped here
+_OTHER_LAYER_KEYS = ("layers_block_type", "hybrid_override_pattern")
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,7 @@ class LoraSpec:
     optimizer: str   # "adamw" | "dimuon", one of the backend's SUPPORTED_OPTIMIZERS
     # (module name, output widths): a target that carries one LoRA pair of this rank per
     # slice of its output. Empty for a model with no such module.
+    # () is the layout of a model with no per-slice module; model_lora adds Qwen3.5's
     slices: Tuple[Tuple[str, Tuple[int, ...]], ...] = ()
 
     @property
@@ -75,7 +79,10 @@ def model_lora(spec: LoraSpec, raw: Dict[str, Any]) -> LoraSpec:
     text_config for a composite model). Raises ValueError for a layer type whose
     modules are not known here."""
     text = raw["text_config"] if "text_config" in raw else raw
-    # a config without layer_types declares one kind of layer, softmax attention
+    other = [k for k in _OTHER_LAYER_KEYS if k in text]
+    if other:
+        raise ValueError(f"layer kinds declared under {other} have no LoRA target mapping in the automodel backend")
+    # a dense config (Llama, Qwen2, Qwen3) declares no layer kinds: every layer is softmax attention
     types = set(text["layer_types"]) if "layer_types" in text else {"full_attention"}
     unknown = types - set(_SOFTMAX_LAYER_TYPES) - {"linear_attention"}
     if unknown:

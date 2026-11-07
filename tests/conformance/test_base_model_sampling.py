@@ -16,7 +16,7 @@ BASE = "fake/tiny"
 @pytest.fixture(scope="module", params=["single", "split"])
 def base_server(request, tmp_path_factory):
     srv = Server(tmp_path_factory.mktemp("base_sampling"), request.param,
-                 extra_env={"TINKERCLOUD_BACKEND_OVERRIDES": json.dumps({"base_models": [BASE]})})
+                 TINKERCLOUD_BACKEND_OVERRIDES=json.dumps({"base_models": [BASE]}))
     try:
         srv.wait_healthy()
         yield srv
@@ -33,7 +33,7 @@ def test_a_base_model_sampler_scores_and_samples(base_server):
     assert all(isinstance(lp, float) and math.isfinite(lp) for lp in logprobs[1:])
     out = sampler.sample(prompt=prompt, num_samples=2, sampling_params=types.SamplingParams(max_tokens=3)).result()
     assert len(out.sequences) == 2
-    assert all(0 < len(s.tokens) <= 3 and len(s.logprobs or []) == len(s.tokens) for s in out.sequences)
+    assert all(0 < len(s.tokens) <= 3 and s.logprobs is not None and len(s.logprobs) == len(s.tokens) for s in out.sequences)
     ops = [t for t in base_server.trace() if t["op"] == "sample"]
     assert [t["model_id"] for t in ops] == [f"base:{BASE}"] * 2
     assert [t["prompt_logprobs"] for t in ops] == [True, False]
