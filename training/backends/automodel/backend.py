@@ -45,7 +45,6 @@ from typing import Any, Dict, List, Optional, Set
 
 import httpx
 import torch
-from huggingface_hub.errors import HFValidationError
 
 from ...checkpoints.interchange import ADAPTER_CONFIG_FILE, ADAPTER_WEIGHTS_FILE, HF_ADAPTER_DIRNAME, find_hf_adapter, read_adapter_config
 from ...core import routing
@@ -435,7 +434,9 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
     async def check_base_model(self, base_model: str) -> None:
         try:
             raw = await asyncio.to_thread(read_raw_hf_config, base_model)
-        except (OSError, HFValidationError) as e:   # not a model this server can read: the request's error
+        # OSError: no such file or repo; ValueError: an invalid repo id (huggingface_hub's
+        # HFValidationError) or a config that is not JSON. Either is the request's error.
+        except (OSError, ValueError) as e:
             raise ValueError(f"base model {base_model!r} is not served: its config.json cannot be read ({e})") from e
         classification = classification_spec(raw)
         if classification is not None:
