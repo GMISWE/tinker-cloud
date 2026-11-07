@@ -20,7 +20,7 @@ class TinkerSumCELoss(NLLLossFn):
     """
 
     def __call__(self, next_token_logprobs, data, global_valid_seqs, global_valid_toks, **kwargs):
-        one = torch.ones_like(global_valid_toks) if torch.is_tensor(global_valid_toks) else 1.0
+        one = torch.ones_like(global_valid_toks)
         loss, metrics = super().__call__(next_token_logprobs=next_token_logprobs, data=data,
                                          global_valid_seqs=global_valid_seqs, global_valid_toks=one, **kwargs)
         # per-token logprobs for the optimizer step's loss_fn_outputs
@@ -41,8 +41,8 @@ class TinkerSumPGLoss(ClippedPGLossFn):
         super().__init__(ClippedPGLossConfig(**cfg))
 
     def __call__(self, next_token_logprobs, data, global_valid_seqs, global_valid_toks):
-        one_s = torch.ones_like(global_valid_seqs) if torch.is_tensor(global_valid_seqs) else 1.0
-        one_t = torch.ones_like(global_valid_toks) if torch.is_tensor(global_valid_toks) else 1.0
+        one_s = torch.ones_like(global_valid_seqs)
+        one_t = torch.ones_like(global_valid_toks)
         loss, metrics = super().__call__(next_token_logprobs=next_token_logprobs, data=data,
                                          global_valid_seqs=one_s, global_valid_toks=one_t)
         # per-token logprobs for the optimizer step's loss_fn_outputs, as the CE loss returns them

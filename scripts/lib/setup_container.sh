@@ -160,8 +160,9 @@ PY
 
 # NeMo RL's non-colocated refit (NEMORL_COLOCATED=0) builds its NCCL group
 # through nccl4py inside the vLLM and policy worker venvs. Images before
-# v0.7.0 lack it; v0.7.0 ships nccl4py 0.2.0 in every venv, which an install
-# here would downgrade. With TP > 1 vLLM's Ray executor spawns the TP ranks
+# v0.7.0 lack it; v0.7.0 ships nccl4py 0.2.0 in every /opt/ray_venvs venv
+# (importlib.metadata on nvcr.io/nvidia/nemo-rl:v0.7.0, 2026-11-07), which an
+# install here would downgrade. With TP > 1 vLLM's Ray executor spawns the TP ranks
 # from the sync worker's venv.
 if [ "$PROFILE" = nemo_rl ]; then
   UV=$(command -v uv || echo /root/.local/bin/uv)

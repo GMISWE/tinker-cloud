@@ -318,8 +318,8 @@ def test_policy_config_carries_every_key_the_installed_nemo_rl_reads(megatron, m
 
     import yaml
     exemplar = os.path.join(os.path.dirname(os.path.dirname(nemo_rl.__file__)), "examples", "configs", "sft.yaml")
-    if not os.path.isfile(exemplar):
-        pytest.skip(f"no NeMo RL exemplar at {exemplar}")
+    # nemo_rl imported, so a missing exemplar means its install layout moved: fail, never skip
+    assert os.path.isfile(exemplar), f"no NeMo RL exemplar at {exemplar}"
     with open(exemplar) as f:
         reference = yaml.safe_load(f)["policy"]
     from tinkercloud.training.backends.nemo_rl import builder as mod

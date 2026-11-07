@@ -10,7 +10,7 @@ policy a refit leaves behind (the Megatron worker's offload frees its
 parameter buffers).
 
 Shared by test_nemo_rl_logprob_order_{dtensor,megatron}.py: one create per Ray
-instance (nemo_rl's placement group name is deterministic), and the GPU
+instance (nemo_rl names its placement groups f"{name}-node{i}", virtual_cluster.py:832), and the GPU
 conftest starts one Ray per module. Train-only (no vLLM): 2 GPUs, DP=2.
 """
 import asyncio
