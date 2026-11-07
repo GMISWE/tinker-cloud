@@ -30,7 +30,7 @@ def _now() -> str:
 class Sampler:
     sampler_id: str
     session_id: str
-    model_id: Optional[str]        # None: a sampler with no model behind it (never minted here; a pre-split row)
+    model_id: Optional[str]        # None: a base-model sampler, or a pre-split row (base_model None too)
     base_model: Optional[str]
     model_path: Optional[str]
     pinned_version: Optional[int]  # the weight version the sampler was saved at; None: served live

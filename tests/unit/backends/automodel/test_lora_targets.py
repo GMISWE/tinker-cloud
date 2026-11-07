@@ -13,7 +13,7 @@ from nemo_automodel import NeMoAutoModelForCausalLM  # noqa: E402
 from nemo_automodel._transformers import model_init  # noqa: E402
 
 from tinkercloud.training.backends.automodel.lora import lora_spec, model_lora  # noqa: E402
-from tinkercloud.training.backends.automodel.peft import SlicedLinearLoRA, apply_lora, build_overrides, patch_sliced  # noqa: E402
+from tinkercloud.training.backends.automodel.peft import SlicedLinearLoRA, apply_lora, build_overrides, patch_sliced, peft_config  # noqa: E402
 from tinkercloud.training.models.requests import LoraConfig  # noqa: E402
 from tinkercloud.training.utils.model_config import read_raw_hf_config  # noqa: E402
 
@@ -67,7 +67,7 @@ def test_in_proj_qkv_slices_are_independent_lora_pairs():
     widths = dict(lora.slices)["in_proj_qkv"]
     torch.manual_seed(0)
     linear = torch.nn.Linear(raw["text_config"]["hidden_size"], sum(widths), bias=False)
-    module = patch_sliced(linear, widths, lora, lora_dtype=torch.float32)
+    module = patch_sliced(linear, widths, peft_config(lora))
     assert isinstance(module, SlicedLinearLoRA) and not module.weight.requires_grad
     for b in module.lora_B:
         torch.nn.init.normal_(b.weight)   # B starts at 0; a nonzero B makes every slice's term visible
@@ -86,3 +86,17 @@ def test_in_proj_qkv_slices_are_independent_lora_pairs():
     for i in (1, 2):   # k, v
         for p in (module.lora_A[i].weight, module.lora_B[i].weight):
             assert p.grad is None or torch.count_nonzero(p.grad) == 0
+
+
+@pytest.mark.parametrize("key", ["layers_block_type", "hybrid_override_pattern"])
+def test_a_layer_kind_key_with_no_mapping_is_refused(key):
+    with pytest.raises(ValueError, match=key):
+        model_lora(lora_spec(LoraConfig(rank=4), "adamw"), {key: ["mamba", "attention"]})
+
+
+def test_a_per_slice_lora_refuses_dora():
+    lora = model_lora(lora_spec(LoraConfig(rank=4), "adamw"), read_raw_hf_config(_snapshot("Qwen/Qwen3.5-9B-Base")))
+    config = peft_config(lora)
+    config.use_dora = True
+    with pytest.raises(ValueError, match="DoRA"):
+        patch_sliced(torch.nn.Linear(8, 8, bias=False), (4, 4), config)

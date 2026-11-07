@@ -839,7 +839,12 @@ def test_the_leftover_sweep_runs_once_before_a_base_sampler_boots(monkeypatch, t
     from tinkercloud.training.backends.automodel import backend as mod
     backend, _ = creatable(monkeypatch)
     events = []
-    monkeypatch.setattr(mod, "sweep_leftovers", lambda: events.append("sweep") or 0)
+
+    def sweep() -> int:
+        events.append("sweep")
+        return 0   # leftovers found
+
+    monkeypatch.setattr(mod, "sweep_leftovers", sweep)
     boot = mod.SamplerGroup.start
 
     async def start(self, *args):
@@ -861,3 +866,15 @@ def test_the_leftover_sweep_runs_once_before_a_base_sampler_boots(monkeypatch, t
 
     asyncio.run(go())
     assert events == ["sweep", "sampler"]
+
+
+@pytest.mark.parametrize("config, reason", [
+    ({"hybrid_override_pattern": "M*", "max_position_embeddings": 64}, "hybrid_override_pattern"),
+    ({"model_type": "llama"}, "context"),
+])
+def test_a_base_model_the_sampler_cannot_boot_on_is_refused_at_the_check(tmp_path, config, reason):
+    """check_base_model (the 400 at create_sampling_session) reads what base_model_handle
+    reads to boot the vLLM, so a model it cannot boot on is refused there, not at the first sample."""
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    with pytest.raises(ValueError, match=f"is not served: .*{reason}"):
+        asyncio.run(AutomodelBackend(overrides=CONFIG).check_base_model(str(tmp_path)))

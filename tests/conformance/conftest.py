@@ -30,7 +30,8 @@ def _free_port() -> int:
 class Server:
     """`single`: today's one process. `split`: an engine on a unix socket behind the gateway on TCP."""
 
-    def __init__(self, tmp: Path, mode: str = "single", extra_env: dict | None = None):
+    # "single": the one-process server, the topology the server ships with
+    def __init__(self, tmp: Path, mode: str = "single", **extra_env: str):
         self.mode = mode
         self.port = _free_port()
         self.base_url = f"http://127.0.0.1:{self.port}"
@@ -54,7 +55,7 @@ class Server:
             "TRAINING_PORT": str(self.port),
             "SESSION_TIMEOUT_S": "-1",
             "RAY_DISABLE_AUTO_INIT": "1",
-            **(extra_env or {}),
+            **extra_env,
         }
         self.log = open(self.log_path, "w")
         self.engine_log = None

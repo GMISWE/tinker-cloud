@@ -139,8 +139,9 @@ class Harness:
         self.engine = RecordingEngine()
         self.engine_socket = os.path.join(tmp, "fake.sock")
 
+    # the fake engine on its own socket ("" = engine_socket)
     async def register(self, name: str = "fake", socket: str = "", pid: int = 4242,
-                       base_model_sampling: bool = False) -> httpx.Response:
+                       base_model_sampling: bool = False) -> httpx.Response:   # as every backend but automodel
         return await self.engines.post("/engines/register", json={
             "name": name, "backend": "fake", "gpus": [], "socket": socket or self.engine_socket, "pid": pid,
             "base_model_sampling": base_model_sampling})

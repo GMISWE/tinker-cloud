@@ -84,9 +84,12 @@ class SlicedLinearLoRA(LinearLoRA):
         return res + lora.to(res.dtype)
 
 
-def patch_sliced(linear: nn.Linear, widths: Sequence[int], lora: LoraSpec, lora_dtype: torch.dtype) -> SlicedLinearLoRA:
+def patch_sliced(linear: nn.Linear, widths: Sequence[int], config: PeftConfig) -> SlicedLinearLoRA:
     """Make `linear` (in place, as Automodel's patch_linear_module does) a
-    SlicedLinearLoRA with slices of `widths`; its weight and bias freeze."""
+    SlicedLinearLoRA with slices of `widths`, each pair built from `config` as a
+    LinearLoRA is; its weight and bias freeze."""
+    if config.use_dora or config.use_triton:
+        raise ValueError("a per-slice LoRA implements neither DoRA nor the Triton kernel")
     if type(linear) is not nn.Linear:
         raise TypeError(f"a per-slice LoRA patches an nn.Linear, not {type(linear).__name__}")
     if sum(widths) != linear.out_features:
@@ -97,16 +100,16 @@ def patch_sliced(linear: nn.Linear, widths: Sequence[int], lora: LoraSpec, lora_
     device, in_features = linear.weight.device, linear.in_features
     linear.__class__ = SlicedLinearLoRA
     sliced = cast(SlicedLinearLoRA, linear)
-    sliced.lora_A = nn.ModuleList(
-        nn.Linear(in_features, lora.rank, bias=False, dtype=lora_dtype, device=device) for _ in widths)
-    sliced.lora_B = nn.ModuleList(nn.Linear(lora.rank, w, bias=False, dtype=lora_dtype, device=device) for w in widths)
-    sliced.dim = lora.rank
-    sliced.scale = lora.alpha / lora.rank
-    sliced.dropout_p = lora.dropout
-    sliced.dropout_position = "post"   # PeftConfig's default, which every other target here uses
+    dtype, rank = config.lora_dtype, config.dim
+    sliced.lora_A = nn.ModuleList(nn.Linear(in_features, rank, bias=False, dtype=dtype, device=device) for _ in widths)
+    sliced.lora_B = nn.ModuleList(nn.Linear(rank, w, bias=False, dtype=dtype, device=device) for w in widths)
+    sliced.dim = rank
+    sliced.scale = config.alpha / rank
+    sliced.dropout_p = config.dropout
+    sliced.dropout_position = config.dropout_position
     sliced.use_dora = False
-    sliced.use_memory_efficient_lora = False
-    sliced.init_lora_weights("xavier")
+    sliced.use_memory_efficient_lora = False   # forward is this class's own, not LinearLoRA's kernel
+    sliced.init_lora_weights(config.lora_A_init)
     return sliced
 
 
@@ -117,8 +120,7 @@ def _apply(model: nn.Module, config: PeftConfig, lora: LoraSpec, quantization_co
     for name, module in list(model.named_modules()):
         short = name.rsplit(".", 1)[-1]
         if short in sliced:
-            assert isinstance(module, nn.Linear), (name, type(module))
-            patch_sliced(module, sliced[short], lora, LORA_DTYPE)
+            patch_sliced(cast(nn.Linear, module), sliced[short], config)   # patch_sliced refuses a non-Linear
             found[short] += 1
     missing = [m for m, n in found.items() if n == 0]
     if missing:
@@ -137,6 +139,7 @@ def lora_in_automodel(lora: LoraSpec) -> Iterator[None]:
     does, with that (possibly Automodel-adjusted) PeftConfig."""
     original = infrastructure.apply_lora_to_linear_modules
 
+    # the signature of infrastructure.apply_lora_to_linear_modules, which this stands in for
     def apply(model: nn.Module, config: PeftConfig, quantization_config: Any = None, skip_freeze: bool = False) -> int:
         assert skip_freeze, "Automodel freezes after loading; an early freeze would be a new call site"
         _apply(model, config, lora, quantization_config)
