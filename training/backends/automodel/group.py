@@ -9,11 +9,13 @@ Names: the placement group is `am-<key>`, rank r's actor `am-<key>-r<r>`.
 Neither is detached (they die with the server's Ray job); the names exist so
 a server that starts after a crash can sweep what the job left (R5).
 
-A call fails as a whole: every rank's answer is collected before the first
-exception is raised, so a refused optimizer step (the same verdict on every
-rank, the norm being all-reduced) surfaces once, with no reference left
-pending. The rank's exception is raised as the instance it sent (see _all),
-so the backend catches NonFiniteGradNorm by name and reports its message.
+A call fails as a whole: after the first exception the other ranks get
+RANK_GRACE_S to answer, so a refused optimizer step (the same verdict on every
+rank, the norm being all-reduced) surfaces once, as the instance the rank sent
+(see _all): the backend catches NonFiniteGradNorm by name and reports its
+message. A rank that does not answer within the grace is stuck in a collective
+its failed peer left; the call raises RanksStranded, and the group cannot be
+used again.
 """
 import asyncio
 import logging
@@ -36,6 +38,15 @@ NAME_PREFIX = "am-"
 # The cluster is static: bundles not placed within this time will not be
 # placed later, so the create fails instead of hanging.
 PG_READY_TIMEOUT_S = 60.0
+# A rank's peers that raise the same verdict answer within seconds of it; one
+# still running after this is waiting in a collective that will not complete.
+RANK_GRACE_S = 30.0
+
+
+class RanksStranded(RuntimeError):
+    """A rank raised while other ranks of its group were still running; those
+    ranks wait in a collective that will not complete. The rank's exception is
+    the cause."""
 
 
 class TrainingGroup:
@@ -120,23 +131,46 @@ class TrainingGroup:
             remove_placement_group(self.pg)
             self.pg = None
 
-    @staticmethod
-    async def _all(refs: Sequence[Any]) -> List[Any]:
-        """Every rank's answer in rank order; the first exception, once all have answered.
+    async def _all(self, refs: Sequence[Any]) -> List[Any]:
+        """Every rank's answer in rank order, or the first rank's exception.
 
-        A rank's own exception is raised as itself (its message is what the
-        caller reports); the RayTaskError that carried it, with the remote
-        traceback, stays attached as the cause. An actor death is not a task
-        error and is raised as Ray reports it."""
-        # Any: ray is not installed where the type check runs, so RayTaskError
-        # is Unknown there and isinstance cannot narrow to it
-        results: List[Any] = await asyncio.gather(*refs, return_exceptions=True)
-        for r in results:
-            if isinstance(r, RayTaskError):
-                raise r.cause from r
-            if isinstance(r, BaseException):
-                raise r
-        return list(results)
+        The first exception is logged when it arrives, with the remote
+        traceback. If every rank then answers within RANK_GRACE_S, the first
+        exception in rank order is raised: a rank's own exception as itself
+        (its message is what the caller reports), with the RayTaskError that
+        carried it attached as the cause; an actor death as Ray reports it.
+        Otherwise RanksStranded names the ranks still running."""
+        futures = [asyncio.ensure_future(r) for r in refs]
+        done, pending = await asyncio.wait(futures, return_when=asyncio.FIRST_EXCEPTION)
+        if pending:   # a rank raised while its peers run
+            first = next(r for r, f in enumerate(futures) if f in done and f.exception() is not None)
+            err = futures[first].exception()
+            logger.error("training group %s: rank %d raised %s; its peers get %.0fs to answer",
+                         self.key, first, type(_unwrap(err)).__name__, RANK_GRACE_S, exc_info=err)
+            _, pending = await asyncio.wait(pending, timeout=RANK_GRACE_S)
+            if pending:
+                stranded = [r for r, f in enumerate(futures) if f in pending]
+                for f in pending:
+                    f.cancel()
+                raise RanksStranded(
+                    f"training group {self.key}: rank {first} raised {_unwrap(err)!r}; ranks {stranded} "
+                    f"did not answer within {RANK_GRACE_S:.0f}s and wait in a collective that will not "
+                    f"complete") from _unwrap(err)
+        for f in futures:
+            err = f.exception()
+            if err is not None and _unwrap(err) is not err:
+                raise _unwrap(err) from err
+            if err is not None:
+                raise err
+        return [f.result() for f in futures]
+
+
+def _unwrap(err: BaseException) -> BaseException:
+    """The exception a rank raised, out of the RayTaskError that carried it."""
+    # Any: ray is not installed where the type check runs, so RayTaskError
+    # is Unknown there and isinstance cannot narrow to it
+    e: Any = err
+    return e.cause if isinstance(e, RayTaskError) else err
 
 
 def sweep_leftovers() -> int:
