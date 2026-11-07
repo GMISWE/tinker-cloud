@@ -36,6 +36,15 @@ mv /tmp/tinker-cloud/tests /app/tests
 mkdir -p /app/scripts && mv /tmp/tinker-cloud/scripts/gates /app/scripts/gates   # always in the bundle: a missing dir is a broken bundle
 
 if [ "$PROFILE" = automodel ]; then
+  # Automodel fixes not yet in the image, applied to its source checkout (an editable
+  # install, clean as the image ships it); each patch names its fork commits. Tracked
+  # files go back to the image's commit first, so a redeploy applies the current patches
+  # whatever an earlier deploy applied. A patch that does not apply fails the deploy.
+  git -C /opt/Automodel checkout -- .
+  for p in /app/training/backends/automodel/docker/patches/*.patch; do
+    git -C /opt/Automodel apply "$p"
+    echo "automodel patch applied: $(basename "$p")"
+  done
   /opt/venv/bin/python -c 'import nemo_automodel, torch, ray, dion; print("training env OK: torch", torch.__version__, "ray", ray.__version__, "dion", dion.__file__)'
   /opt/vllm-env/bin/vllm-api-server --check
 fi
