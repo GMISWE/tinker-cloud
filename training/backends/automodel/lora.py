@@ -26,9 +26,9 @@ DELTANET_MODULES = ("in_proj_qkv", "in_proj_z", "out_proj")
 # (nemo_automodel's GptOssAttention is one class for both, sliding_window set per layer type)
 _SOFTMAX_LAYER_TYPES = ("full_attention", "sliding_attention")
 # dense families whose config.json declares no layer_types: every layer is q/k/v/o_proj attention
-# (Qwen2.5 and Qwen3 checkpoints declare none). A hybrid family declares its layer kinds under
-# keys of its own, so a model outside this list without layer_types is refused, not guessed.
-_DENSE_MODEL_TYPES = ("llama", "mistral", "qwen2", "qwen3")
+# (Llama 3.1, Qwen2.5 and Qwen3 checkpoints declare none). A hybrid family declares its layer
+# kinds under keys of its own, so a model outside this list without layer_types is refused.
+_DENSE_MODEL_TYPES = ("llama", "qwen2", "qwen3")
 
 
 @dataclass(frozen=True)
