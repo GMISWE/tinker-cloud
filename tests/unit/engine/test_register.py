@@ -19,7 +19,7 @@ def test_heartbeats_keep_the_row_fresh_and_close_unregisters(tmp_path):
         gw_sock = str(tmp_path / "gw.sock")
         async with serve_uds(engines_face(registry), gw_sock):
             client = RegisterClient(gw_sock, "fake", "fake", [0], "/tmp/fake.sock", INTERVAL)
-            client.start()
+            client.start(base_model_sampling=False)
             await asyncio.wait_for(client.registered.wait(), 5)
             row = registry.get("fake")
             assert row is not None and row.pid == os.getpid() and row.gpus == [0]
@@ -40,7 +40,7 @@ def test_a_gateway_that_lost_the_row_gets_it_back_on_the_next_heartbeat(tmp_path
         gw_sock = str(tmp_path / "gw.sock")
         async with serve_uds(engines_face(registry), gw_sock):
             client = RegisterClient(gw_sock, "fake", "fake", [], "/tmp/fake.sock", INTERVAL)
-            client.start()
+            client.start(base_model_sampling=False)
             await asyncio.wait_for(client.registered.wait(), 5)
             registry.unregister("fake")
             deadline = asyncio.get_running_loop().time() + 2
@@ -54,11 +54,11 @@ def test_a_gateway_that_lost_the_row_gets_it_back_on_the_next_heartbeat(tmp_path
 def test_a_refused_registration_is_not_retried(tmp_path):
     async def main():
         registry = Registry()
-        registry.register("other", "fake", None, "/tmp/other.sock", 1)   # the gateway is taken
+        registry.register("other", "fake", None, "/tmp/other.sock", 1, False)   # the gateway is taken
         gw_sock = str(tmp_path / "gw.sock")
         async with serve_uds(engines_face(registry), gw_sock):
             client = RegisterClient(gw_sock, "fake", "fake", None, "/tmp/fake.sock", INTERVAL)
-            client.start()
+            client.start(base_model_sampling=False)
             await asyncio.wait_for(client.refused.wait(), 5)
             await asyncio.sleep(0.3)
             assert not client.registered.is_set() and registry.get("fake") is None
@@ -73,7 +73,7 @@ def test_registration_waits_for_a_gateway_that_is_not_up_yet(tmp_path):
         registry = Registry()
         gw_sock = str(tmp_path / "gw.sock")
         client = RegisterClient(gw_sock, "fake", "fake", [], "/tmp/fake.sock", INTERVAL)
-        client.start()
+        client.start(base_model_sampling=False)
         await asyncio.sleep(0.3)
         assert not client.registered.is_set()
         async with serve_uds(engines_face(registry), gw_sock):

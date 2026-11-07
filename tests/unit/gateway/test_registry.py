@@ -16,7 +16,7 @@ def _engines(registry: Registry) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=engines_face(registry)), base_url="http://gateway")
 
 
-ROW = {"name": "fake", "backend": "fake", "gpus": [0, 1], "socket": "/tmp/fake.sock", "pid": 7}
+ROW = {"name": "fake", "backend": "fake", "gpus": [0, 1], "socket": "/tmp/fake.sock", "pid": 7, "base_model_sampling": False}
 
 
 def test_register_list_heartbeat_unregister():
@@ -128,3 +128,19 @@ def test_unregister_on_a_worker_that_never_cached_the_row_returns_it(tmp_path):
     assert a.unregister("fake") is None
     a.refresh()
     assert a.rows() == []
+
+
+def test_a_file_without_the_base_model_sampling_column_gains_it(tmp_path):
+    import sqlite3
+    path = tmp_path / "engines.db"
+    old = sqlite3.connect(str(path))
+    old.execute("""CREATE TABLE engines (
+        name TEXT PRIMARY KEY, backend TEXT NOT NULL, gpus TEXT, socket TEXT NOT NULL, pid INTEGER NOT NULL,
+        registered_at REAL NOT NULL, last_heartbeat REAL NOT NULL)""")
+    old.execute("INSERT INTO engines VALUES ('fake', 'fake', NULL, '/tmp/fake.sock', 7, 0.0, 0.0)")
+    old.commit()
+    old.close()
+    registry = Registry(path)
+    assert registry.get("fake").base_model_sampling is False   # the old row reads as not declared
+    row = registry.register(**{**ROW, "base_model_sampling": True})
+    assert row.base_model_sampling is True and Registry(path).get("fake").base_model_sampling is True

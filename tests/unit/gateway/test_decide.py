@@ -20,7 +20,7 @@ HEADERS = [(b"host", b"sdk:8000"), (b"x-api-key", API_KEY.encode()), (b"content-
 
 def _decider():
     registry, store = Registry(), SessionStore(None)
-    registry.register("fake", "fake", [], "/tmp/fake.sock", 1)
+    registry.register("fake", "fake", [], "/tmp/fake.sock", 1, False)
     return Decider({API_KEY}, "X-API-Key", registry, SamplerCache(store), store), store
 
 

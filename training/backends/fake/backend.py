@@ -49,7 +49,7 @@ class FakeHandle(BackendHandle):
     step_count: int = 0
     pending: int = 0
     metrics: Dict[str, Any] = field(default_factory=dict)
-    optimizer: str = field(kw_only=True)
+    optimizer: Optional[str] = field(kw_only=True)   # None: a base-model sampler, which never trains
 
 
 def _tokens_of(model_input: ModelInput) -> List[int]:
@@ -93,6 +93,11 @@ class FakeBackend(TrainingBackend[FakeHandle]):
         self.overrides = overrides or {}
         self._models: Dict[str, FakeHandle] = {}
         self._trace_path = os.getenv("FAKE_BACKEND_TRACE")
+        # overrides {"base_models": [...]}: the base models it serves as base-model samplers
+        # (the automodel stand-in); none by default, like every GPU backend but automodel
+        self._base_models = tuple(self.overrides.get("base_models", ()))
+        self.serves_base_model_sampling = bool(self._base_models)
+        self._bases: Dict[str, FakeHandle] = {}   # base-model samplers' handles, by handle model_id
 
     # --- tracing ---------------------------------------------------------
     def _trace(self, op: str, model_id: str, **kw: Any) -> None:
@@ -201,12 +206,25 @@ class FakeBackend(TrainingBackend[FakeHandle]):
     async def prepare_for_generation(self, handle: FakeHandle) -> None:
         self._handle(handle, "prepare_for_generation")
 
+    async def check_base_model(self, base_model: str) -> None:
+        if base_model not in self._base_models:
+            raise ValueError(f"base model {base_model!r} is not served for base-model sampling; "
+                             f"served: {list(self._base_models)}")
+
+    async def base_model_handle(self, base_model: str) -> FakeHandle:
+        key = f"base:{base_model}"
+        if key not in self._bases:
+            self._bases[key] = FakeHandle(model_id=key, backend_type="fake", base_model=base_model, hf_path=base_model,
+                                          context_length=FAKE_CONTEXT_LENGTH, max_topk_logprobs=FAKE_MAX_TOPK,
+                                          optimizer=None)
+        return self._bases[key]
+
     async def sample(
         self, handle: FakeHandle, request_id: str, prompt_tokens: List[int], num_samples: int,
         sampling_params: Optional[Dict[str, Any]] = None, prompt_logprobs: bool = False,
         pinned_version: Optional[int] = None, topk_sample_logprobs: int = 0, topk_prompt_logprobs: int = 0,
     ) -> Dict[str, Any]:
-        h = self._handle(handle, "sample")
+        h = self._bases[handle.model_id] if handle.model_id in self._bases else self._handle(handle, "sample")
         params = dict(sampling_params or {})
         max_tokens = int(params.get("max_tokens") or 4)
         seed = params.get("seed")

@@ -45,8 +45,10 @@ from typing import Any, Dict, List, Optional, Set
 
 import httpx
 import torch
+from huggingface_hub.errors import HFValidationError
 
 from ...checkpoints.interchange import ADAPTER_CONFIG_FILE, ADAPTER_WEIGHTS_FILE, HF_ADAPTER_DIRNAME, find_hf_adapter, read_adapter_config
+from ...core import routing
 from ...core.fault_injection import hang_point
 from ...core.loss_registry import clip_thresholds
 from ...models.requests import Datum, LoraConfig, OptimParams
@@ -130,6 +132,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
     SUPPORTED_LOSS_FNS = frozenset(m.value for m in LossFn)   # the service's table is keyed by the wire string
     SUPPORTED_SAMPLER_KINDS = frozenset({"snapshot", "inflight"})   # every sample names the newest adapter
     SUPPORTED_OPTIMIZERS = frozenset({"adamw", "dimuon"})      # dimuon = dion.Muon per LoRA factor (worker.setup)
+    serves_base_model_sampling = True   # from the base model's vLLM, with no adapter
 
     def __init__(self, overrides: Optional[Dict[str, Any]] = None):
         super().__init__(overrides)
@@ -138,6 +141,8 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         self._lost_tenants: Dict[str, str] = {}   # model id -> why its group was torn down, until it is deleted
         self._samplers: Dict[str, _Sampler] = {}
         self._sampler_boots: Dict[str, asyncio.Lock] = {}   # one vLLM boot per base model at a time
+        self._bases: Dict[str, AutomodelHandle] = {}        # base-model samplers' handles, by handle model_id
+        self._base_opens = asyncio.Lock()
         self._membership: Dict[str, asyncio.Lock] = {}      # per group key: who opens, joins, leaves, releases
         self._tasks: Set[asyncio.Task] = set()
         self._swept = False
@@ -185,11 +190,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
                 backend=BACKEND, operation="create_model")
         context_length = model_context_length(raw)
 
-        if not self._swept:   # before the first group, so a crashed predecessor's leftovers do not hold its GPUs
-            found = sweep_leftovers()
-            if found:
-                logger.warning("swept %d leftover training-group actors/placement groups", found)
-            self._swept = True
+        self._sweep_once()
 
         key = group_key(base_model, lora)
         seed = tenant_seed(model_id, config.seed)
@@ -214,6 +215,16 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
             hf_path=base_model, inference_endpoints=(sampler.url,),
             base_model=base_model, lora=lora, group_key=key, sampler_key=sampler.key,
             native_root=native_root, tokenizer=tokenizer)
+
+    def _sweep_once(self) -> None:
+        """Before this backend's first actor or placement group (a training group or a
+        base-model sampler), so a crashed predecessor's leftovers do not hold its GPUs;
+        later, every am-* actor is this backend's own."""
+        if not self._swept:
+            found = sweep_leftovers()
+            if found:
+                logger.warning("swept %d leftover training-group actors/placement groups", found)
+            self._swept = True
 
     def _membership_lock(self, key: str) -> asyncio.Lock:
         """The lock a create holds to check for the key's group and open or
@@ -303,7 +314,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
             if key in self._samplers:
                 return self._samplers[key]
             host = SamplerGroup(key)
-            logger.info("[%s] starting vLLM for %s (sampler %s)", request_id, base_model, key)
+            logger.info("[%s] starting vLLM for %s (sampler %s, max LoRA rank %d)", request_id, base_model, key, max_lora_rank)
             url = await host.start(base_model, max_model_len, max_lora_rank, self.config)
             self._samplers[key] = _Sampler(key, host, url)
             logger.info("[%s] vLLM for %s up at %s", request_id, base_model, url)
@@ -332,6 +343,9 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
     async def close(self) -> None:
         for group in list(self._groups.values()):
             await self._release(group, "server shutdown")
+        for key in self._bases:
+            routing.table.withdraw(key)
+        self._bases.clear()
         for sampler in list(self._samplers.values()):
             await sampler.host.stop()
         self._samplers.clear()
@@ -418,6 +432,39 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         return _per_request(batch, outs)
 
     # --- sampling --------------------------------------------------------
+    async def check_base_model(self, base_model: str) -> None:
+        try:
+            raw = await asyncio.to_thread(read_raw_hf_config, base_model)
+        except (OSError, HFValidationError) as e:   # not a model this server can read: the request's error
+            raise ValueError(f"base model {base_model!r} is not served: its config.json cannot be read ({e})") from e
+        classification = classification_spec(raw)
+        if classification is not None:
+            raise ValueError(f"base model {base_model!r} is not served: it declares a "
+                             f"{classification.objective.value} head, not a language model")
+
+    async def base_model_handle(self, base_model: str) -> AutomodelHandle:
+        """The base model's vLLM, shared with its LoRA tenants, sampled with no adapter.
+        The handle holds the vLLM up until the backend closes."""
+        key = f"base:{base_model}"
+        async with self._base_opens:
+            if key in self._bases:
+                return self._bases[key]
+            raw = await asyncio.to_thread(read_raw_hf_config, base_model)
+            context_length = model_context_length(raw)
+            rank = vllm_lora_rank(self.config.max_lora_rank * vllm_rank_factor(raw))
+            from transformers import AutoTokenizer   # the training env's transformers
+            tokenizer = await asyncio.to_thread(AutoTokenizer.from_pretrained, base_model)
+            self._sweep_once()
+            sampler = await self._sampler_for(base_model, context_length, rank, key)
+            sampler.tenants.add(key)
+            handle = AutomodelHandle(
+                model_id=key, context_length=context_length, max_topk_logprobs=MAX_LOGPROBS, hf_path=base_model,
+                inference_endpoints=(sampler.url,), base_model=base_model, sampler_key=sampler.key,
+                tokenizer=tokenizer, generation_synced_version=0)
+            routing.table.publish(key, routing.InferenceEndpoint(handle.inference_endpoints))
+            self._bases[key] = handle
+            return handle
+
     async def sample(
         self, handle: AutomodelHandle, request_id: str, prompt_tokens: List[int], num_samples: int,
         sampling_params: Optional[Dict[str, Any]] = None, prompt_logprobs: bool = False,
@@ -425,7 +472,13 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
     ) -> Dict[str, Any]:
         """One /tinkercloud/v1/generate request to the base model's vLLM, naming
         the adapter version published at submission; the result reports it as
-        weight_version and the current weights as latest_weight_version."""
+        weight_version and the current weights as latest_weight_version. A
+        base-model sampler's handle (no LoRA) names the base model: no adapter, no version."""
+        if handle.lora is None:   # vLLM serves the base weights under the name it was started with (--model)
+            return await sample_over_http(
+                handle, self._http_pool, request_id, prompt_tokens, num_samples, sampling_params or {},
+                prompt_logprobs, topk_sample_logprobs=topk_sample_logprobs, topk_prompt_logprobs=topk_prompt_logprobs,
+                model=handle.base_model)
         await self._ensure_published(handle, "sample")
         served = handle.generation_synced_version
         if pinned_version is not None and pinned_version != served:

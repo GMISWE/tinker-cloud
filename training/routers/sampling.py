@@ -8,7 +8,7 @@ Endpoints:
 """
 
 import logging
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Tuple
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 
@@ -39,7 +39,7 @@ from ..models.responses import (
     CreateSamplingClientResult,
 )
 from ..utils import generate_request_id
-from ..utils.helpers import BASE_MODEL_SAMPLING_UNSUPPORTED, MODEL_ID_HEADER, PINNED_VERSION_HEADER
+from ..utils.helpers import BASE_MODEL_HEADER, BASE_MODEL_SAMPLING_UNSUPPORTED, MODEL_ID_HEADER, PINNED_VERSION_HEADER
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +117,31 @@ def resolve_target_model(
     )
 
 
+def resolve_sample_target(
+    training_clients: Dict,
+    sampling_session_id: Optional[str],
+    model_path: Optional[str],
+    base_model: Optional[str],
+    store: CheckpointStore,
+    model_id_header: Optional[str],
+    pinned_version_header: Optional[str],
+    base_model_header: Optional[str],
+) -> Tuple[Optional[str], Optional[int], Optional[str]]:
+    """(model_id, pinned_version, None) for a model's sampler or path (resolve_target_model);
+    (None, None, base model) for a base-model sampler, which the gateway names in X-Base-Model
+    after the engine accepted it at create_sampling_session."""
+    if base_model_header is not None:
+        if not sampling_session_id or model_id_header is not None:
+            raise HTTPException(status_code=400,
+                                detail=f"{BASE_MODEL_HEADER} comes with a sampling_session_id and no {MODEL_ID_HEADER}")
+        return None, None, base_model_header
+    model_id, pinned_version = resolve_target_model(
+        training_clients, sampling_session_id=sampling_session_id, model_path=model_path, base_model=base_model,
+        store=store, model_id_header=model_id_header, pinned_version_header=pinned_version_header,
+    )
+    return model_id, pinned_version, None
+
+
 def check_sample_extensions(request: ASampleRequest, prompt_len: int) -> None:
     """Boundary check of the SDK 0.33 sampling fields; each refusal names the field.
     target_prompt_logprobs and prompt_alt_tokens_k have no backend here, so a
@@ -153,6 +178,7 @@ async def asample(
     store: CheckpointStore = Depends(get_checkpoint_store),
     x_model_id: Optional[str] = Header(None, alias=MODEL_ID_HEADER),
     x_pinned_version: Optional[str] = Header(None, alias=PINNED_VERSION_HEADER),
+    x_base_model: Optional[str] = Header(None, alias=BASE_MODEL_HEADER),
 ):
     """
     Async sampling.
@@ -169,14 +195,9 @@ async def asample(
     # the live refit-every-step engine. The sampler also names its OWNING
     # model — required routing under a multi-tenant pool, where find-first
     # would serve a co-tenant's adapter.
-    model_id, pinned_version = resolve_target_model(
-        training_clients,
-        sampling_session_id=request.sampling_session_id,
-        model_path=request.model_path,
-        base_model=request.base_model,
-        store=store,
-        model_id_header=x_model_id,
-        pinned_version_header=x_pinned_version,
+    model_id, pinned_version, target_base = resolve_sample_target(
+        training_clients, request.sampling_session_id, request.model_path, request.base_model, store,
+        x_model_id, x_pinned_version, x_base_model,
     )
 
     owner = sample_futures.register(
@@ -205,6 +226,7 @@ async def asample(
             training_clients=training_clients,
             pinned_version=pinned_version,
             model_id=model_id,
+            base_model=target_base,
             topk_sample_logprobs=request.topk_sample_logprobs,
             topk_prompt_logprobs=request.topk_prompt_logprobs,
             prompt_logprobs_last_n=request.prompt_logprobs_last_n,
@@ -236,6 +258,7 @@ async def sample(
     store: CheckpointStore = Depends(get_checkpoint_store),
     x_model_id: Optional[str] = Header(None, alias=MODEL_ID_HEADER),
     x_pinned_version: Optional[str] = Header(None, alias=PINNED_VERSION_HEADER),
+    x_base_model: Optional[str] = Header(None, alias=BASE_MODEL_HEADER),
 ):
     """
     Synchronous sampling.
@@ -243,14 +266,9 @@ async def sample(
     """
     request_id = generate_request_id()
 
-    model_id, _ = resolve_target_model(
-        training_clients,
-        sampling_session_id=request.sampling_session_id,
-        model_path=request.model_path,
-        base_model=request.base_model,
-        store=store,
-        model_id_header=x_model_id,
-        pinned_version_header=x_pinned_version,
+    model_id, _, target_base = resolve_sample_target(
+        training_clients, request.sampling_session_id, request.model_path, request.base_model, store,
+        x_model_id, x_pinned_version, x_base_model,
     )
     n_seq = len(request.prompts) * request.num_samples
 
@@ -278,6 +296,7 @@ async def sample(
             else None,
             training_clients=training_clients,
             model_id=model_id,
+            base_model=target_base,
         )
 
         sequences = [SamplingSequence(**seq) for seq in result_dict["sequences"]]
@@ -297,9 +316,20 @@ async def resolve_sampler_target(
     _: None = Depends(verify_api_key_dep),
     training_clients: Dict = Depends(get_training_clients),
     store: CheckpointStore = Depends(get_checkpoint_store),
+    service: SamplingService = Depends(get_sampling_service),
 ):
     """The gateway's question at create_sampling_session: which model does this path name, and at
-    which weight version. The store's verdict on the path (404, 425, 400) is the answer."""
+    which weight version. The store's verdict on the path (404, 425, 400) is the answer. A bare
+    base_model is a base-model sampler on a backend that serves that base model; 400 otherwise."""
+    if not request.model_path and request.base_model:
+        backend = service.backend
+        if not backend.serves_base_model_sampling:
+            raise HTTPException(status_code=400, detail=BASE_MODEL_SAMPLING_UNSUPPORTED)
+        try:
+            await backend.check_base_model(request.base_model)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return ResolveSamplerTargetResponse(model_id=None, pinned_version=None, base_model=request.base_model)
     model_id, pinned_version = resolve_target_model(
         training_clients, model_path=request.model_path, base_model=request.base_model, store=store,
     )

@@ -61,9 +61,11 @@ BASE_MODEL_SAMPLING_UNSUPPORTED = (
     "base-model sampling is not supported by this deployment; create a model "
     "and a sampler from it (save_weights_and_get_sampling_client) instead"
 )
-# the sampling target travels gateway -> engine in these two headers; the body bytes stay untouched
+# the sampling target travels gateway -> engine in these headers; the body bytes stay untouched.
+# A base-model sampler names its base model instead of a model id.
 MODEL_ID_HEADER = "X-Model-Id"
 PINNED_VERSION_HEADER = "X-Pinned-Version"
+BASE_MODEL_HEADER = "X-Base-Model"
 
 
 def engine_name_of(id_: str) -> Optional[str]:

@@ -829,3 +829,35 @@ def test_a_rank_the_training_ranks_cannot_split_is_refused(monkeypatch, tmp_path
         run(backend.create_model("a", "r1", "base", 2, lora_config={"rank": 1, "alpha": 1},
                                  native_root=tmp_path / "a", optimizer="adamw"))
     assert started == []   # refused before any group starts
+
+
+# --- base-model sampler ------------------------------------------------------
+
+def test_the_leftover_sweep_runs_once_before_a_base_sampler_boots(monkeypatch, tmp_path):
+    """A base-model sampler booted before any create is the backend's own: the one sweep
+    of a predecessor's leftovers runs before it, never after it (it would kill it)."""
+    from tinkercloud.training.backends.automodel import backend as mod
+    backend, _ = creatable(monkeypatch)
+    events = []
+    monkeypatch.setattr(mod, "sweep_leftovers", lambda: events.append("sweep") or 0)
+    boot = mod.SamplerGroup.start
+
+    async def start(self, *args):
+        events.append("sampler")
+        return await boot(self, *args)
+
+    monkeypatch.setattr(mod.SamplerGroup, "start", start)
+
+    async def go():
+        base = await backend.base_model_handle("base")
+        assert base.lora is None and base.inference_endpoints == (VLLM,)
+        assert await backend.base_model_handle("base") is base
+        lora = await backend.create_model("a", "r1", "base", 2, lora_config=LORA_A, native_root=tmp_path / "a",
+                                          optimizer="adamw")
+        assert lora.sampler_key == base.sampler_key, "one vLLM per base model"
+        await backend.delete_model(lora)
+        assert base.sampler_key in backend._samplers, "the base sampler keeps its vLLM after the tenant leaves"
+        await backend.close()
+
+    asyncio.run(go())
+    assert events == ["sweep", "sampler"]

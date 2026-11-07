@@ -12,7 +12,7 @@ from typing import List, Optional, Set, Tuple, Union
 from pydantic import ValidationError
 
 from ..models.requests import CreateModelRequest, LoadWeightsRequest
-from ..utils.helpers import BASE_MODEL_SAMPLING_UNSUPPORTED, MODEL_ID_HEADER, PINNED_VERSION_HEADER, mint_id
+from ..utils.helpers import BASE_MODEL_HEADER, BASE_MODEL_SAMPLING_UNSUPPORTED, MODEL_ID_HEADER, PINNED_VERSION_HEADER, mint_id
 from . import routing
 from .registry import EngineRow, Registry
 from .sessions import SamplerCache, SessionStore
@@ -31,6 +31,7 @@ RETRIEVE_FUTURES = "/api/v1/retrieve_futures"
 DROP_MODEL_OPS = frozenset({"/api/v1/delete_model", "/api/v1/unload_model"})
 _MODEL_ID_HEADER = MODEL_ID_HEADER.lower().encode()
 _PINNED_HEADER = PINNED_VERSION_HEADER.lower().encode()
+_BASE_MODEL_HEADER = BASE_MODEL_HEADER.lower().encode()
 
 
 @dataclass(frozen=True)
@@ -120,15 +121,18 @@ class Decider:
         return Route(engine, [])
 
     def _sampling(self, engine: EngineRow, sid: object) -> Union[Route, Reject]:
-        """A sampler names its model and the version it pinned; both travel as headers.
-        A request that names no sampler (model_path, base_model) is the engine's to resolve."""
+        """A sampler names its model and the version it pinned; both travel as headers. A
+        base-model sampler (no model) names its base model. A request that names no sampler
+        (model_path, base_model) is the engine's to resolve."""
         if not isinstance(sid, str) or not sid:
             return Route(engine, [])
         sampler = self._samplers.lookup(sid)
         if sampler is None:
             return Reject(404, f"Unknown sampling_session_id: {sid}")
-        if not sampler.model_id:
-            return Reject(400, BASE_MODEL_SAMPLING_UNSUPPORTED)
+        if not sampler.model_id:   # a base-model sampler: served only by an engine that declared it
+            if not engine.base_model_sampling or not sampler.base_model:
+                return Reject(400, BASE_MODEL_SAMPLING_UNSUPPORTED)
+            return Route(engine, [(_BASE_MODEL_HEADER, sampler.base_model.encode())])
         add: Headers = [(_MODEL_ID_HEADER, sampler.model_id.encode())]
         if sampler.pinned_version is not None:
             add.append((_PINNED_HEADER, str(sampler.pinned_version).encode()))
