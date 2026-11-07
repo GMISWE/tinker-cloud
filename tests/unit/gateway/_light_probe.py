@@ -50,7 +50,8 @@ async def main() -> int:
         app = build_app(config(client), Registry(), SessionStore(None))
         async with serve_uds(engine, sock):
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.state.engines), base_url="http://g") as eng:
-                r = await eng.post("/engines/register", json={"name": "fake", "backend": "fake", "gpus": [], "socket": sock, "pid": 1})
+                r = await eng.post("/engines/register", json={"name": "fake", "backend": "fake", "gpus": [], "socket": sock, "pid": 1,
+                                                            "base_model_sampling": False})
                 assert r.status_code == 200, r.text
                 assert (await eng.get("/engines")).status_code == 200
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://g") as sdk:

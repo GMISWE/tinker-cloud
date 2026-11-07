@@ -61,8 +61,9 @@ class HealthResponse(BaseModel):
 
 
 class ResolveSamplerTargetResponse(BaseModel):
-    """What a sampler is bound to: its model and the weight version its path pinned (None: live)."""
-    model_id: str
+    """What a sampler is bound to: its model and the weight version its path pinned (None: live).
+    model_id None: a base-model sampler, served by the engine from the base model with no adapter."""
+    model_id: Optional[str]
     pinned_version: Optional[int] = None
     base_model: str
 

@@ -108,7 +108,7 @@ def test_two_workers_free_each_expired_model_once(tmp_path):
             (tmp_path / "b").mkdir()
             async with serve_uds(a.engine, a.engine_socket):
                 await a.register()
-                b.registry.register("fake", "fake", [], a.engine_socket, 4242)
+                b.registry.register("fake", "fake", [], a.engine_socket, 4242, False)
                 sid = await a.create_session()
                 models = [(await a.post_json("/api/v1/create_model", {**_create(sid), "model_seq_id": i})).json()["model_id"] for i in range(3)]
                 await a.gateway.start()

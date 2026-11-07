@@ -33,23 +33,25 @@ class EngineRow:
     gpus: Optional[List[int]]   # None: the engine did not state them (no engines table yet)
     socket: str
     pid: int
+    base_model_sampling: bool   # the engine serves bare base_model samplers (create_sampling_session)
     registered_at: float
     last_heartbeat: float
 
     def as_dict(self, now: float) -> dict:
         return {
             "name": self.name, "backend": self.backend, "gpus": self.gpus, "socket": self.socket,
-            "pid": self.pid, "state": "UP", "heartbeat_age_s": round(now - self.last_heartbeat, 3),
+            "pid": self.pid, "base_model_sampling": self.base_model_sampling, "state": "UP",
+            "heartbeat_age_s": round(now - self.last_heartbeat, 3),
         }
 
 
-_COLUMNS = "name, backend, gpus, socket, pid, registered_at, last_heartbeat"
+_COLUMNS = "name, backend, gpus, socket, pid, base_model_sampling, registered_at, last_heartbeat"
 
 
 def _row(t: tuple) -> EngineRow:
-    name, backend, gpus, socket, pid, registered_at, last_heartbeat = t
+    name, backend, gpus, socket, pid, base_model_sampling, registered_at, last_heartbeat = t
     return EngineRow(name, backend, None if gpus is None else json.loads(gpus), socket, int(pid),
-                     float(registered_at), float(last_heartbeat))
+                     bool(base_model_sampling), float(registered_at), float(last_heartbeat))
 
 
 class Registry:
@@ -64,7 +66,13 @@ class Registry:
             opened_alone(path, lambda: self._conn.execute("PRAGMA journal_mode=WAL"))
         self._conn.execute("""CREATE TABLE IF NOT EXISTS engines (
             name TEXT PRIMARY KEY, backend TEXT NOT NULL, gpus TEXT, socket TEXT NOT NULL, pid INTEGER NOT NULL,
-            registered_at REAL NOT NULL, last_heartbeat REAL NOT NULL)""")
+            registered_at REAL NOT NULL, last_heartbeat REAL NOT NULL,
+            base_model_sampling INTEGER NOT NULL DEFAULT 0)""")
+        # a file written before engines declared base_model_sampling: its rows are re-registered by
+        # their engines, so the column's default only stands until then
+        columns = {r[1] for r in self._conn.execute("PRAGMA table_info(engines)").fetchall()}
+        if "base_model_sampling" not in columns:
+            self._conn.execute("ALTER TABLE engines ADD COLUMN base_model_sampling INTEGER NOT NULL DEFAULT 0")
         self._rows: Dict[str, EngineRow] = {}
         self._on_drop: List[Callable[[EngineRow], None]] = []
         self.refresh()
@@ -76,7 +84,8 @@ class Registry:
         """Called with a row that stops being current (unregistered or replaced by a new pid), in every worker."""
         self._on_drop.append(fn)
 
-    def register(self, name: str, backend: str, gpus: Optional[List[int]], socket: str, pid: int) -> EngineRow:
+    def register(self, name: str, backend: str, gpus: Optional[List[int]], socket: str, pid: int,
+                 base_model_sampling: bool) -> EngineRow:
         now = time.time()
         self._conn.execute("BEGIN IMMEDIATE")
         try:
@@ -84,8 +93,9 @@ class Registry:
             if others:
                 raise RegistryConflict(f"engine {others[0]!r} is registered; this gateway forwards to one engine")
             old = self._conn.execute("SELECT pid FROM engines WHERE name = ?", (name,)).fetchone()
-            self._conn.execute("INSERT OR REPLACE INTO engines (name, backend, gpus, socket, pid, registered_at, last_heartbeat) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                               (name, backend, None if gpus is None else json.dumps(list(gpus)), socket, pid, now, now))
+            self._conn.execute("INSERT OR REPLACE INTO engines (name, backend, gpus, socket, pid, base_model_sampling, registered_at, last_heartbeat) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                               (name, backend, None if gpus is None else json.dumps(list(gpus)), socket, pid,
+                                int(base_model_sampling), now, now))
             self._conn.execute("COMMIT")
         except BaseException:   # the transaction's own rollback; the error goes on
             self._conn.execute("ROLLBACK")
@@ -102,7 +112,8 @@ class Registry:
             return False
         row = self._rows.get(name)
         if row is not None:
-            self._rows[name] = EngineRow(row.name, row.backend, row.gpus, row.socket, row.pid, row.registered_at, now)
+            self._rows[name] = EngineRow(row.name, row.backend, row.gpus, row.socket, row.pid, row.base_model_sampling,
+                                         row.registered_at, now)
         return True
 
     def unregister(self, name: str) -> Optional[EngineRow]:

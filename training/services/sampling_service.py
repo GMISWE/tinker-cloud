@@ -68,6 +68,15 @@ class SamplingService:
     def __init__(self, backend: TrainingBackend):
         self.backend = backend
 
+    async def _target_handle(
+        self, training_clients: Dict[str, Dict[str, Any]], model_id: Optional[str], base_model: Optional[str],
+    ) -> BackendHandle:
+        """The model's handle, or for a base-model sampler (model_id None) the backend's handle
+        for that base model; the router accepted only a base model the backend serves."""
+        if model_id is None and base_model is not None:
+            return await self.backend.base_model_handle(base_model)
+        return self._resolve_handle(training_clients, model_id)
+
     def _resolve_handle(
         self,
         training_clients: Dict[str, Dict[str, Any]],
@@ -95,6 +104,7 @@ class SamplingService:
         training_clients: Dict[str, Dict[str, Any]],
         pinned_version: Optional[int] = None,
         model_id: Optional[str] = None,
+        base_model: Optional[str] = None,
         topk_sample_logprobs: int = 0,
         topk_prompt_logprobs: int = 0,
         prompt_logprobs_last_n: Optional[int] = None,
@@ -104,7 +114,8 @@ class SamplingService:
 
         `pinned_version` (BUG-015): weight version the requesting sampler was
         created at; backends route pinned logprob reads off the live engine.
-        `model_id`: the sampler's owning model (multi-tenant routing).
+        `model_id`: the sampler's owning model (multi-tenant routing); `base_model`
+        instead: a base-model sampler, served with no adapter.
         `topk_*` = k > 0 ask the backend for the k most likely tokens per
         position; `prompt_logprobs_last_n` masks the prompt scores before the
         last N positions to None (the router validated it).
@@ -116,7 +127,7 @@ class SamplingService:
             RuntimeError: If no model with RolloutManager found
             BackendError: If the inference engine is unavailable
         """
-        handle = self._resolve_handle(training_clients, model_id)
+        handle = await self._target_handle(training_clients, model_id, base_model)
         _check_sample_request(handle, prompt_tokens, sampling_params, topk_sample_logprobs, topk_prompt_logprobs)
         logger.info(f"[{request_id}] Async sampling for {handle.model_id}")
         result = await self.backend.sample(
@@ -141,14 +152,16 @@ class SamplingService:
         sampling_params: Optional[Dict[str, Any]],
         training_clients: Dict[str, Dict[str, Any]],
         model_id: Optional[str] = None,
+        base_model: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Synchronous sampling over multiple prompts on `model_id`.
+        Synchronous sampling over multiple prompts on `model_id`, or on `base_model`
+        with no adapter (a base-model sampler).
 
         Returns:
             Dict with sequences list (num_samples per prompt, flattened)
         """
-        handle = self._resolve_handle(training_clients, model_id)
+        handle = await self._target_handle(training_clients, model_id, base_model)
         logger.info(f"[{request_id}] Sampling {num_samples} sequences")
 
         all_sequences = []

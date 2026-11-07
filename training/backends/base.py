@@ -96,6 +96,20 @@ class TrainingBackend(ABC, Generic[H]):
     # Sampler kinds (SaveWeightsForSamplerRequest.kind) this backend serves. "inflight"
     # needs a backend whose sampler serves the model's newest published weights.
     SUPPORTED_SAMPLER_KINDS: FrozenSet[str] = frozenset({"snapshot"})
+    # True when the backend serves a base-model sampler (create_sampling_client(base_model=...)):
+    # sample() on base_model_handle() draws from the base model with no adapter. Other
+    # backends refuse it with 400 before any of the two methods below is called.
+    serves_base_model_sampling: bool = False
+
+    async def check_base_model(self, base_model: str) -> None:
+        """Raises ValueError naming `base_model` when this backend cannot serve it as a
+        base-model sampler. Cheap: no engine starts here."""
+        raise NotImplementedError(f"{type(self).__name__} serves no base-model sampler")
+
+    async def base_model_handle(self, base_model: str) -> H:
+        """The handle sample() takes for a base-model sampler of `base_model` (one that
+        check_base_model accepted), starting its inference engine on first use."""
+        raise NotImplementedError(f"{type(self).__name__} serves no base-model sampler")
 
     @abstractmethod
     async def create_model(

@@ -114,7 +114,7 @@ async def serve(config: TrainingConfig, sock, also_stop: Sequence[uvicorn.Server
         await serving
         return
     if register is not None and not stopping:   # the socket accepts: now the gateway may route to us
-        register.start()
+        register.start(app.state.backend.serves_base_model_sampling)
     await serving
     if register is not None:
         await register.close()

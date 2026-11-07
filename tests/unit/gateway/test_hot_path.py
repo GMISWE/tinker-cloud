@@ -57,7 +57,7 @@ def test_a_fresh_worker_reads_the_store_once_per_unseen_sampler(tmp_path):
         try:
             async with serve_uds(a.engine, a.engine_socket):
                 await a.register()
-                b.registry.register("fake", "fake", [], a.engine_socket, 4242)
+                b.registry.register("fake", "fake", [], a.engine_socket, 4242, False)
                 sid = await a.create_session()
                 r = await a.post_json("/api/v1/create_sampling_session", {"session_id": sid, "sampling_session_seq_id": 0, "model_path": f"tinker://{MODEL}/sampler_weights/s"})
                 sampler_id = r.json()["sampling_session_id"]

@@ -139,9 +139,11 @@ class Harness:
         self.engine = RecordingEngine()
         self.engine_socket = os.path.join(tmp, "fake.sock")
 
-    async def register(self, name: str = "fake", socket: str = "", pid: int = 4242) -> httpx.Response:
+    async def register(self, name: str = "fake", socket: str = "", pid: int = 4242,
+                       base_model_sampling: bool = False) -> httpx.Response:
         return await self.engines.post("/engines/register", json={
-            "name": name, "backend": "fake", "gpus": [], "socket": socket or self.engine_socket, "pid": pid})
+            "name": name, "backend": "fake", "gpus": [], "socket": socket or self.engine_socket, "pid": pid,
+            "base_model_sampling": base_model_sampling})
 
     async def post(self, path: str, body: bytes = b"", key: str = API_KEY, **headers: str) -> httpx.Response:
         h = {"X-API-Key": key} if key else {}

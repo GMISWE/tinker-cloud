@@ -23,7 +23,9 @@ class RegisterClient:
         self.registered = asyncio.Event()
         self.refused = asyncio.Event()   # the gateway answered 4xx: a conflict or a bad row, not retried
 
-    def start(self) -> None:
+    def start(self, base_model_sampling: bool) -> None:
+        """Begin registering; `base_model_sampling`: the backend serves bare base_model samplers."""
+        self._row["base_model_sampling"] = base_model_sampling
         self._task = asyncio.create_task(self._run(), name=f"register-{self._name}")
 
     async def _run(self) -> None:

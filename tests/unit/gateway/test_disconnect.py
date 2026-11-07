@@ -49,7 +49,7 @@ def test_the_sdk_face_answers_nobody_and_the_engine_gets_a_cut_off_body(tmp_path
             writer.close()
 
         server = await asyncio.start_unix_server(engine, path=sock)
-        registry.register("fake", "fake", None, sock, 1)
+        registry.register("fake", "fake", None, sock, 1, False)
         sent = []
 
         async def send(message):

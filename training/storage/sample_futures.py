@@ -41,7 +41,7 @@ def clone_of(seq_id: Optional[int]) -> int:
 class SampleFuture:
     request_id: str
     operation: str                     # "asample" | "sample"
-    model_id: str
+    model_id: Optional[str]            # None: a base-model sampler's sample (no model to cancel it with)
     session: Optional[SessionKey]
     status: str = "pending"            # pending | completed | failed
     result: Optional[Dict[str, Any]] = None
@@ -109,7 +109,7 @@ class SampleFutureStore:
         self,
         request_id: str,
         operation: str,
-        model_id: str,
+        model_id: Optional[str],
         sampling_session_id: Optional[str],
         seq_id: Optional[int],
     ) -> str:

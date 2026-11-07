@@ -272,19 +272,21 @@ def sdk_face(gateway: Gateway, engines) -> FastAPI:
 
     @app.post("/api/v1/create_sampling_session", response_model=CreateSamplingSessionResponse)
     async def create_sampling_session(request: CreateSamplingSessionRequest, _: None = Depends(require_key)):
-        """A sampler must name its owning model: a tinker:// model_path does, through the engine that
-        holds the checkpoint; a bare base_model has no engine behind it."""
+        """A sampler names its owning model: a tinker:// model_path does, through the engine that
+        holds the checkpoint. A bare base_model is a base-model sampler when the engine serves that
+        base model; the engine's verdict (400 when it does not) is the answer."""
         if not store.exists(request.session_id):
             raise HTTPException(status_code=404, detail=f"Session not found: {request.session_id}")
-        if not request.model_path:
-            if request.base_model:
-                raise HTTPException(status_code=400, detail=BASE_MODEL_SAMPLING_UNSUPPORTED)
+        if not request.model_path and not request.base_model:
             raise HTTPException(status_code=400, detail="Provide sampling_session_id or a tinker:// model_path")
         engine = gateway.registry.only()
         if engine is None:
             raise HTTPException(status_code=503, detail="no engine registered")
+        if not request.model_path and not engine.base_model_sampling:
+            raise HTTPException(status_code=400, detail=BASE_MODEL_SAMPLING_UNSUPPORTED)
+        ask = {"model_path": request.model_path} if request.model_path else {"base_model": request.base_model}
         try:
-            resp = await gateway.engine_call(engine, "POST", "/api/v1/resolve_sampler_target", {"model_path": request.model_path})
+            resp = await gateway.engine_call(engine, "POST", "/api/v1/resolve_sampler_target", ask)
         except EngineUnreachable as exc:
             raise HTTPException(status_code=503, detail=f"engine {engine.name} unreachable: {exc}") from exc
         if resp.status != 200:   # the engine's verdict on the path: 404 unknown, 425 still saving, 400 malformed
@@ -510,8 +512,11 @@ def _register(registry: Registry, body: bytes, path: str) -> Reply:
         gpus = row["gpus"]
         if gpus is not None and not (isinstance(gpus, list) and all(isinstance(g, int) for g in gpus)):
             raise TypeError("gpus must be a list of ints or null")
+        base_model_sampling = row["base_model_sampling"]
+        if not isinstance(base_model_sampling, bool):
+            raise TypeError("base_model_sampling must be a bool")
         registry.register(name=row["name"], backend=row["backend"], gpus=gpus,
-                          socket=row["socket"], pid=int(row["pid"]))
+                          socket=row["socket"], pid=int(row["pid"]), base_model_sampling=base_model_sampling)
     except (orjson.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         return _error(400, f"bad registration: {type(exc).__name__}: {exc}", path)
     except RegistryConflict as exc:
