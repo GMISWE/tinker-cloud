@@ -57,6 +57,7 @@ from torch.distributed.tensor import DTensor, distribute_tensor
 
 from ...checkpoints.interchange import ADAPTER_WEIGHTS_FILE, HF_ADAPTER_DIRNAME
 from ...models.requests import AdamParams, OptimParams
+from ...utils.model_config import declared_mtp_layers, read_raw_hf_config
 from .adapter import OPTIMIZER_DIRNAME, SHARD_KEYS, STATE_KEYS, peft_key, read_optimizer_state, write_optimizer_state, write_peft_adapter
 from .converter import Batch
 from .errors import NonFiniteGradNorm, StateMismatch
@@ -117,9 +118,12 @@ class AutomodelWorker:
             # bf16 LoRA weights would round away small AdamW updates
             lora_dtype=torch.float32,
         )
+        # MTP layers train an auxiliary loss this backend never computes (the loss reads
+        # .logits) and Tinker adapts none of them: build none.
+        no_mtp = {"num_nextn_predict_layers": 0} if declared_mtp_layers(read_raw_hf_config(self.base_model)) else {}
         self.model = NeMoAutoModelForCausalLM.from_pretrained(
             self.base_model, distributed_setup=distributed_setup, peft_config=peft,
-            torch_dtype=torch.bfloat16, use_liger_kernel=False)
+            torch_dtype=torch.bfloat16, use_liger_kernel=False, **no_mtp)
         self.lora_params = [(n, p) for n, p in self.model.named_parameters() if p.requires_grad]
         _check_targets(self.lora_params, self.lora.target_modules)
         self.lora_modules = [m for m in self.model.modules() if isinstance(m, LinearLoRA)]
