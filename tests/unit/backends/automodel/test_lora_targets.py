@@ -17,7 +17,7 @@ from tinkercloud.training.backends.automodel.peft import SlicedLinearLoRA, apply
 from tinkercloud.training.models.requests import LoraConfig  # noqa: E402
 from tinkercloud.training.utils.model_config import read_raw_hf_config  # noqa: E402
 
-MODELS = ("Qwen/Qwen3.5-9B-Base", "Qwen/Qwen3-8B")
+MODELS = ("Qwen/Qwen3.5-9B-Base", "Qwen/Qwen3-8B", "meta-llama/Llama-3.1-8B")
 FLAGS = [(True, False), (False, True), (True, True)]   # (train_attn, train_mlp)
 # modules Tinker's counts leave out
 NOT_ADAPTED = ("in_proj_b", "in_proj_a", "lm_head", "visual", "mtp")

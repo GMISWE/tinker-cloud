@@ -97,6 +97,9 @@ def test_qwen3_5_lora_trains_and_serves_through_the_rank_3r_export(caplog, tmp_p
     asyncio.run(go())
     sizes = [int(n) for n in re.findall(r"LoRA (\d+) elements", caplog.text)]
     ranks = [int(n) for n in re.findall(r"max LoRA rank (\d+)", caplog.text)]
+    for r in caplog.records:   # the backend's own lines: the element count and the rank vLLM boots at
+        if re.search(r"LoRA \d+ elements|max LoRA rank \d+", r.getMessage()):
+            print("backend log:", r.getMessage())
     print(f"LoRA elements {sizes}, vLLM max LoRA rank {ranks}")
     assert sizes == [TINKER_ELEMENTS] == [346_030_080]
     assert ranks == [512]   # the smallest rank vLLM 0.29 accepts that holds the rank-384 export
