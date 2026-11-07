@@ -47,7 +47,7 @@ import ray
 import torch
 import torch.distributed as dist
 from nemo_automodel import NeMoAutoModelForCausalLM
-from nemo_automodel.components._peft.lora import LinearLoRA, PeftConfig
+from nemo_automodel.components._peft.lora import LinearLoRA
 from nemo_automodel.components.distributed.config import DistributedSetup
 from nemo_automodel.components.distributed.mesh import ParallelismSizes
 from nemo_automodel.components.training.utils import clip_grad_norm
@@ -57,12 +57,14 @@ from torch.distributed.tensor import DTensor, distribute_tensor
 
 from ...checkpoints.interchange import ADAPTER_WEIGHTS_FILE, HF_ADAPTER_DIRNAME
 from ...models.requests import AdamParams, OptimParams
-from ...utils.model_config import declared_mtp_layers, read_raw_hf_config
-from .adapter import OPTIMIZER_DIRNAME, SHARD_KEYS, STATE_KEYS, peft_key, read_optimizer_state, write_optimizer_state, write_peft_adapter
+from ...utils.model_config import read_raw_hf_config
+from .adapter import (OPTIMIZER_DIRNAME, SHARD_KEYS, STATE_KEYS, from_peft, peft_key, read_optimizer_state,
+                      write_optimizer_state, write_peft_adapter)
 from .converter import Batch
 from .errors import NonFiniteGradNorm, StateMismatch
 from .losses import compute_loss
 from .lora import LoraSpec
+from .peft import build_overrides, lora_in_automodel, peft_config
 
 OptimState = Dict[str, torch.Tensor]   # one parameter's state in the tenant's family (adapter.STATE_KEYS)
 
@@ -110,20 +112,11 @@ class AutomodelWorker:
                                 world_size=self.world_size, device_id=device)
         distributed_setup = DistributedSetup.build(
             "fsdp2", ParallelismSizes(dp_size=self.world_size), world_size=self.world_size)
-        peft = PeftConfig(
-            target_modules=[f"*.{m}" for m in self.lora.target_modules],
-            dim=self.lora.rank,
-            alpha=self.lora.alpha,
-            dropout=self.lora.dropout,
-            # bf16 LoRA weights would round away small AdamW updates
-            lora_dtype=torch.float32,
-        )
-        # MTP layers train an auxiliary loss this backend never computes (the loss reads
-        # .logits) and Tinker adapts none of them: build none.
-        no_mtp = {"num_nextn_predict_layers": 0} if declared_mtp_layers(read_raw_hf_config(self.base_model)) else {}
-        self.model = NeMoAutoModelForCausalLM.from_pretrained(
-            self.base_model, distributed_setup=distributed_setup, peft_config=peft,
-            torch_dtype=torch.bfloat16, use_liger_kernel=False, **no_mtp)
+        with lora_in_automodel(self.lora):
+            self.model = NeMoAutoModelForCausalLM.from_pretrained(
+                self.base_model, distributed_setup=distributed_setup, peft_config=peft_config(self.lora),
+                torch_dtype=torch.bfloat16, use_liger_kernel=False,
+                **build_overrides(read_raw_hf_config(self.base_model)))
         self.lora_params = [(n, p) for n, p in self.model.named_parameters() if p.requires_grad]
         _check_targets(self.lora_params, self.lora.target_modules)
         self.lora_modules = [m for m in self.model.modules() if isinstance(m, LinearLoRA)]
@@ -367,8 +360,11 @@ class AutomodelWorker:
         Collective: call it on all ranks at once."""
         self._require_tenant(tenant)
         family = self.tenant_lora[tenant].optimizer
-        weights = load_file(str(Path(adapter_dir) / ADAPTER_WEIGHTS_FILE))
-        self._require_keys(weights, "adapter")
+        try:
+            weights = from_peft(load_file(str(Path(adapter_dir) / ADAPTER_WEIGHTS_FILE)),
+                                [n for n, _ in self.lora_params], self.tenant_lora[tenant])
+        except ValueError as e:
+            raise StateMismatch(f"adapter: {e}") from e
         saved = None if optimizer_dir is None else read_optimizer_state(Path(optimizer_dir))
         if saved is not None:
             saved_family, state = saved

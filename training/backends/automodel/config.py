@@ -15,6 +15,15 @@ from ..env_config import EnvConfig
 VLLM_MAX_LORA_RANKS = (1, 8, 16, 32, 64, 128, 256, 320, 512)
 
 
+def vllm_lora_rank(rank: int) -> int:
+    """The smallest --max-lora-rank vLLM accepts that holds an adapter of `rank`.
+    Raises ValueError above the largest."""
+    for accepted in VLLM_MAX_LORA_RANKS:
+        if accepted >= rank:
+            return accepted
+    raise ValueError(f"vLLM serves LoRA ranks up to {VLLM_MAX_LORA_RANKS[-1]}, not {rank}")
+
+
 class AutomodelConfig(EnvConfig):
     train_gpus: int = Field(ge=1, description="FSDP2 ranks (one GPU each) per training group")
     max_loras: int = Field(ge=1, description="vLLM --max-loras: adapters resident on the GPU at once")
