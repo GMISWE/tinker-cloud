@@ -336,8 +336,9 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
                     # experts, separate gate and up; matches nothing on a dense model.
                     "experts_shared_outer_loras": True,
                     "experts_shared_outer_separate_gate_up": True,
-                    # Tinker's attention LoRA: separate q, k, v adapters on the
-                    # fused linear_qkv (its per-rank attention count decodes so)
+                    # Tinker's attention LoRA: separate q, k, v adapters on the fused
+                    # linear_qkv (the attention term of the cookbook's
+                    # hyperparam_utils.get_lora_param_count decodes to four adapters)
                     "split_qkv_adapters": True,
                     "dim": lora_config.get("rank", 8),
                     "alpha": lora_config.get("alpha") or lora_config.get("rank", 8),
@@ -382,7 +383,8 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
                 "moe_router_load_balancing_type": "none",
                 "moe_router_bias_update_rate": 0.0,
                 # NeMo RL assigns these over the bridge's provider: a model with
-                # experts keeps the gpt-oss provider's (gpt_oss_bridge.py)
+                # experts keeps the gpt-oss provider's (gpt_oss_bridge.py:69-70);
+                # unverified for the other MoE families _num_experts recognises
                 "moe_permute_fusion": num_experts > 0,
                 "moe_enable_deepep": False,
                 "moe_token_dispatcher_type": "alltoall" if num_experts else "allgather",
@@ -391,8 +393,9 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
                 "apply_rope_fusion": True,
                 "bias_activation_fusion": True,
                 "defer_fp32_logits": self.cfg.megatron_logprob_chunk_size is not None,
-                # required by NeMo RL's Megatron setup; its worker drives train() itself
-                # and never reads it
+                # Megatron-Bridge's scheduler takes its decay horizon from it when
+                # lr_decay_iters is None (training/config.py:1502) and needs it > 0;
+                # the constant schedule here makes the value itself inert
                 "train_iters": 1_000_000,
                 "peft": meg_peft,
                 "optimizer": {

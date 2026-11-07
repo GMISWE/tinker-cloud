@@ -270,7 +270,8 @@ spec:
     command: [sleep, infinity]
     # py-spy dump / ray stack attach to non-child processes (Ray workers);
     # the runtime's default capability set omits it and the host's Yama
-    # ptrace_scope=1 then refuses the attach
+    # ptrace_scope=1 then refuses the attach (observed: py-spy dump on a Ray
+    # worker fails with EACCES)
     securityContext: {capabilities: {add: [${POD_CAPS// /, }]}}
     env:
     - {name: PYTHONUNBUFFERED, value: "1"}

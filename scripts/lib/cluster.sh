@@ -79,7 +79,7 @@ PYEOF"
 refuse_if_gpus_busy() {
   local used
   [ "${FORCE:-0}" = 1 ] && return 0
-  # an idle GPU can read a few MiB with no process on it; pod_rotate_server.sh drains to < 500 MiB
+  # an idle H100 with no process on it read 4 MiB (observed 2026-11-06); pod_rotate_server.sh drains to < 500 MiB
   used=$(EX "nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | awk '\$1>=500' | wc -l") \
     || { echo "ERROR: could not read GPU memory on $POD" >&2; exit 1; }
   if [ "$used" != 0 ]; then

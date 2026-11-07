@@ -30,9 +30,11 @@ require_tunnel
 POD="${POD:?set POD (scripts/pod_state.sh lists the pods)}"
 BACKEND="${BACKEND:?set BACKEND (the backend this pod serves, e.g. nemo_rl)}"
 GPUS="${GPUS:-4}"
-# nemo_rl's server shares the Ray head's pod and versions, so it connects as a driver: the
-# client proxy forks a per-client server mid-gRPC and the child can abort (ev_epoll1_linux.cc
-# "Check failed: next_worker->state == KICKED"), failing the server's start.
+# nemo_rl's server shares the Ray head's pod and versions, so it connects as a driver. Through
+# the client proxy its start failed intermittently: the per-client server aborted with
+# ev_epoll1_linux.cc "Check failed: next_worker->state == KICKED" (ray_client_server.err,
+# observed 2026-11-06, twice through one proxy). The cause, a fork while the proxy's threads
+# are inside gRPC, is a hypothesis.
 RAY_ADDR="ray://localhost:10001"
 [ "$BACKEND" = nemo_rl ] && RAY_ADDR=auto
 SERVER_LOG="/data/${LOG_NAME}.log"
