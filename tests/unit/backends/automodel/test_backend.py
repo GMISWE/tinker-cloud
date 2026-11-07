@@ -243,7 +243,7 @@ def creatable(monkeypatch):
     monkeypatch.setattr(mod, "TrainingGroup", Group)
     monkeypatch.setattr(mod, "SamplerGroup", Sampler)
     monkeypatch.setattr(mod, "sweep_leftovers", lambda: 0)
-    monkeypatch.setattr(mod, "read_raw_hf_config", lambda base_model: {})
+    monkeypatch.setattr(mod, "read_raw_hf_config", lambda base_model: {"model_type": "qwen3"})
     monkeypatch.setattr(mod, "classification_spec", lambda raw: None)
     monkeypatch.setattr(mod, "model_context_length", lambda raw: 2048)
     tokenizers = types.SimpleNamespace(from_pretrained=lambda base_model: Tokenizer())
@@ -869,12 +869,13 @@ def test_the_leftover_sweep_runs_once_before_a_base_sampler_boots(monkeypatch, t
 
 
 @pytest.mark.parametrize("config, reason", [
-    ({"hybrid_override_pattern": "M*", "max_position_embeddings": 64}, "hybrid_override_pattern"),
+    ({"model_type": "nemotron_h", "max_position_embeddings": 64}, "declares no layer_types"),
     ({"model_type": "llama"}, "context"),
 ])
 def test_a_base_model_the_sampler_cannot_boot_on_is_refused_at_the_check(tmp_path, config, reason):
-    """check_base_model (the 400 at create_sampling_session) reads what base_model_handle
-    reads to boot the vLLM, so a model it cannot boot on is refused there, not at the first sample."""
+    """check_base_model (the 400 at create_sampling_session) reads the config fields
+    base_model_handle reads to boot the vLLM, so a model whose config cannot boot one is
+    refused there, not at the first sample."""
     (tmp_path / "config.json").write_text(json.dumps(config))
     with pytest.raises(ValueError, match=f"is not served: .*{reason}"):
         asyncio.run(AutomodelBackend(overrides=CONFIG).check_base_model(str(tmp_path)))

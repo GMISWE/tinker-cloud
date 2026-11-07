@@ -141,7 +141,7 @@ class Harness:
 
     # the fake engine on its own socket ("" = engine_socket)
     async def register(self, name: str = "fake", socket: str = "", pid: int = 4242,
-                       base_model_sampling: bool = False) -> httpx.Response:   # as every backend but automodel
+                       base_model_sampling: bool = False) -> httpx.Response:   # as the fake without base_models
         return await self.engines.post("/engines/register", json={
             "name": name, "backend": "fake", "gpus": [], "socket": socket or self.engine_socket, "pid": pid,
             "base_model_sampling": base_model_sampling})

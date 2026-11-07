@@ -88,10 +88,10 @@ def test_in_proj_qkv_slices_are_independent_lora_pairs():
             assert p.grad is None or torch.count_nonzero(p.grad) == 0
 
 
-@pytest.mark.parametrize("key", ["layers_block_type", "hybrid_override_pattern"])
-def test_a_layer_kind_key_with_no_mapping_is_refused(key):
-    with pytest.raises(ValueError, match=key):
-        model_lora(lora_spec(LoraConfig(rank=4), "adamw"), {key: ["mamba", "attention"]})
+@pytest.mark.parametrize("raw", [{"model_type": "jamba", "attn_layer_period": 8}, {"model_type": "nemotron_h"}, {}])
+def test_a_model_without_layer_types_outside_the_dense_families_is_refused(raw):
+    with pytest.raises(ValueError, match="declares no layer_types"):
+        model_lora(lora_spec(LoraConfig(rank=4), "adamw"), raw)
 
 
 def test_a_per_slice_lora_refuses_dora():
