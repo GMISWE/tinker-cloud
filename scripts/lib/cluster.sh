@@ -45,12 +45,42 @@ require_server_env() {
   done
 }
 
+# pod_log_errors <log on $POD>: the last exception line and the frames of our own code in that log,
+# with Ray's escaped "\n" undone; a full traceback is ~40 KB of mostly library frames. An exception line
+# starts its line (after an optional Ray "(actor pid=N) " prefix): a logged training sample quoting one does not.
+# worker_py <args>: the Megatron policy worker venv's python on $POD (where megatron.core/bridge import),
+# stdout and stderr merged, minus the ~40 import-time warning lines (Apex, tvm_ffi, modelopt) every start prints;
+# tracebacks pass through and the exit status is python's.
+WORKER_PY="${WORKER_PY:-/opt/ray_venvs/nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker/bin/python}"
+worker_py() {
+  EX "PYTHONWARNINGS=ignore $WORKER_PY $* 2>&1 | grep -vE '^\\[WARNING\\] Field|registry\\.py:85|info = core\\._register|Tried to register an operator|Duplicate registration|^  warnings\\.warn'; exit \${PIPESTATUS[0]}"
+}
+
+pod_log_errors() {
+  EX "python3 - '$1' <<'PYEOF'
+import re, sys
+s = open(sys.argv[1], errors='replace').read().replace('\\\\n', '\\n')
+errs = re.findall(r'(?m)^(?:\([^)\\n]*\) )?[A-Za-z_.]*(?:Error|Exception): [^\\n]{0,300}', s)
+if not errs:
+    sys.exit()
+ours = re.findall(r'File \"([^\"]*(?:/data/runs|tinker_cookbook|nemo_rl|megatron/bridge|/app/training)[^\"]*)\", line (\\d+), in (\\w+)', s)
+seen = []
+for f in ours:
+    if f not in seen and 'site-packages' not in f[0]:
+        seen.append(f)
+for f, n, fn in seen[-8:]:
+    print(f'  {f}:{n} {fn}')
+print('ERROR', errs[-1])
+PYEOF"
+}
+
 # refuse_if_gpus_busy: refuse when any GPU on $POD holds memory (a probe or model is resident);
 # FORCE=1 overrides. A test sharing GPUs with a run skews its memory readings or OOMs it.
 refuse_if_gpus_busy() {
   local used
   [ "${FORCE:-0}" = 1 ] && return 0
-  used=$(EX "nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | awk '\$1>0' | wc -l") \
+  # an idle GPU can read a few MiB with no process on it; pod_rotate_server.sh drains to < 500 MiB
+  used=$(EX "nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | awk '\$1>=500' | wc -l") \
     || { echo "ERROR: could not read GPU memory on $POD" >&2; exit 1; }
   if [ "$used" != 0 ]; then
     echo "ERROR: $used GPU(s) on $POD hold memory; a run is resident (FORCE=1 to share them):" >&2
