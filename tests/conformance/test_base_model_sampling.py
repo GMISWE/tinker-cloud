@@ -26,7 +26,7 @@ def base_server(request, tmp_path_factory):
 
 def test_a_base_model_sampler_scores_and_samples(base_server):
     client = tinker.ServiceClient(base_url=base_server.base_url, api_key=API_KEY)
-    sampler = client.create_sampling_client(base_model=BASE)
+    sampler = client.create_sampling_client(base_model=BASE).result()
     prompt = types.ModelInput.from_ints([5, 6, 7, 8])
     logprobs = sampler.compute_logprobs(prompt).result()
     assert len(logprobs) == 4 and logprobs[0] is None
@@ -42,6 +42,6 @@ def test_a_base_model_sampler_scores_and_samples(base_server):
 def test_a_base_model_the_engine_does_not_serve_is_refused_by_name(base_server):
     client = tinker.ServiceClient(base_url=base_server.base_url, api_key=API_KEY)
     with pytest.raises(Exception) as ei:
-        client.create_sampling_client(base_model="other/model").compute_logprobs(
+        client.create_sampling_client(base_model="other/model").result().compute_logprobs(
             types.ModelInput.from_ints([1, 2])).result()
     assert "other/model" in str(ei.value) and "not served" in str(ei.value)
