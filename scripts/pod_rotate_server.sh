@@ -3,6 +3,7 @@
 # boot with the given env -> verify bind in the NEW server's own log.
 #
 #   pod_rotate_server.sh <server-log-basename> [KEY=VAL ...]
+#   ENV_FILE=<file> pod_rotate_server.sh <log>   (KEY=VAL lines, # comments; arguments win)
 #
 # e.g. pod_rotate_server.sh q4b_S_guard_server \
 #        TINKERCLOUD_MILES_MULTILORA_SLOTS=8 TINKERCLOUD_MILES_COBATCH_MAX_SAMPLES=2048
@@ -15,7 +16,12 @@ set -euo pipefail
 
 LOG_NAME="${1:?usage: pod_rotate_server.sh <server-log-basename> [KEY=VAL ...]}"
 shift
-EXTRA_ENV=("$@")
+EXTRA_ENV=()
+if [ -n "${ENV_FILE:-}" ]; then
+  [ -f "$ENV_FILE" ] || { echo "ERROR: ENV_FILE $ENV_FILE does not exist"; exit 1; }
+  mapfile -t EXTRA_ENV < <(grep -vE '^\s*(#|$)' "$ENV_FILE")
+fi
+EXTRA_ENV+=("$@")
 
 # shellcheck source=scripts/lib/cluster.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE, EX, EX_TIMEOUT
