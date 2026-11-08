@@ -52,9 +52,8 @@ class RanksStranded(RuntimeError):
 
 
 class TrainingGroup:
-    def __init__(self, key: str, num_ranks: int):
+    def __init__(self, key: str):
         self.key = key
-        self.num_ranks = num_ranks
         self.name = f"{NAME_PREFIX}{key}"
         self.pg: Optional[Any] = None
         self.ranks: List[Any] = []
@@ -68,20 +67,20 @@ class TrainingGroup:
         from .worker import AutomodelWorker
 
         try:
-            pg = placement_group([{"GPU": 1, "CPU": 1}] * self.num_ranks, strategy="PACK", name=self.name)
+            pg = placement_group([{"GPU": 1, "CPU": 1}] * config.train_gpus, strategy="PACK", name=self.name)
             self.pg = pg
             ready, _ = await asyncio.to_thread(ray.wait, [pg.ready()], timeout=PG_READY_TIMEOUT_S)
             if not ready:
                 raise BackendError(
-                    f"{self.num_ranks} free GPUs for training group {self.key} were not placed within "
+                    f"{config.train_gpus} free GPUs for training group {self.key} were not placed within "
                     f"{PG_READY_TIMEOUT_S:.0f}s", backend="automodel", operation="create_model")
             worker = ray.remote(num_gpus=1, num_cpus=1)(AutomodelWorker)
             self.ranks = [
                 worker.options(
                     name=f"{self.name}-r{r}",
                     scheduling_strategy=PlacementGroupSchedulingStrategy(self.pg, placement_group_bundle_index=r),
-                ).remote(r, self.num_ranks, base_model, lora, config)
-                for r in range(self.num_ranks)
+                ).remote(r, base_model, lora, config)
+                for r in range(config.train_gpus)
             ]
             init_method = await self.ranks[0].rendezvous_address.remote()
             lora_numel = await self._all([w.setup.remote(init_method) for w in self.ranks])

@@ -223,7 +223,7 @@ def creatable(monkeypatch):
     started = []
 
     class Group(Ranks):
-        def __init__(self, key, num_ranks):
+        def __init__(self, key):
             super().__init__()
             self.key = key
             started.append(self)

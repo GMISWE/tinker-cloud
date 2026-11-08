@@ -55,14 +55,14 @@ def _step(activation_checkpointing: bool, batch) -> tuple[str, list[int], float]
     cls = ray.remote(num_gpus=1, num_cpus=1)(PeakWorker)
     config = AutomodelConfig(train_gpus=RANKS, max_loras=1, max_lora_rank=128, max_cpu_loras=1, micro_batch_rows=1,
                              activation_checkpointing=activation_checkpointing)
-    ranks = [cls.remote(r, RANKS, MODEL, LORA, config) for r in range(RANKS)]
+    ranks = [cls.remote(r, MODEL, LORA, config) for r in range(RANKS)]
     try:
         addr = ray.get(ranks[0].rendezvous_address.remote())
         ray.get([w.setup.remote(addr) for w in ranks])
         ray.get([w.add_tenant.remote("t", LORA, 1234) for w in ranks])
         ray.get([w.reset_peak.remote() for w in ranks])
         refs = [w.forward_backward.remote("t", s, None) for w, s in zip(ranks, shard(batch, RANKS))]
-        # a rank that runs out of memory leaves its peers inside a collective: watch every ref, stop at the first error
+        # watch every ref and stop at the first error, as TrainingGroup._all does
         pending = list(refs)
         while pending:
             done, pending = ray.wait(pending, num_returns=1, timeout=STEP_TIMEOUT_S)

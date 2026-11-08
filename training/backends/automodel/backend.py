@@ -238,7 +238,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
                           request_id: str) -> _Group:
         """A new training group with `model_id` as its first tenant. Runs
         under the key's membership lock."""
-        ranks = TrainingGroup(key, self.config.train_gpus)
+        ranks = TrainingGroup(key)
         logger.info("[%s] starting training group %s: %s, %d ranks, LoRA %s",
                     request_id, key, base_model, self.config.train_gpus, lora.signature)
         lora_numel = await ranks.start(base_model, lora, self.config)
@@ -416,7 +416,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         group = self._groups[key]
         if group.lost is not None:
             raise BackendError(f"training group {key} is lost: {group.lost}", backend=BACKEND, operation=pk.kind)
-        n = group.ranks.num_ranks
+        n = self.config.train_gpus
         batch = await asyncio.to_thread(coalesce, payloads, n)
         shards = shard(batch, n)
         clip = (clip_thresholds(batch.loss_fn.value, dict(pk.loss_fn_config))

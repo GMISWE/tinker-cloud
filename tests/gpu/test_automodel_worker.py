@@ -45,7 +45,7 @@ class Group:
         self.n = n
         config = AutomodelConfig(train_gpus=n, max_loras=1, max_lora_rank=8, max_cpu_loras=1,
                                  micro_batch_rows=micro_batch_rows, activation_checkpointing=activation_checkpointing)
-        self.ranks = [cls.remote(r, n, MODEL, LORA, config) for r in range(n)]
+        self.ranks = [cls.remote(r, MODEL, LORA, config) for r in range(n)]
         addr = ray.get(self.ranks[0].rendezvous_address.remote())
         self.trainable = ray.get([w.setup.remote(addr) for w in self.ranks])[0]
         for name, spec in (tenants or {"t": SEED}).items():
@@ -213,7 +213,7 @@ def test_one_rank_group_runs():
         grp.kill()
 
 
-@pytest.mark.xfail(strict=True, reason="bug: a 1-rank group (no FSDP2) holds bf16 LoRA params although "
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="bug: a 1-rank group (no FSDP2) holds bf16 LoRA params although "
                    "setup asks for lora_dtype=float32; 2 ranks hold float32. The fix removes this marker")
 def test_lora_parameters_train_in_float32():
     """setup() builds the adapter with lora_dtype=float32: bf16 factors would round away
@@ -225,7 +225,9 @@ def test_lora_parameters_train_in_float32():
     cls = ray.remote(num_gpus=1, num_cpus=1)(Probe)
     seen = {}
     for n in (1, 2):
-        ranks = [cls.remote(r, n, MODEL, LORA, 2) for r in range(n)]
+        config = AutomodelConfig(train_gpus=n, max_loras=1, max_lora_rank=8, max_cpu_loras=1, micro_batch_rows=2,
+                                 activation_checkpointing=False)
+        ranks = [cls.remote(r, MODEL, LORA, config) for r in range(n)]
         try:
             addr = ray.get(ranks[0].rendezvous_address.remote())
             ray.get([w.setup.remote(addr) for w in ranks])
