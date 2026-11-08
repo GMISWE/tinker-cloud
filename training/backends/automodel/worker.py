@@ -84,13 +84,11 @@ class _Slot:
 class AutomodelWorker:
     """Wrap with ray.remote(num_gpus=1, num_cpus=1) and place in the group's PG."""
 
-    def __init__(self, rank: int, world_size: int, base_model: str, lora: LoraSpec, config: AutomodelConfig):
+    def __init__(self, rank: int, base_model: str, lora: LoraSpec, config: AutomodelConfig):
         self.rank = rank
-        self.world_size = world_size
         self.base_model = base_model
         self.lora = lora
         self.config = config   # the server's settings; each rank reads the ones it uses
-        # world_size is the group's own rank count (it placed this many actors), not config.train_gpus
         self.live: Optional[str] = None       # the tenant in the model's LoRA tensors
         self.slots: Dict[str, _Slot] = {}     # every other tenant
         self.tenant_lora: Dict[str, LoraSpec] = {}   # each tenant's spec: the group's signature, its own dropout
@@ -111,9 +109,9 @@ class AutomodelWorker:
         device = torch.device("cuda", 0)
         torch.cuda.set_device(device)
         dist.init_process_group("nccl", init_method=init_method, rank=self.rank,
-                                world_size=self.world_size, device_id=device)
+                                world_size=self.config.train_gpus, device_id=device)
         distributed_setup = DistributedSetup.build(
-            "fsdp2", ParallelismSizes(dp_size=self.world_size), world_size=self.world_size,
+            "fsdp2", ParallelismSizes(dp_size=self.config.train_gpus), world_size=self.config.train_gpus,
             activation_checkpointing=self.config.activation_checkpointing)
         with lora_in_automodel(self.lora):
             self.model = NeMoAutoModelForCausalLM.from_pretrained(
@@ -424,7 +422,7 @@ class AutomodelWorker:
             res = compute_loss(logits, mb, clip)
             if backward:
                 # FSDP2 averages grads over ranks; this restores the sum (losses.py)
-                (res.loss * self.world_size).backward()
+                (res.loss * self.config.train_gpus).backward()
             w = min(mb.input_ids.shape[1], width)   # a micro-batch padded past the shard's width
             out["row_loss"][start:end] = res.row_loss.cpu()
             out["logprobs"][start:end, :w] = res.logprobs[:, :w].cpu()

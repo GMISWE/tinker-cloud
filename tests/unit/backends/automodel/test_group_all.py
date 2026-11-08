@@ -26,19 +26,19 @@ async def _never():
 
 
 def test_answers_come_back_in_rank_order():
-    g = TrainingGroup("k", 2)
+    g = TrainingGroup("k")
     assert asyncio.run(g._all([_answer(0, delay=0.02), _answer(1)])) == [0, 1]
 
 
 def test_the_same_verdict_on_every_rank_is_raised_as_itself():
-    g = TrainingGroup("k", 2)
+    g = TrainingGroup("k")
     with pytest.raises(Verdict, match="rank 0"):
         asyncio.run(g._all([_answer(raises=Verdict("rank 0"), delay=0.02), _answer(raises=Verdict("rank 1"))]))
 
 
 def test_a_rank_raising_beside_a_stranded_peer_is_reported_within_the_grace(monkeypatch, caplog):
     monkeypatch.setattr(group_mod, "RANK_GRACE_S", 0.1)
-    g = TrainingGroup("k", 3)
+    g = TrainingGroup("k")
     with caplog.at_level(logging.ERROR, logger=group_mod.__name__):
         with pytest.raises(RanksStranded, match=r"rank 1 raised .*cuDNN.*ranks \[0, 2\]") as ei:
             asyncio.run(asyncio.wait_for(g._all([_never(), _answer(raises=ValueError("cuDNN")), _never()]), 5))
