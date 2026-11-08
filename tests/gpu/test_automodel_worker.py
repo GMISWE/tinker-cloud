@@ -22,6 +22,7 @@ if torch.cuda.device_count() < 4:
     pytest.skip("needs >= 4 GPUs", allow_module_level=True)
 
 from tinkercloud.training.backends.automodel.adapter import OPTIMIZER_DIRNAME, OPTIMIZER_FILES, peft_key  # noqa: E402
+from tinkercloud.training.backends.automodel.config import AutomodelConfig  # noqa: E402
 from tinkercloud.training.backends.automodel.converter import coalesce, convert_request, row_sums, shard  # noqa: E402
 from tinkercloud.training.checkpoints import interchange as ci  # noqa: E402
 from tinkercloud.training.backends.automodel.lora import LoraSpec, lora_spec  # noqa: E402
@@ -42,7 +43,9 @@ class Group:
     def __init__(self, n, micro_batch_rows, tenants=None, activation_checkpointing=False):
         cls = ray.remote(num_gpus=1, num_cpus=1)(AutomodelWorker)
         self.n = n
-        self.ranks = [cls.remote(r, n, MODEL, LORA, micro_batch_rows, activation_checkpointing) for r in range(n)]
+        config = AutomodelConfig(train_gpus=n, max_loras=1, max_lora_rank=8, max_cpu_loras=1,
+                                 micro_batch_rows=micro_batch_rows, activation_checkpointing=activation_checkpointing)
+        self.ranks = [cls.remote(r, n, MODEL, LORA, config) for r in range(n)]
         addr = ray.get(self.ranks[0].rendezvous_address.remote())
         self.trainable = ray.get([w.setup.remote(addr) for w in self.ranks])[0]
         for name, spec in (tenants or {"t": SEED}).items():

@@ -1,6 +1,6 @@
 """AutomodelWorker activation checkpointing on Qwen3.5-9B-Base, LoRA rank 128, 4 ranks, one 16,384-token row
 per rank and per micro-batch: with checkpointing the training step completes; without it the same step runs out
-of GPU memory, or holds at least 10 GB more on some rank.
+of GPU memory, or holds at least 10 GiB more on some rank.
 
 Needs >= 4 GPUs, the Automodel training env and the model in the HF cache; starts its own Ray instance. Skipped
 elsewhere.
@@ -24,6 +24,7 @@ import torch  # noqa: E402
 if torch.cuda.device_count() < 4:
     pytest.skip("needs >= 4 GPUs", allow_module_level=True)
 
+from tinkercloud.training.backends.automodel.config import AutomodelConfig  # noqa: E402
 from tinkercloud.training.backends.automodel.converter import coalesce, convert_request, shard  # noqa: E402
 from tinkercloud.training.backends.automodel.lora import lora_spec  # noqa: E402
 from tinkercloud.training.backends.automodel.worker import AutomodelWorker  # noqa: E402
@@ -52,7 +53,9 @@ def _step(activation_checkpointing: bool, batch) -> tuple[str, list[int], float]
             return torch.cuda.max_memory_allocated()
 
     cls = ray.remote(num_gpus=1, num_cpus=1)(PeakWorker)
-    ranks = [cls.remote(r, RANKS, MODEL, LORA, 1, activation_checkpointing) for r in range(RANKS)]
+    config = AutomodelConfig(train_gpus=RANKS, max_loras=1, max_lora_rank=128, max_cpu_loras=1, micro_batch_rows=1,
+                             activation_checkpointing=activation_checkpointing)
+    ranks = [cls.remote(r, RANKS, MODEL, LORA, config) for r in range(RANKS)]
     try:
         addr = ray.get(ranks[0].rendezvous_address.remote())
         ray.get([w.setup.remote(addr) for w in ranks])

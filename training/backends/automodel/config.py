@@ -33,7 +33,8 @@ class AutomodelConfig(EnvConfig):
                                                     "token budget, so every rank runs the same number of steps")
     activation_checkpointing: bool = Field(description="recompute each decoder layer's activations in backward "
                                                        "(Automodel's full activation checkpointing) instead of "
-                                                       "holding them: a long row's activations fill a rank's GPU")
+                                                       "holding them: a long row's activations fill a rank's GPU; "
+                                                       "the cost is one extra forward pass per step")
 
     ENV = {
         "train_gpus": "AUTOMODEL_TRAIN_GPUS",
