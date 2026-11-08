@@ -1,5 +1,4 @@
-"""The gateway stays light: no Ray, torch, numpy, transformers or vllm, and no backend module (the factory's
-allow-list aside), after serving every route."""
+"""The gateway stays light: no Ray, torch, numpy, transformers or vllm, and no backend module, after serving every route."""
 import subprocess
 import sys
 from pathlib import Path

@@ -18,6 +18,23 @@ logger = logging.getLogger(__name__)
 # The key a server takes when TINKER_API_KEY is unset; production refuses to start with it.
 DEV_API_KEY = "tml-dev-key"
 
+# backend_type -> (module relative to training.backends, class name). Strings only, so the
+# gateway validates TINKERCLOUD_BACKEND without importing training.backends;
+# training.backends.factory imports the class.
+BACKEND_CLASSES = {
+    "miles": (".miles.backend", "MilesBackend"),
+    "nemo_rl": (".nemo_rl.backend", "NemoRLBackend"),
+    "verl": (".verl.backend", "VerlBackend"),
+    "megatron_bridge": (".megatron_bridge.backend", "MegatronBridgeBackend"),
+    "automodel": (".automodel.backend", "AutomodelBackend"),
+    "fake": (".fake.backend", "FakeBackend"),  # deterministic CPU backend for protocol tests
+}
+
+
+def split_api_keys(setting: str) -> FrozenSet[str]:
+    """The keys a TINKER_API_KEY setting names: comma-separated, each stripped, empty ones dropped."""
+    return frozenset(k.strip() for k in setting.split(",") if k.strip())
+
 
 class ModelInfo(BaseModel):
     """Information about a supported model."""
@@ -163,9 +180,8 @@ class AuthConfig(BaseModel):
 
     @validator("api_key", always=True)
     def validate_api_key(cls, v):
-        """Production needs a key and refuses the dev key, each key read as the auth code
-        reads the setting (comma-separated, stripped)."""
-        keys = [k.strip() for k in v.split(",") if k.strip()]
+        """Production needs a key and refuses the dev key among the keys the setting names."""
+        keys = split_api_keys(v)
         if not keys or DEV_API_KEY in keys:
             env = os.getenv("ENV", "development")
             if env == "production":
@@ -174,12 +190,12 @@ class AuthConfig(BaseModel):
         return v
 
     def parsed_keys(self) -> Tuple[Optional[FrozenSet[str]], Optional[str]]:
-        """The keys a request may carry (the setting, comma-separated, each stripped) and the one
+        """The keys a request may carry (split_api_keys of the setting) and the one
         key an engine and the gateway send each other: the first in sorted order, None when the
         setting names none. (None, None) when auth is off."""
         if not self.enabled:
             return None, None
-        keys = frozenset(k.strip() for k in self.api_key.split(",") if k.strip())
+        keys = split_api_keys(self.api_key)
         return keys, min(keys) if keys else None
 
 
@@ -228,7 +244,7 @@ class BackendConfig(BaseModel):
 
     backend_type: str = Field(
         default_factory=lambda: os.getenv("TINKERCLOUD_BACKEND", "miles"),
-        description="Training backend; see training.backends.factory.SUPPORTED_BACKENDS"
+        description="Training backend; one of BACKEND_CLASSES"
     )
     # JSON object; keys are the backend's config fields (training/backends/<b>/config.py),
     # applied over the environment. NeMo RL passes unknown keys through as raw
@@ -250,11 +266,10 @@ class BackendConfig(BaseModel):
 
     @validator("backend_type", always=True)
     def validate_backend_type(cls, v):
-        """Ensure backend type is supported (single allow-list lives in the factory)."""
-        from .backends.factory import SUPPORTED_BACKENDS
-        if v not in SUPPORTED_BACKENDS:
+        """Ensure backend type is supported (BACKEND_CLASSES)."""
+        if v not in BACKEND_CLASSES:
             raise ValueError(
-                f"Unsupported backend: {v!r}. Supported: {', '.join(SUPPORTED_BACKENDS)}"
+                f"Unsupported backend: {v!r}. Supported: {', '.join(BACKEND_CLASSES)}"
             )
         return v
 
