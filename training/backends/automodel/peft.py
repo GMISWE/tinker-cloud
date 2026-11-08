@@ -23,7 +23,7 @@ from torch import nn
 from ...utils.model_config import declared_mtp_layers
 from .lora import LoraSpec
 
-# bf16 LoRA weights would round away small AdamW updates
+# bf16 LoRA weights likely round away small AdamW updates (unmeasured)
 LORA_DTYPE = torch.float32
 
 
