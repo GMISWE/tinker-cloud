@@ -1,27 +1,19 @@
 """
 Backend factory — creates the appropriate TrainingBackend from configuration.
 
-`SUPPORTED_BACKENDS` is the one allow-list; the CLI flag, the config
-validator and the signature-contract test all import it from here.
+The allow-list is `config.BACKEND_CLASSES` (the config validator reads it there);
+`SUPPORTED_BACKENDS` is its names, for the CLI flag and the signature-contract test.
 """
 import importlib
 import logging
 from typing import Any, Dict, Optional, Type
 
+from ..config import BACKEND_CLASSES
 from .base import TrainingBackend
 
 logger = logging.getLogger(__name__)
 
-# backend_type -> (module relative to this package, class name)
-_BACKEND_CLASSES = {
-    "miles": (".miles.backend", "MilesBackend"),
-    "nemo_rl": (".nemo_rl.backend", "NemoRLBackend"),
-    "verl": (".verl.backend", "VerlBackend"),
-    "megatron_bridge": (".megatron_bridge.backend", "MegatronBridgeBackend"),
-    "automodel": (".automodel.backend", "AutomodelBackend"),
-    "fake": (".fake.backend", "FakeBackend"),  # deterministic CPU backend for protocol tests
-}
-SUPPORTED_BACKENDS = tuple(_BACKEND_CLASSES)
+SUPPORTED_BACKENDS = tuple(BACKEND_CLASSES)
 
 
 class BackendFactory:
@@ -35,7 +27,7 @@ class BackendFactory:
         backend's runtime dependencies are absent.
         """
         try:
-            module_name, class_name = _BACKEND_CLASSES[backend_type]
+            module_name, class_name = BACKEND_CLASSES[backend_type]
         except KeyError:
             raise ValueError(
                 f"Unknown backend: {backend_type!r}. "

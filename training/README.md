@@ -27,7 +27,7 @@ tinker SDK ──HTTP──▶ routers/ ──▶ services/ ──▶ backends/<
 | `test_data/` | The Miles boot-time fallback dataset (see its README). |
 
 Adding a backend: `backends/<name>/{backend,builder,converter,config}.py`,
-register in `factory._BACKEND_CLASSES`. Nothing under `core/`, `services/` or
+register in `config.BACKEND_CLASSES`. Nothing under `core/`, `services/` or
 `utils/` may import from a backend package (specs/DESIGN-NOTES D7).
 
 ## Endpoints

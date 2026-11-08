@@ -9,10 +9,6 @@ import sys
 import tempfile
 
 HEAVY = ("ray", "torch", "numpy", "transformers", "vllm")
-# The config's TINKERCLOUD_BACKEND check reads the allow-list from the factory, which imports
-# no backend; these come with it. Every other training.backends module is a backend's.
-BACKEND_SEAM = frozenset({"training.backends", "training.backends.base", "training.backends.env_config",
-                          "training.backends.factory"})
 MODEL = "model_fake_0123456789abcdef"
 # forwarded routes, each sent once with a JSON body and once with a proto body
 FORWARDED = [
@@ -85,8 +81,7 @@ async def main() -> int:
                                    content=orjson.dumps({"sampling_session_id": sampler, "prompt": {"tokens": [1]}}))
                 assert r.status_code == 200, r.text
             await app.state.gateway.stop()
-    loaded = sorted(m for m in sys.modules
-                    if m.split(".")[0] in HEAVY or (m.startswith("training.backends") and m not in BACKEND_SEAM))
+    loaded = sorted(m for m in sys.modules if m.split(".")[0] in HEAVY or m.startswith("training.backends"))
     if loaded:
         print("HEAVY:", " ".join(loaded))
         return 1
