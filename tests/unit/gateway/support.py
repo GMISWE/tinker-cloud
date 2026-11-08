@@ -34,7 +34,7 @@ def config(client: str = "aiohttp", **gateway: Any) -> TrainingConfig:
 class RecordingEngine:
     """An ASGI app standing in for an engine; each request is recorded with its headers folded to a dict and as
     the raw list (`raw_headers`, a duplicate name shows there). `/api/v1/echo` returns the body; `/api/v1/status/<n>` answers n
-    with a JSON error body; `/api/v1/stream/<mb>` streams that many MB; `/health` reports `model_ids`;
+    with a JSON error body; `/api/v1/stream/<mb>` streams that many MB; `/health` reports `model_ids` to the key;
     `resolve_sampler_target` answers `target`; `create_model` echoes the id header; `delete_model` of an
     id in `gone` is 404; anything else answers 200 JSON. `on_request` runs before each answer."""
 
@@ -77,8 +77,10 @@ class RecordingEngine:
                 await send({"type": "http.response.body", "body": chunk, "more_body": True})
             await send({"type": "http.response.body", "body": b""})
         elif path in ("/health", "/api/v1/health"):
+            # as the engine does: the ids only to the key, so a gateway call that loses its key sees null
+            model_ids = list(self.model_ids) if headers.get("x-api-key") == API_KEY else None
             await _json(send, 200, {"status": "healthy", "version": "t", "ray_initialized": False,
-                                    "active_training_clients": len(self.model_ids), "model_ids": list(self.model_ids), "futures_count": 0})
+                                    "active_training_clients": len(self.model_ids), "model_ids": model_ids, "futures_count": 0})
         elif path == "/api/v1/resolve_sampler_target":
             await _json(send, 200, self.target)
         elif path == "/api/v1/create_model":

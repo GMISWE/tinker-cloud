@@ -33,6 +33,12 @@ router = APIRouter(
 )
 
 
+def _visible_model_ids(request: Request, training_clients):
+    """Live model ids for a caller holding the API key; None for anyone else (probes)."""
+    auth = request.app.state.auth
+    return list(training_clients.keys()) if auth.is_valid(request.headers.get(auth.header_name)) else None
+
+
 @router.get("/health", response_model=HealthResponse)
 async def health_simple(request: Request):
     """Health check for k8s probes (backward compatibility)"""
@@ -45,7 +51,7 @@ async def health_simple(request: Request):
         timestamp=datetime.now().isoformat(),
         ray_initialized=ray.is_initialized(),
         active_training_clients=len(training_clients),
-        model_ids=list(training_clients.keys()),
+        model_ids=_visible_model_ids(request, training_clients),
         futures_count=TaskManager.inflight_count()
     )
 
@@ -62,7 +68,7 @@ async def health(request: Request):
         timestamp=datetime.now().isoformat(),
         ray_initialized=ray.is_initialized(),
         active_training_clients=len(training_clients),
-        model_ids=list(training_clients.keys()),
+        model_ids=_visible_model_ids(request, training_clients),
         futures_count=TaskManager.inflight_count()
     )
 
