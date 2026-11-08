@@ -241,7 +241,8 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         ranks = TrainingGroup(key, self.config.train_gpus)
         logger.info("[%s] starting training group %s: %s, %d ranks, LoRA %s",
                     request_id, key, base_model, self.config.train_gpus, lora.signature)
-        lora_numel = await ranks.start(base_model, lora, self.config.micro_batch_rows)
+        lora_numel = await ranks.start(base_model, lora, self.config.micro_batch_rows,
+                                       self.config.activation_checkpointing)
         try:
             await ranks.add_tenant(model_id, lora, seed)
         except BaseException:

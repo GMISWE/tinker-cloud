@@ -30,7 +30,7 @@ from tinkercloud.training.backends.automodel.backend import AutomodelBackend  # 
 from tinkercloud.training.core import routing  # noqa: E402
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
-CONFIG = dict(train_gpus=2, max_loras=2, max_lora_rank=8, max_cpu_loras=4, micro_batch_rows=2)
+CONFIG = dict(train_gpus=2, max_loras=2, max_lora_rank=8, max_cpu_loras=4, micro_batch_rows=2, activation_checkpointing=False)
 T1 = {"temperature": 1.0, "top_p": 1.0, "max_tokens": 8}
 
 

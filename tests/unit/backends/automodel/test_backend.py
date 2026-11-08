@@ -21,7 +21,7 @@ from tinkercloud.training.core import routing
 from tinkercloud.training.models.requests import AdamParams, Datum
 from tests.datums import ce_datum
 
-CONFIG = dict(train_gpus=2, max_loras=1, max_lora_rank=8, max_cpu_loras=1, micro_batch_rows=2)
+CONFIG = dict(train_gpus=2, max_loras=1, max_lora_rank=8, max_cpu_loras=1, micro_batch_rows=2, activation_checkpointing=False)
 ADAM = dict(beta1=0.9, beta2=0.95, eps=1e-8, weight_decay=0.0, grad_clip_norm=0.0)
 LORA = LoraSpec(rank=8, alpha=16, target_modules=("q_proj",), dropout=0.0, optimizer="adamw")
 VLLM = "http://vllm:1"
@@ -228,7 +228,7 @@ def creatable(monkeypatch):
             self.key = key
             started.append(self)
 
-        async def start(self, base_model, lora, micro_batch_rows):
+        async def start(self, base_model, lora, micro_batch_rows, activation_checkpointing):
             await asyncio.sleep(0.01)   # a real start awaits Ray: another create can run meanwhile
             return 42
 
