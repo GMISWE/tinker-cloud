@@ -17,7 +17,8 @@ def test_health_reports_the_engines_models_and_the_registry(tmp_path):
                 h.engine.model_ids = ["model_fake_0000000000000001", "model_fake_0000000000000002"]
                 h.store.add_model("s", "model_fake_0000000000000009", 0, "fake/tiny", "fake")   # in the registry, not on the engine
                 for path in ("/health", "/api/v1/health"):
-                    r = await h.sdk.get(path)
+                    assert (await h.sdk.get(path)).json()["model_ids"] is None   # a keyless probe sees no live model ids
+                    r = await h.sdk.get(path, headers={"X-API-Key": h.cfg.auth.api_key})
                     assert r.status_code == 200, r.text
                     doc = r.json()
                     assert doc["status"] == "healthy" and doc["model_ids"] == h.engine.model_ids and doc["active_training_clients"] == 2

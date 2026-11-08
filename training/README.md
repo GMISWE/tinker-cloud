@@ -46,7 +46,8 @@ against its response model before it is stored.
 | Ops | `GET /health`, `GET get_server_capabilities`, `POST cleanup_futures`, `POST telemetry` |
 
 All under `/api/v1/` except `/health`. Every route but `/health` and `telemetry`
-requires `X-API-Key`.
+requires `X-API-Key`. `/health` answers without it, but its `model_ids` is null
+unless the caller sent a valid API key.
 
 ## Running
 

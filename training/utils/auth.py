@@ -46,8 +46,10 @@ class APIKeyAuth:
         Raises:
             HTTPException: If authentication fails
         """
-        if not self.enabled:
-            return  # Authentication disabled
+        if self.is_valid(provided_key):
+            # Success - log at debug level only
+            logger.debug("API key validated successfully")
+            return
 
         if not provided_key:
             logger.warning("API key not provided in request")
@@ -56,15 +58,15 @@ class APIKeyAuth:
                 detail=f"Missing API key (provide via {self.header_name} header)"
             )
 
-        if provided_key not in self.valid_keys:
-            logger.warning("Invalid API key provided")   # no part of it: a mistyped key is mostly a real one
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid API key"
-            )
+        logger.warning("Invalid API key provided")   # no part of it: a mistyped key is mostly a real one
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid API key"
+        )
 
-        # Success - log at debug level only
-        logger.debug("API key validated successfully")
+    def is_valid(self, provided_key: Optional[str]) -> bool:
+        """The decision verify() makes, as a boolean that logs nothing (for routes that also serve keyless callers)."""
+        return not self.enabled or (bool(provided_key) and provided_key in self.valid_keys)
 
     def add_key(self, api_key: str) -> None:
         """

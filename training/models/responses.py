@@ -55,7 +55,7 @@ class HealthResponse(BaseModel):
     timestamp: Optional[str] = Field(default=None, description="Current server time")
     ray_initialized: Optional[bool] = Field(default=None, description="Ray cluster initialization status")
     active_training_clients: Optional[int] = Field(default=None, description="Number of active training clients")
-    model_ids: Optional[List[str]] = Field(default=None, description="List of active model IDs")
+    model_ids: Optional[List[str]] = Field(default=None, description="List of active model IDs; null unless the caller sent a valid API key")
     futures_count: Optional[int] = Field(default=None, description="Number of pending async operations")
     engines: Optional[List[Dict[str, Any]]] = Field(default=None, description="Gateway only: the engines it knows, {name, state}")
 
