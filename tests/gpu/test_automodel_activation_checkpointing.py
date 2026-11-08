@@ -62,7 +62,7 @@ def _step(activation_checkpointing: bool, batch) -> tuple[str, list[int], float]
         ray.get([w.add_tenant.remote("t", LORA, 1234) for w in ranks])
         ray.get([w.reset_peak.remote() for w in ranks])
         refs = [w.forward_backward.remote("t", s, None) for w, s in zip(ranks, shard(batch, RANKS))]
-        # watch every ref and stop at the first error, as TrainingGroup._all does
+        # watch every ref and stop at the first error
         pending = list(refs)
         while pending:
             done, pending = ray.wait(pending, num_returns=1, timeout=STEP_TIMEOUT_S)

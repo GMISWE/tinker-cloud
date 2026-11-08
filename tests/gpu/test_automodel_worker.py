@@ -40,11 +40,11 @@ class Group:
     """n ranks with the tenants {name: seed} or {name: (seed, LoraSpec)}
     added in order (the last one is live); one tenant "t" with LORA by
     default. Every op names its tenant."""
-    def __init__(self, n, micro_batch_rows, tenants=None, activation_checkpointing=False):
+    def __init__(self, n, micro_batch_rows, tenants=None):
         cls = ray.remote(num_gpus=1, num_cpus=1)(AutomodelWorker)
         self.n = n
         config = AutomodelConfig(train_gpus=n, max_loras=1, max_lora_rank=8, max_cpu_loras=1,
-                                 micro_batch_rows=micro_batch_rows, activation_checkpointing=activation_checkpointing)
+                                 micro_batch_rows=micro_batch_rows, activation_checkpointing=False)
         self.ranks = [cls.remote(r, MODEL, LORA, config) for r in range(n)]
         addr = ray.get(self.ranks[0].rendezvous_address.remote())
         self.trainable = ray.get([w.setup.remote(addr) for w in self.ranks])[0]
