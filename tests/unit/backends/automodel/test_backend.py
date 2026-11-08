@@ -228,7 +228,7 @@ def creatable(monkeypatch):
             self.key = key
             started.append(self)
 
-        async def start(self, base_model, lora, micro_batch_rows, activation_checkpointing):
+        async def start(self, base_model, lora, config):
             await asyncio.sleep(0.01)   # a real start awaits Ray: another create can run meanwhile
             return 42
 
