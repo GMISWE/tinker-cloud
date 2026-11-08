@@ -46,7 +46,7 @@ still hold their allocation), or kubelet rejects the pod.
 ```bash
 # docker target (k8s: same command via kubectl -n <namespace> exec <pod> -- bash -c '...')
 docker exec -d tinkercloud-nemorl bash -c '
-export TINKER_API_KEY=tml-dev-key TINKER_BASE_URL=http://localhost:8000
+export TINKER_API_KEY=$(cat /data/tinkercloud_api_key) TINKER_BASE_URL=http://localhost:8000
 python -m tinker_cookbook.recipes.math_rl.train \
   model_name=meta-llama/Llama-3.2-1B \
   group_size=16 \

@@ -54,6 +54,8 @@
 # HF token: HF_TOKEN_FILE=<path> (copied to /tmp/hf_token.txt in the target).
 # Unset, it is huggingface_hub's own token file when one exists; otherwise an
 # existing /tmp/hf_token.txt inside the target is reused (--code-only only).
+# API key: TINKER_API_KEY=<key>, else the one kept at /data/tinkercloud_api_key in the
+# target by an earlier deploy, else a random one written there (never tml-dev-key).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -306,7 +308,6 @@ spec:
     env:
     - {name: PYTHONUNBUFFERED, value: "1"}
     - {name: TOKENIZERS_PARALLELISM, value: "false"}
-    - {name: TINKER_API_KEY, value: tml-dev-key}
     - {name: TINKERCLOUD_BACKEND, value: $BACKEND}
     - {name: ALLOW_PARTIAL_BATCHES, value: "true"}
     - {name: HF_HOME, value: /data/.cache/huggingface}
@@ -354,7 +355,7 @@ EOF
     $DOCKER run -d --name "$CONTAINER" --init --gpus all --network host \
       --shm-size=32g -v "$DATA_DIR:/data" \
       -e PYTHONUNBUFFERED=1 -e TOKENIZERS_PARALLELISM=false \
-      -e TINKER_API_KEY=tml-dev-key -e TINKERCLOUD_BACKEND="$BACKEND" \
+      -e TINKERCLOUD_BACKEND="$BACKEND" \
       -e ALLOW_PARTIAL_BATCHES=true -e HF_HOME=/data/.cache/huggingface \
       -e CUDA_DEVICE_MAX_CONNECTIONS=1 -e NCCL_NVLS_ENABLE=0 \
       -e NCCL_IGNORE_DISABLED_P2P=1 \
@@ -448,6 +449,20 @@ EX "ray status >/dev/null 2>&1 || { ray start --head --num-gpus $GPUS --disable-
 ray status 2>/dev/null | grep GPU || true"
 
 # --- 6. server ---------------------------------------------------------------
+# The server listens on 0.0.0.0, so it never runs with the public dev key: it takes
+# TINKER_API_KEY from this shell, else the key an earlier deploy left in the target,
+# else a fresh random one. The key travels as a file (never on a command line).
+API_KEY_FILE=/data/tinkercloud_api_key
+if [ -n "${TINKER_API_KEY:-}" ]; then
+  (umask 077; printf '%s\n' "$TINKER_API_KEY" > "$TMP/api_key")
+  CP "$TMP/api_key" "$API_KEY_FILE"
+elif ! EX "test -s $API_KEY_FILE"; then
+  (umask 077; printf 'tml-%s\n' "$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')" > "$TMP/api_key")
+  CP "$TMP/api_key" "$API_KEY_FILE"
+  echo "    generated a random API key at $API_KEY_FILE in the target"
+fi
+EX "chmod 600 $API_KEY_FILE"
+
 echo "==> [6/6] starting API server (log: $SERVER_LOG)"
 # nemo_rl's server connects to the head as a driver; see pod_rotate_server.sh for why
 RAY_ADDR="ray://localhost:10001"
@@ -457,7 +472,7 @@ RAY_ADDR="ray://localhost:10001"
 EX_TIMEOUT "
 export PYTHONPATH=/app NUM_GPUS=$GPUS RAY_ADDRESS=$RAY_ADDR
 export HF_TOKEN=\$(cat /tmp/hf_token.txt) HF_HOME=/data/.cache/huggingface \
-       TINKER_API_KEY=tml-dev-key TINKERCLOUD_BACKEND=$BACKEND ALLOW_PARTIAL_BATCHES=true $BACKEND_ENV
+       TINKER_API_KEY=\$(cat $API_KEY_FILE) TINKERCLOUD_BACKEND=$BACKEND ALLOW_PARTIAL_BATCHES=true $BACKEND_ENV
 cd /app && setsid nohup python3 -m training > $SERVER_LOG 2>&1 < /dev/null &
 sleep 2; echo LAUNCHED"
 
@@ -469,6 +484,7 @@ for _ in $(seq 1 20); do
 done
 if [ "$CODE" = 200 ]; then
   echo "==> DONE: TinkerCloud healthy (target=$TARGET, source=$SOURCE, log=$SERVER_LOG)"
+  echo "    API key: $API_KEY_FILE in the target (clients: export TINKER_API_KEY=\$(cat $API_KEY_FILE))"
 else
   echo "==> FAILED health check; last server log lines:"
   EX "tail -20 $SERVER_LOG"
