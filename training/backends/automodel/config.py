@@ -31,6 +31,9 @@ class AutomodelConfig(EnvConfig):
     max_cpu_loras: int = Field(ge=1, description="vLLM --max-cpu-loras: adapters cached in host memory")
     micro_batch_rows: int = Field(ge=1, description="rows per forward/backward on a rank; a row count, not a "
                                                     "token budget, so every rank runs the same number of steps")
+    activation_checkpointing: bool = Field(description="recompute each decoder layer's activations in backward "
+                                                       "(Automodel's full activation checkpointing) instead of "
+                                                       "holding them: a long row's activations fill a rank's GPU")
 
     ENV = {
         "train_gpus": "AUTOMODEL_TRAIN_GPUS",
@@ -38,6 +41,7 @@ class AutomodelConfig(EnvConfig):
         "max_lora_rank": "AUTOMODEL_MAX_LORA_RANK",
         "max_cpu_loras": "AUTOMODEL_MAX_CPU_LORAS",
         "micro_batch_rows": "AUTOMODEL_MICRO_BATCH_ROWS",
+        "activation_checkpointing": "AUTOMODEL_ACTIVATION_CHECKPOINTING",
     }
 
     @model_validator(mode="after")

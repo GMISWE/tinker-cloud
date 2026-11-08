@@ -83,12 +83,14 @@ class _Slot:
 class AutomodelWorker:
     """Wrap with ray.remote(num_gpus=1, num_cpus=1) and place in the group's PG."""
 
-    def __init__(self, rank: int, world_size: int, base_model: str, lora: LoraSpec, micro_batch_rows: int):
+    def __init__(self, rank: int, world_size: int, base_model: str, lora: LoraSpec, micro_batch_rows: int,
+                 activation_checkpointing: bool):
         self.rank = rank
         self.world_size = world_size
         self.base_model = base_model
         self.lora = lora
         self.micro_batch_rows = micro_batch_rows
+        self.activation_checkpointing = activation_checkpointing
         self.live: Optional[str] = None       # the tenant in the model's LoRA tensors
         self.slots: Dict[str, _Slot] = {}     # every other tenant
         self.tenant_lora: Dict[str, LoraSpec] = {}   # each tenant's spec: the group's signature, its own dropout
@@ -111,7 +113,8 @@ class AutomodelWorker:
         dist.init_process_group("nccl", init_method=init_method, rank=self.rank,
                                 world_size=self.world_size, device_id=device)
         distributed_setup = DistributedSetup.build(
-            "fsdp2", ParallelismSizes(dp_size=self.world_size), world_size=self.world_size)
+            "fsdp2", ParallelismSizes(dp_size=self.world_size), world_size=self.world_size,
+            activation_checkpointing=self.activation_checkpointing)
         with lora_in_automodel(self.lora):
             self.model = NeMoAutoModelForCausalLM.from_pretrained(
                 self.base_model, distributed_setup=distributed_setup, peft_config=peft_config(self.lora),

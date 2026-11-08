@@ -30,7 +30,7 @@
 #            (TINKERCLOUD_BACKEND=automodel), health-checks :8000. GPUS=4.
 #            The backend's required knobs default here and are overridable:
 #            AUTOMODEL_TRAIN_GPUS=2 AUTOMODEL_MAX_LORAS=4 AUTOMODEL_MAX_LORA_RANK=64
-#            AUTOMODEL_MAX_CPU_LORAS=8 AUTOMODEL_MICRO_BATCH_ROWS=4.
+#            AUTOMODEL_MAX_CPU_LORAS=8 AUTOMODEL_MICRO_BATCH_ROWS=4 AUTOMODEL_ACTIVATION_CHECKPOINTING=0.
 #   Per-profile defaults (IMAGE, GPUS, NODE, BACKEND) are overridable by env vars;
 #   KUBECONFIG, NS and the node come from scripts/lib/cluster.sh.
 #   See specs/004-bionemo-classification/P5-TINKER-BACKEND.md.
@@ -137,7 +137,8 @@ case "$PROFILE" in
     # two tenants. MAX_LORA_RANK: the largest LoRA rank create_model accepts.
     BACKEND_ENV="AUTOMODEL_TRAIN_GPUS=${AUTOMODEL_TRAIN_GPUS:-2} AUTOMODEL_MAX_LORAS=${AUTOMODEL_MAX_LORAS:-4} \
 AUTOMODEL_MAX_LORA_RANK=${AUTOMODEL_MAX_LORA_RANK:-64} AUTOMODEL_MAX_CPU_LORAS=${AUTOMODEL_MAX_CPU_LORAS:-8} \
-AUTOMODEL_MICRO_BATCH_ROWS=${AUTOMODEL_MICRO_BATCH_ROWS:-4}"
+AUTOMODEL_MICRO_BATCH_ROWS=${AUTOMODEL_MICRO_BATCH_ROWS:-4} \
+AUTOMODEL_ACTIVATION_CHECKPOINTING=${AUTOMODEL_ACTIVATION_CHECKPOINTING:-0}"
     RUN_SERVER=1 ;;   # Ray head + `python3 -m training` (TINKERCLOUD_BACKEND=automodel)
   *) echo "unknown --profile $PROFILE (want: nemo_rl | bionemo | megatron_bridge | miles | automodel)"; exit 1 ;;
 esac

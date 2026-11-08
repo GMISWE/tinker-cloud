@@ -32,7 +32,7 @@ from tests.datums import ce_datum, rl_datum  # noqa: E402
 
 MODEL = "Qwen/Qwen3.5-9B-Base"
 RANK = 128
-CONFIG = dict(train_gpus=4, max_loras=2, max_lora_rank=RANK, max_cpu_loras=4, micro_batch_rows=1)
+CONFIG = dict(train_gpus=4, max_loras=2, max_lora_rank=RANK, max_cpu_loras=4, micro_batch_rows=1, activation_checkpointing=False)
 # Tinker's per-rank count for Qwen3.5-9B with train_attn and train_mlp (tinker_cookbook.hyperparam_utils)
 TINKER_ELEMENTS = RANK * (1_572_864 + 1_130_496)
 ADAM = dict(beta1=0.9, beta2=0.95, eps=1e-8, weight_decay=0.0, grad_clip_norm=1.0)

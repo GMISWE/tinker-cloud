@@ -58,7 +58,8 @@ class TrainingGroup:
         self.pg: Optional[Any] = None
         self.ranks: List[Any] = []
 
-    async def start(self, base_model: str, lora: LoraSpec, micro_batch_rows: int) -> int:
+    async def start(self, base_model: str, lora: LoraSpec, micro_batch_rows: int,
+                    activation_checkpointing: bool) -> int:
         """Place the bundles, start the ranks, build the model on each (no
         tenant yet); returns the LoRA element count of the full model. A
         failure stops what was started, then re-raises."""
@@ -79,7 +80,7 @@ class TrainingGroup:
                 worker.options(
                     name=f"{self.name}-r{r}",
                     scheduling_strategy=PlacementGroupSchedulingStrategy(self.pg, placement_group_bundle_index=r),
-                ).remote(r, self.num_ranks, base_model, lora, micro_batch_rows)
+                ).remote(r, self.num_ranks, base_model, lora, micro_batch_rows, activation_checkpointing)
                 for r in range(self.num_ranks)
             ]
             init_method = await self.ranks[0].rendezvous_address.remote()

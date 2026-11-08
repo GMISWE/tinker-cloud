@@ -46,7 +46,8 @@ from tests.datums import random_ce_datum  # noqa: E402
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 # two adapter versions coexist while a sample of the older one is in flight
-CONFIG = dict(train_gpus=2, max_loras=2, max_lora_rank=8, max_cpu_loras=4, micro_batch_rows=2)
+CONFIG = dict(train_gpus=2, max_loras=2, max_lora_rank=8, max_cpu_loras=4, micro_batch_rows=2,
+              activation_checkpointing=False)
 GREEDY = {"temperature": 0.0, "top_p": 1.0, "max_tokens": 8}
 LORA = {"rank": 8, "alpha": 16}
 ADAM = dict(beta1=0.9, beta2=0.95, eps=1e-8, weight_decay=0.0, grad_clip_norm=0.0)

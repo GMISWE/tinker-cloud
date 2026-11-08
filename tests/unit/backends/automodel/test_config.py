@@ -10,12 +10,14 @@ ENV = {
     "AUTOMODEL_MAX_LORA_RANK": "32",
     "AUTOMODEL_MAX_CPU_LORAS": "8",
     "AUTOMODEL_MICRO_BATCH_ROWS": "2",
+    "AUTOMODEL_ACTIVATION_CHECKPOINTING": "1",
 }
 
 
 def test_from_env_parses_strings():
     cfg = AutomodelConfig.from_env(environ=ENV)
     assert (cfg.train_gpus, cfg.max_loras, cfg.max_lora_rank, cfg.max_cpu_loras, cfg.micro_batch_rows) == (2, 4, 32, 8, 2)
+    assert cfg.activation_checkpointing is True
     assert cfg.source_of("max_lora_rank") == "env AUTOMODEL_MAX_LORA_RANK"
 
 
