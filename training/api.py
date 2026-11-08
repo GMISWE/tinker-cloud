@@ -99,9 +99,6 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
         swept = checkpoint_store.sweep_pending()
         if swept:
             logger.warning("Marked %d checkpoint save(s) interrupted by the last shutdown as failed", swept)
-        expired = checkpoint_store.sweep_expired()
-        if expired:
-            logger.info("Deleted %d expired checkpoint(s)", expired)
         application.state.checkpoint_sweeper = asyncio.create_task(checkpoint_store.sweep_forever())
         logger.info("Checkpoint base: %s", config_obj.storage.checkpoint_base)
 

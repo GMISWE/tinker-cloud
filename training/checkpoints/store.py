@@ -268,11 +268,9 @@ class CheckpointStore:
     def sweep_pending(self) -> int:
         """Boot: a save that was in flight when the process died never finished."""
         n = 0
-        for model_dir in sorted(self.metadata.checkpoints_dir.glob("*")):
-            if not model_dir.is_dir():
-                continue
-            for rec in self.records(model_dir.name):
-                if rec.get("status") == CheckpointStatus.PENDING.value:
+        for model_id in self.model_ids():
+            for rec in self.records(model_id):
+                if rec["status"] == CheckpointStatus.PENDING.value:
                     ref = CheckpointRef.make(rec["model_id"], rec["kind"], rec["name"])
                     self.fail(ref, "server restarted while the save was in flight")
                     n += 1
@@ -284,18 +282,19 @@ class CheckpointStore:
         now = datetime.now(timezone.utc)
         for model_id in self.model_ids():
             for rec in self.records(model_id):
-                if rec.get("status") != CheckpointStatus.PENDING.value and is_expired(rec, now):
+                if rec["status"] != CheckpointStatus.PENDING.value and is_expired(rec, now):
                     ref = CheckpointRef.make(rec["model_id"], rec["kind"], rec["name"])
                     if self.delete(ref):
                         n += 1
         return n
 
     async def sweep_forever(self) -> None:
+        """sweep_expired now, then every EXPIRED_SWEEP_INTERVAL_S."""
         while True:
-            await asyncio.sleep(EXPIRED_SWEEP_INTERVAL_S)
             n = self.sweep_expired()
             if n:
                 logger.info("Deleted %d expired checkpoint(s)", n)
+            await asyncio.sleep(EXPIRED_SWEEP_INTERVAL_S)
 
     # reads -------------------------------------------------------------------
 
@@ -306,7 +305,7 @@ class CheckpointStore:
         rec = self.get(ref)
         if rec is None:
             raise CheckpointNotFound(f"Checkpoint not found: {ref.uri}")
-        status = rec.get("status")
+        status = rec["status"]
         if status == CheckpointStatus.PENDING.value:
             raise CheckpointPending(f"Checkpoint is still being created: {ref.uri}")
         if status == CheckpointStatus.FAILED.value:
