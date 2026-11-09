@@ -7,7 +7,9 @@ Endpoints:
 - POST /api/v1/save_weights_external - Export weights in HF format (external_weights kind)
 - POST /api/v1/load_weights - Load a training checkpoint as a model's first request
 - GET  /api/v1/training_runs/{model_id}/checkpoints - List
+- GET  /api/v1/checkpoints - List every run's checkpoints (paginated)
 - DELETE .../checkpoints/{kind}/{name} - Delete one checkpoint of any kind
+- PUT  .../checkpoints/{kind}/{name}/ttl - Set or clear a checkpoint's expiry
 - GET  .../checkpoints/external_weights/{name}/external_weights_urls - Signed per-file URLs
 - GET  /api/v1/external_weights/{model_id}/{name}/{relpath} - Serve one signed file
 - POST /api/v1/weights_info - Get weights/checkpoint info from tinker path
@@ -18,7 +20,7 @@ from datetime import datetime, timezone
 from typing import Dict
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 
 from ..services.checkpoint_service import CheckpointService
@@ -44,6 +46,7 @@ from ..models.requests import (
     SaveWeightsExternalRequest,
     SaveWeightsRequest,
     SaveWeightsForSamplerRequest,
+    SetCheckpointTTLRequest,
     WeightsInfoRequest,
 )
 from ..models.responses import (
@@ -369,6 +372,20 @@ async def list_checkpoints(
     return {"checkpoints": service.list_checkpoints(model_id), "cursor": None}
 
 
+@router.get("/api/v1/checkpoints")
+async def list_user_checkpoints(
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    _: None = Depends(verify_api_key_dep),
+    service: CheckpointService = Depends(get_checkpoint_service),
+):
+    """Every training run's checkpoints, newest first, in the SDK's CheckpointsListResponse
+    shape with a cursor (list_user_checkpoints; `tinker checkpoint list` with no run id).
+    Owners are not tracked, so a key sees every run's checkpoints."""
+    page, total = service.list_all_checkpoints(limit=limit, offset=offset)
+    return {"checkpoints": page, "cursor": {"offset": offset, "limit": limit, "total_count": total}}
+
+
 # SDK CheckpointType -> store kind (the inverse of CHECKPOINT_TYPES)
 _KIND_OF_TYPE = {t: k for k, t in CHECKPOINT_TYPES.items()}
 _TYPES_HELP = "|".join(_KIND_OF_TYPE)
@@ -396,6 +413,22 @@ async def delete_checkpoint_typed(
     if kind not in _KIND_VALUES:
         raise HTTPException(status_code=400, detail=f"checkpoint path must be <{_KINDS_HELP}>/<id>")
     return _delete(service, model_id, CHECKPOINT_TYPES[CheckpointKind(kind)], checkpoint_id)
+
+
+@router.put("/api/v1/training_runs/{model_id}/checkpoints/{kind}/{checkpoint_id}/ttl", status_code=204)
+async def set_checkpoint_ttl(
+    model_id: str, kind: str, checkpoint_id: str, request: SetCheckpointTTLRequest,
+    _: None = Depends(verify_api_key_dep),
+    service: CheckpointService = Depends(get_checkpoint_service),
+):
+    """Expire a checkpoint ttl_seconds from now, or never (null); the background sweep
+    deletes it once expired. The SDK sends the checkpoint id `<kind>/<name>` unencoded."""
+    if kind not in _KIND_VALUES:
+        raise HTTPException(status_code=400, detail=f"checkpoint path must be <{_KINDS_HELP}>/<id>")
+    ref = CheckpointRef.make(model_id, CheckpointKind(kind), checkpoint_id)
+    if not service.set_ttl(ref, request.ttl_seconds):
+        raise HTTPException(status_code=404, detail=f"Checkpoint not found: {ref.uri}")
+    return Response(status_code=204)
 
 
 @router.delete("/api/v1/training_runs/{model_id}/checkpoints/{checkpoint_id}")

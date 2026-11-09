@@ -7,18 +7,21 @@ Endpoints:
 - POST /api/v1/unload_model - Unload model (Tinker SDK compatible alias for delete_model)
 - POST /api/v1/get_info - Get model metadata for tokenizer
 - GET /api/v1/get_tokenizer - Get tokenizer information
+- GET /api/v1/training_runs - List training runs (paginated)
 - GET /api/v1/training_runs/{model_id} - Get training run metadata
 """
 import logging
-from typing import Dict, Optional
+from typing import Dict, Literal, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
+from ..services.checkpoint_service import CheckpointService
 from ..services.model_service import ModelService
 from ..core.task_manager import TaskManager
 from ..core.dependencies import (
     verify_api_key_dep,
+    get_checkpoint_service,
     get_model_service, 
     get_metadata_storage,
     get_futures_storage, 
@@ -38,7 +41,9 @@ from ..models.responses import (
     UnloadModelResponse,
     GetInfoResponse,
     ModelData,
+    Cursor,
     TrainingRunResponse,
+    TrainingRunsResponse,
     TokenizerInfo,
     SpecialTokens,
 )
@@ -250,11 +255,40 @@ async def get_tokenizer(
         raise HTTPException(status_code=500, detail=f"Failed to load tokenizer: {str(e)}") from e
 
 
+def _training_run(metadata: Dict, checkpoints: CheckpointService) -> TrainingRunResponse:
+    """A stored run as the SDK's TrainingRun; its last checkpoints come from the store, so a
+    deleted or expired checkpoint is never reported as the one to resume from."""
+    return TrainingRunResponse(**{**metadata, **checkpoints.latest_checkpoints(metadata["training_run_id"])})
+
+
+@router.get("/api/v1/training_runs", response_model=TrainingRunsResponse)
+async def list_training_runs(
+    limit: int = Query(20, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    access_scope: Literal["owned", "accessible"] = "owned",
+    project_id: Optional[str] = None,
+    _: None = Depends(verify_api_key_dep),
+    checkpoints: CheckpointService = Depends(get_checkpoint_service),
+    metadata_storage: MetadataStorage = Depends(get_metadata_storage),
+):
+    """Every training run this server has recorded, live or deleted (a deleted run's
+    checkpoints still resume), newest first by creation so offsets stay stable while runs
+    train. Owners and projects are not tracked: every key sees every run, so access_scope
+    and project_id do not filter (as on the billing usage route)."""
+    runs = metadata_storage.list_training_runs(limit=10**9)
+    runs.sort(key=lambda m: (m.get("created_at") or "", m["training_run_id"]), reverse=True)
+    page = [_training_run(m, checkpoints) for m in runs[offset:offset + limit]]
+    return TrainingRunsResponse(
+        training_runs=page, cursor=Cursor(offset=offset, limit=limit, total_count=len(runs)),
+    )
+
+
 @router.get("/api/v1/training_runs/{model_id}", response_model=TrainingRunResponse)
 async def get_training_run(
     model_id: str,
     _: None = Depends(verify_api_key_dep),
     service: ModelService = Depends(get_model_service),
+    checkpoints: CheckpointService = Depends(get_checkpoint_service),
     metadata_storage: MetadataStorage = Depends(get_metadata_storage)
 ):
     """Get persistent training run metadata."""
@@ -263,6 +297,6 @@ async def get_training_run(
             model_id=model_id,
             metadata_storage=metadata_storage
         )
-        return TrainingRunResponse(**metadata)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
+    return _training_run(metadata, checkpoints)

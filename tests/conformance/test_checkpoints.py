@@ -1,4 +1,6 @@
 """Checkpoint listing, typed delete, and load_weights as a first request only."""
+import json
+
 import requests
 from tinker import types
 
@@ -155,3 +157,87 @@ def test_sampler_from_a_checkpoint_path_is_pinned_to_its_version(service_client,
               sampling_params=types.SamplingParams(max_tokens=2)).result()
     pinned = [t["pinned_version"] for t in server.trace() if t["op"] == "sample" and t["model_id"] == tc.model_id]
     assert pinned and pinned[-1] == 1, pinned
+
+
+def _rest(server):
+    import tinker
+    return tinker.RestClient(base_url=server.base_url, api_key=API_KEY)
+
+
+def _cli(server, *args, timeout=120):
+    import os
+    import subprocess
+    import sys
+    env = {**os.environ, "TINKER_BASE_URL": server.base_url, "TINKER_API_KEY": API_KEY}
+    return subprocess.run([sys.executable, "-m", "tinker.cli", "--format", "json", *args],
+                          env=env, capture_output=True, text=True, timeout=timeout)
+
+
+def test_list_user_checkpoints_pages_every_run(service_client, server):
+    rest = _rest(server)
+    a = service_client.create_lora_training_client(base_model="fake/tiny", rank=2)
+    b = service_client.create_lora_training_client(base_model="fake/tiny", rank=2)
+    pa = a.save_state("u1").result().path
+    pb = b.save_weights_for_sampler("u2").result().path
+
+    first = rest.list_user_checkpoints(limit=2).result()
+    assert [c.tinker_path for c in first.checkpoints] == [pb, pa]   # newest first, across runs
+    assert first.cursor.total_count >= 2 and all(c.size_bytes for c in first.checkpoints)
+
+    seen, offset = [], 0
+    while offset < first.cursor.total_count:
+        page = rest.list_user_checkpoints(limit=3, offset=offset).result()
+        seen += [c.tinker_path for c in page.checkpoints]
+        offset += 3
+    assert len(seen) == first.cursor.total_count == len(set(seen))
+    for q in ({"limit": 0}, {"limit": 1001}, {"offset": -1}):
+        r = requests.get(f"{server.base_url}/api/v1/checkpoints", params=q, headers={"X-API-Key": API_KEY}, timeout=30)
+        assert r.status_code == 422, (q, r.text)
+
+
+def test_set_checkpoint_ttl(service_client, server):
+    import time
+    rest = _rest(server)
+    tc = service_client.create_lora_training_client(base_model="fake/tiny", rank=2)
+    p = tc.save_state("t1").result().path
+
+    def expires():
+        [c] = [c for c in rest.list_checkpoints(tc.model_id).result().checkpoints if c.tinker_path == p]
+        return c.expires_at
+
+    assert expires() is None
+    rest.set_checkpoint_ttl_from_tinker_path(p, 7200).result()
+    assert 7100 < expires().timestamp() - time.time() <= 7200
+    rest.set_checkpoint_ttl_from_tinker_path(p, None).result()
+    assert expires() is None
+
+    url = f"{server.base_url}/api/v1/training_runs/{tc.model_id}/checkpoints"
+
+    def put(path, body):
+        return requests.put(f"{url}/{path}/ttl", json=body, headers={"X-API-Key": API_KEY}, timeout=30)
+
+    for bad in (59, 3599, 10 * 365 * 24 * 3600 + 1):
+        assert put("weights/t1", {"ttl_seconds": bad}).status_code == 422, bad
+    assert put("weights/nope", {"ttl_seconds": 3600}).status_code == 404
+    assert put("sampler_weights/t1", {"ttl_seconds": 3600}).status_code == 404   # the kinds are separate ids
+    assert put("bogus/t1", {"ttl_seconds": 3600}).status_code == 400
+
+    out = _cli(server, "checkpoint", "set-ttl", p, "--ttl", "3600")
+    assert out.returncode == 0, out.stderr
+    assert 3500 < expires().timestamp() - time.time() <= 3600
+
+
+def test_tinker_cli_checkpoint_list_and_download(service_client, server, tmp_path):
+    tc = service_client.create_lora_training_client(base_model="fake/tiny", rank=2)
+    p = tc.save_state("dl").result().path
+
+    out = _cli(server, "checkpoint", "list", "--limit", "0")
+    assert out.returncode == 0, out.stderr
+    assert p in {c["tinker_path"] for c in json.loads(out.stdout)["checkpoints"]}
+
+    # a training checkpoint downloads through a temporary external export whose ttl the CLI renews
+    out = _cli(server, "checkpoint", "download", p, "--output", str(tmp_path / "out"))
+    assert out.returncode == 0, out.stderr
+    assert any(f.is_file() for f in (tmp_path / "out").rglob("*"))
+    left = _rest(server).list_user_checkpoints(limit=1000).result().checkpoints
+    assert not [c for c in left if c.checkpoint_type == "external" and c.tinker_path.endswith("/download")]
