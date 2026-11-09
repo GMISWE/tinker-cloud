@@ -89,6 +89,10 @@ class CheckpointDeleteFailed(CheckpointError):
     status_code = 500
 
 
+class CheckpointExists(CheckpointError):
+    status_code = 400
+
+
 class CheckpointKindMismatch(CheckpointError):
     status_code = 400
 
@@ -164,6 +168,13 @@ class SaveTicket:
     step: Optional[int]
 
 
+@dataclass(frozen=True)
+class CheckpointSaveOptions:
+    ttl_seconds: Optional[int]
+    overwrite: bool
+    user_metadata: Optional[Dict[str, str]]
+
+
 def is_expired(record: Dict[str, Any], now: Optional[datetime] = None) -> bool:
     """Records written before ttl support carry no expires_at: never expire.
     expires_at is an aware UTC ISO string; `now` must be aware too."""
@@ -231,17 +242,23 @@ class CheckpointStore:
         kind: CheckpointKind,
         name: str,
         *,
+        options: CheckpointSaveOptions,
         persist: bool = True,
         weight_version: Optional[int] = None,
-        ttl_seconds: Optional[int] = None,
         optimizer_config: Dict[str, Any],
     ) -> SaveTicket:
-        """Record a pending save and hand back where to write. A name already
-        recorded for this model and kind is overwritten by the new save (the
-        API lets a client save twice under one name); its old counter value is
-        not reused. ``ttl_seconds`` sets ``expires_at``; None never expires.
-        ``optimizer_config`` is the model's optimizer family record."""
+        """Record a pending save and hand back where to write. An existing
+        live name is refused unless overwrite is true; its old counter value
+        is not reused when replaced. ``optimizer_config`` is the model's
+        optimizer family record."""
         ref = CheckpointRef.make(model_id, kind, name)
+        existing = self.get(ref)
+        exists = existing is not None and (
+            existing["status"] == CheckpointStatus.PENDING.value
+            or existing["status"] == CheckpointStatus.COMPLETED.value and not is_expired(existing)
+        )
+        if not options.overwrite and exists:
+            raise CheckpointExists(f"Checkpoint already exists: {ref.uri}")
         root = self.root(ref)
         step = self.next_step(model_id) if persist else None
         if persist:
@@ -252,7 +269,8 @@ class CheckpointStore:
             "model_id": ref.model_id, "kind": ref.kind.value, "name": ref.name,
             "status": CheckpointStatus.PENDING.value, "step": step, "ephemeral": not persist,
             "weight_version": weight_version, "error": None, "completed_at": None,
-            "expires_at": _expires_at(ttl_seconds), "optimizer_config": optimizer_config,
+            "expires_at": _expires_at(options.ttl_seconds), "user_metadata": options.user_metadata,
+            "optimizer_config": optimizer_config,
         })
         return SaveTicket(ref=ref, root=root, step=step)
 

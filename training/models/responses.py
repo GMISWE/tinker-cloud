@@ -360,8 +360,7 @@ CheckpointType = Literal["training", "sampler", "external"]
 class Checkpoint(BaseModel):
     """A checkpoint in the SDK's Checkpoint shape, plus `status` (an extension: the SDK
     ignores it). Every route that reports a checkpoint returns this model. Nothing is
-    published and checkpoints carry no user metadata here, so `public` and `user_metadata`
-    always hold the SDK's own defaults."""
+    published here, so `public` always holds the SDK's own default."""
     checkpoint_id: str = Field(..., description="<kind>/<name>")
     checkpoint_type: CheckpointType = Field(..., description="The SDK's CheckpointType")
     time: str = Field(..., description="Creation timestamp (ISO 8601)")
@@ -370,7 +369,7 @@ class Checkpoint(BaseModel):
     status: CheckpointStatus = Field(..., description="Save state")
     expires_at: Optional[str] = Field(..., description="Expiry (None = never expires)")
     public: Literal[False] = Field(default=False, description="Whether the checkpoint is public (never, here)")
-    user_metadata: None = Field(default=None, description="User metadata (none is recorded)")
+    user_metadata: Optional[Dict[str, str]] = Field(default=None, description="User-provided checkpoint metadata")
 
 
 class TrainingRunResponse(BaseModel):

@@ -4,7 +4,7 @@ Request models for the training API.
 This module defines Pydantic models for all API request payloads,
 providing validation and documentation.
 """
-from typing import Any, Dict, Iterable, List, Literal, Optional, Union
+from typing import Annotated, Any, Dict, Iterable, List, Literal, Optional, Union
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StrictInt, ValidationError, validator, model_validator
 
@@ -99,17 +99,22 @@ class UnloadModelRequest(BaseModel):
     type: str = Field(default="unload_model", description="Request type")
 
 
+# ttl bounds the SDK documents for checkpoint saves: 1 hour to 10 years.
+CheckpointTTL = Annotated[Optional[int], Field(ge=3600, le=10 * 365 * 24 * 3600)]
+
+
 class SaveWeightsRequest(BaseModel):
     """Request to save model weights."""
 
     model_id: str = Field(..., description="Model ID")
     path: Optional[str] = Field(default=None, description="Checkpoint name/path")
     seq_id: Optional[int] = Field(default=None, description="Per-model sequence number (idempotent retries)")
-
-
-# ttl bounds the SDK documents for save_weights_external: 1 hour to 10 years.
-EXTERNAL_TTL_MIN_S = 3600
-EXTERNAL_TTL_MAX_S = 10 * 365 * 24 * 3600
+    ttl_seconds: CheckpointTTL = Field(
+        default=None,
+        description="Checkpoint lifetime in seconds (None = never expires)",
+    )
+    overwrite: bool = Field(default=False, description="Replace an existing checkpoint with the same name")
+    user_metadata: Optional[Dict[str, str]] = Field(default=None, description="User-provided checkpoint metadata")
 
 
 class SaveWeightsExternalRequest(BaseModel):
@@ -118,8 +123,8 @@ class SaveWeightsExternalRequest(BaseModel):
     model_id: str = Field(..., description="Model ID")
     path: str = Field(..., min_length=1, description="Name of the external weights checkpoint")
     seq_id: Optional[int] = Field(default=None, description="Per-model sequence number (idempotent retries)")
-    ttl_seconds: Optional[int] = Field(
-        default=None, ge=EXTERNAL_TTL_MIN_S, le=EXTERNAL_TTL_MAX_S,
+    ttl_seconds: CheckpointTTL = Field(
+        default=None,
         description="Checkpoint lifetime in seconds (None = never expires)",
     )
     age_encryption_recipients: Optional[List[str]] = Field(
@@ -132,8 +137,8 @@ class SetCheckpointTTLRequest(BaseModel):
     """PUT .../checkpoints/<kind>/<name>/ttl (SDK set_checkpoint_ttl): expire
     ttl_seconds from now, or never when null. Same bounds as save_weights_external."""
 
-    ttl_seconds: Optional[int] = Field(
-        ..., ge=EXTERNAL_TTL_MIN_S, le=EXTERNAL_TTL_MAX_S,
+    ttl_seconds: CheckpointTTL = Field(
+        ...,
         description="Seconds until expiry (null = never expires)",
     )
 
@@ -393,6 +398,11 @@ class SaveWeightsForSamplerRequest(BaseModel):
     sampling_session_seq_id: Optional[int] = Field(default=None, description="Sampling session sequence ID for ephemeral saves")
     # the SDK (>= 0.38) always sends it; "snapshot" is its default (types/sampling_client_kind.py)
     kind: Literal["snapshot", "inflight"] = Field(default="snapshot", description="snapshot: fixed weights; inflight: the model's shared, moving weights")
+    ttl_seconds: CheckpointTTL = Field(
+        default=None,
+        description="Checkpoint lifetime in seconds (None = never expires)",
+    )
+    user_metadata: Optional[Dict[str, str]] = Field(default=None, description="User-provided checkpoint metadata")
 
 
 # ============= Updated Request Models (New Format) =============

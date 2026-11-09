@@ -4,12 +4,14 @@ store and never parse a tinker:// URI themselves."""
 from .store import (
     CheckpointDeleteFailed,
     CheckpointError,
+    CheckpointExists,
     CheckpointFailed,
     CheckpointKind,
     CheckpointKindMismatch,
     CheckpointNotFound,
     CheckpointPending,
     CheckpointRef,
+    CheckpointSaveOptions,
     CheckpointStatus,
     CheckpointStore,
     InvalidCheckpointPath,
@@ -18,7 +20,8 @@ from .store import (
 )
 
 __all__ = [
-    "CheckpointDeleteFailed", "CheckpointError", "CheckpointFailed", "CheckpointKind", "CheckpointKindMismatch",
-    "CheckpointNotFound", "CheckpointPending", "CheckpointRef", "CheckpointStatus",
-    "CheckpointStore", "InvalidCheckpointPath", "SaveTicket", "is_expired",
+    "CheckpointDeleteFailed", "CheckpointError", "CheckpointExists", "CheckpointFailed",
+    "CheckpointKind", "CheckpointKindMismatch", "CheckpointNotFound", "CheckpointPending",
+    "CheckpointRef", "CheckpointSaveOptions", "CheckpointStatus", "CheckpointStore",
+    "InvalidCheckpointPath", "SaveTicket", "is_expired",
 ]
