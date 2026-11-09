@@ -17,7 +17,7 @@ Endpoints:
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Dict
+from typing import Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse
@@ -320,13 +320,11 @@ async def _create_via_load(
     the model it made was deleted, and to another load naming the model, it is refused."""
     assert request.session_id is not None and request.model_seq_id is not None  # creates() checked both
     model_id = f"{request.session_id}:train:{request.model_seq_id}"
+    taken: Optional[DuplicateSeqId] = None   # another load, with another body, took the id first
     try:
         first = futures_storage.filed(model_id, CREATE_VIA_LOAD_SEQ_ID, "load_weights", request.dict())
-    except DuplicateSeqId as e:   # another load took the id first
-        if model_id in training_clients:
-            raise HTTPException(status_code=400, detail=f"Model {model_id} already exists: create-via-load creates it") from None
-        raise HTTPException(status_code=400, detail=f"Model {model_id} is taken by an earlier load_weights with another "
-                                                    f"body ({e.request_id}, {e.status}): load into a new model_seq_id") from None
+    except DuplicateSeqId as e:
+        first, taken = None, e
     if first is not None:
         if model_id in training_clients or (first.status == "pending" and not first.create_failed):
             return AsyncOperationResponse(request_id=first.request_id, model_id=model_id)   # made, or on its way
@@ -339,6 +337,9 @@ async def _create_via_load(
                                                     f"load into a new model_seq_id")
     if model_id in training_clients:
         raise HTTPException(status_code=400, detail=f"Model {model_id} already exists: create-via-load creates it")
+    if taken is not None:
+        raise HTTPException(status_code=400, detail=f"Model {model_id} is taken by an earlier load_weights with another "
+                                                    f"body ({taken.request_id}, {taken.status}): load into a new model_seq_id")
     ref = CheckpointRef.parse(request.path)           # 400 on a malformed path
     store.require(ref, kind=CheckpointKind.WEIGHTS)   # 404 / 425 / 500 / wrong kind, before the future exists
     source = metadata_storage.load_training_run(ref.model_id)   # written at every create, kept past unload
