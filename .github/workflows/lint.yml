@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+# both jobs only read the checkout
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-latest
