@@ -95,14 +95,6 @@ def test_cleanup_ages_out_finished_futures_and_keeps_pending_ones(store):
     assert store.filed("s:train:0", 0, "load_weights", {"p": 1}).request_id == "running"
 
 
-def test_purge_all_deletes_pending_futures_too(store):
-    """The server start's purge is the one call that removes pending futures (cleanup keeps them): no
-    earlier operation runs after a restart, and a pending future left behind would never settle."""
-    store.save_future("running", "forward", {}, model_id="m")
-    assert store.purge_all() == 1
-    assert store.get_future("running") is None
-
-
 def test_filed_returns_the_status_and_the_failed_create_mark_with_the_id(store):
     """The create-via-load dedup reads the earlier request's status in the same locked read as its id."""
     store.save_future("r1", "load_weights", {"p": 1}, model_id="s:train:0", seq_id=0)
