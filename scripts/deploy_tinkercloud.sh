@@ -78,7 +78,7 @@ done
 # Sets per-profile DEFAULTS; every one is overridable by the same-named env var.
 # shellcheck source=scripts/lib/cluster.sh
 # shellcheck disable=SC1091  # sourced by path at run time: KUBECONFIG, NS, DEFAULT_NODE
-. "$SCRIPT_DIR/lib/cluster.sh"   # KUBECONFIG, NS, kx, EX, EX_TIMEOUT, pod_cmd, ray_head, RAY_DRIVER_ADDRESS, TRUST_DOMAIN_LABEL
+. "$SCRIPT_DIR/lib/cluster.sh"   # KUBECONFIG, NS, kx, EX, EX_TIMEOUT, pod_cmd, ray_head, RAY_DRIVER_ADDRESS, TRUST_DOMAIN_LABEL, SERVER_PATTERN, SERVER_STOP
 BACKEND_ENV=""   # backend knobs exported to the server process (step 6)
 case "$PROFILE" in
   nemo_rl)
@@ -227,7 +227,7 @@ fi
 # caller did not set take the live server's value, not the profile default (a default
 # AUTOMODEL_TRAIN_GPUS=2 on an 8-GPU server silently halves the training group).
 if [ "$CODE_ONLY" = 1 ] && [ "$RUN_SERVER" = 1 ]; then
-  live_env=$(EX "for p in \$(pgrep -f 'python3 -m trainin[g]'); do tr '\0' '\n' < /proc/\$p/environ; done") \
+  live_env=$(EX "for p in \$(pgrep -f '$SERVER_PATTERN'); do tr '\0' '\n' < /proc/\$p/environ; done") \
     || { echo "ERROR: could not read the running server's environment on $TARGET"; exit 1; }
   if [ -z "$live_env" ]; then
     echo "==> --code-only: no server running; using the profile's layout"
@@ -363,7 +363,6 @@ EOF
 else
   echo "==> [1/6] --code-only: restarting server on existing $TARGET target"
   [ "$TARGET" = k8s ] && check_pod_caps
-  EX "pkill -f 'python3 -m trainin[g]' || true; sleep 8" || true
 fi
 
 # The policy admits, on every port, the pods of this pod's trust domain (Ray, NCCL bootstrap,
@@ -448,6 +447,10 @@ else
 fi
 
 # --- 4. in-container setup ---------------------------------------------------
+# A running server stops here, once: after every step that can fail without touching the target,
+# before setup replaces its code and packages and step 5 its Ray head. A RUN_SERVER=0 profile runs
+# no server.
+if [ "$RUN_SERVER" = 1 ]; then EX "$SERVER_STOP"; fi
 echo "==> [4/6] running in-container setup (profile=$PROFILE)"
 EX "PROFILE=$PROFILE MILES_REPO='${MILES_REPO:-}' MILES_REF='${MILES_REF:-}' bash /tmp/setup_container.sh"
 
@@ -467,8 +470,6 @@ fi
 
 # --- 5. ray head -------------------------------------------------------------
 echo "==> [5/6] ensuring Ray head is up"
-# the server stops before its head may be replaced (a full deploy onto a running pod keeps its server)
-EX "pkill -f 'python3 -m trainin[g]' || true; sleep 8"
 EX "$(ray_head ensure "$GPUS")"
 EX "ray status 2>/dev/null | grep GPU || true"
 

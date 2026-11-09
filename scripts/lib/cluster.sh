@@ -54,6 +54,14 @@ RAY_CLIENT_PORT=10001
 # The RAY_ADDRESS every backend's server takes: a driver on the pod's node, never a Ray Client.
 # shellcheck disable=SC2034  # read by the scripts that source this file
 RAY_DRIVER_ADDRESS=auto
+# The API server's process as `pgrep -f`/`pkill -f` (ERE) match it: a command line that starts with
+# a python of any name or path, with single-token interpreter flags (`-u`, `-Xdev`), running
+# `-m training` with or without arguments. The anchor leaves out the `bash -c "... python3 -m training ..."` launcher, which stays
+# alive as the server's parent, and every pgrep, pkill or shell whose command line holds the pattern.
+SERVER_PATTERN='^([^ ]*/)?python[0-9.]*( -[^ ]+)* -m training( |$)'
+# The pod command that stops the API server, if one runs.
+# shellcheck disable=SC2034  # read by the scripts that source this file
+SERVER_STOP="pkill -f '$SERVER_PATTERN' || true; sleep 8"
 
 # The pod side of this pod's Ray head: `ray_head state`, `ray_head ensure <gpus>` or
 # `ray_head recycle <gpus>`.
@@ -65,7 +73,7 @@ RAY_DRIVER_ADDRESS=auto
 # unless the old head is gone after the stop.
 # Starting makes the token when the pod has none, starts a token-mode head and stops its Ray
 # Client server: `ray start` starts one whenever grpc imports, on port 10001 unless named, and
-# refuses a port outside 1024-65535 (ray/scripts/scripts.py, `start`), while the head starts it
+# refuses a port outside 1024-65535 (ray/_private/parameter.py, `RayParams._check_usage`), while the head starts it
 # only for a non-zero port (ray/_private/node.py, `start_head_processes`). The deploy and rotate
 # scripts make every backend's server a driver (RAY_DRIVER_ADDRESS), so none uses it (miles, verl
 # and megatron_bridge are untested as drivers). A start fails unless the head started, the port is then
@@ -133,7 +141,7 @@ ray_head() { printf 'bash -c %q ray_head %q %q %q' "$RAY_HEAD_SH" "$RAY_AUTH_TOK
 # KEY=VAL in its own environment (read from /proc, not from the boot command).
 require_server_env() {
   local envs kv
-  envs=$(EX "p=\$(pgrep -f '^python3 -m trainin[g]' | head -1); [ -n \"\$p\" ] && tr '\0' '\n' < /proc/\$p/environ") \
+  envs=$(EX "p=\$(pgrep -f '$SERVER_PATTERN' | head -1); [ -n \"\$p\" ] && tr '\0' '\n' < /proc/\$p/environ") \
     || { echo "ERROR: no API server running on $POD" >&2; exit 1; }
   for kv in "$@"; do
     grep -qx -- "$kv" <<< "$envs" || {
