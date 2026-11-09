@@ -21,9 +21,9 @@ the bytes can never disagree about where the bytes are.
 Records live under MetadataStorage as ``<kind>--<name>.json`` per model. A
 save is ``pending`` between ``begin_save`` and ``complete``/``fail``; a read
 through ``require`` refuses anything but ``completed``, and a completed record
-past its ``expires_at`` (the client's ttl_seconds) reads as not found. Expired
-records and bytes are swept in the background. Pending rows left behind by a
-crash are marked failed at boot (``sweep_pending``).
+past its ``expires_at`` (the client's ttl_seconds, or a later ``set_ttl``) reads
+as not found. Expired records and bytes are swept in the background. Pending
+rows left behind by a crash are marked failed at boot (``sweep_pending``).
 """
 from __future__ import annotations
 
@@ -159,6 +159,13 @@ def is_expired(record: Dict[str, Any], now: Optional[datetime] = None) -> bool:
     return (now or datetime.now(timezone.utc)) >= datetime.fromisoformat(expires_at)
 
 
+def _expires_at(ttl_seconds: Optional[int]) -> Optional[str]:
+    """``ttl_seconds`` from now as an aware UTC ISO string; None never expires."""
+    if ttl_seconds is None:
+        return None
+    return (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()
+
+
 # --- store -------------------------------------------------------------------
 
 class CheckpointStore:
@@ -227,14 +234,11 @@ class CheckpointStore:
             if root.exists():
                 shutil.rmtree(root)
             root.mkdir(parents=True, exist_ok=True)
-        expires_at = (
-            (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat() if ttl_seconds is not None else None
-        )
         self._write(ref, {
             "model_id": ref.model_id, "kind": ref.kind.value, "name": ref.name,
             "status": CheckpointStatus.PENDING.value, "step": step, "ephemeral": not persist,
             "weight_version": weight_version, "error": None, "completed_at": None,
-            "expires_at": expires_at, "optimizer_config": optimizer_config,
+            "expires_at": _expires_at(ttl_seconds), "optimizer_config": optimizer_config,
         })
         return SaveTicket(ref=ref, root=root, step=step)
 
@@ -255,6 +259,17 @@ class CheckpointStore:
 
     def fail(self, ref: CheckpointRef, error: str) -> None:
         self._set_status(ref, CheckpointStatus.FAILED, error)
+
+    def set_ttl(self, ref: CheckpointRef, ttl_seconds: Optional[int]) -> bool:
+        """Expire a persistent checkpoint ``ttl_seconds`` from now, or never
+        (None). False when there is nothing to set it on: no record, an
+        ephemeral one, or one already past its expires_at (it reads as gone)."""
+        rec = self.get(ref)
+        if rec is None or rec.get("ephemeral") or is_expired(rec):
+            return False
+        rec["expires_at"] = _expires_at(ttl_seconds)
+        self._write(ref, rec)
+        return True
 
     def _set_status(self, ref: CheckpointRef, status: CheckpointStatus, error: Optional[str]) -> None:
         rec = self.get(ref)
@@ -337,14 +352,17 @@ class CheckpointStore:
             ref = CheckpointRef.make(rec["model_id"], rec["kind"], rec["name"])
             item = dict(rec, uri=ref.uri)
             if with_size:
-                root = self.root(ref)
-                item["size_bytes"] = (
-                    sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(root) for f in fs)
-                    if root.is_dir() else None
-                )
+                item["size_bytes"] = self.size_bytes(ref)
             out.append(item)
         out.sort(key=lambda r: r.get("created_at") or "", reverse=True)
         return out
+
+    def size_bytes(self, ref: CheckpointRef) -> Optional[int]:
+        """Bytes under the checkpoint's root; None when the root is gone."""
+        root = self.root(ref)
+        if not root.is_dir():
+            return None
+        return sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(root) for f in fs)
 
     def model_ids(self) -> List[str]:
         """Every model with a checkpoint record, live or not."""

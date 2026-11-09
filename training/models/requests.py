@@ -126,6 +126,16 @@ class SaveWeightsExternalRequest(BaseModel):
     type: Literal["save_weights_external"] = "save_weights_external"
 
 
+class SetCheckpointTTLRequest(BaseModel):
+    """PUT .../checkpoints/<kind>/<name>/ttl (SDK set_checkpoint_ttl): expire
+    ttl_seconds from now, or never when null. Same bounds as save_weights_external."""
+
+    ttl_seconds: Optional[int] = Field(
+        ..., ge=EXTERNAL_TTL_MIN_S, le=EXTERNAL_TTL_MAX_S,
+        description="Seconds until expiry (null = never expires)",
+    )
+
+
 class LoadWeightsRequest(BaseModel):
     """Request to load model weights, addressed one of two ways (the SDK's own split):
     `model_id` (+ `seq_id`): into a model just created, as its first request;

@@ -13,10 +13,11 @@ from .store import (
     CheckpointStore,
     InvalidCheckpointPath,
     SaveTicket,
+    is_expired,
 )
 
 __all__ = [
     "CheckpointError", "CheckpointFailed", "CheckpointKind", "CheckpointKindMismatch",
     "CheckpointNotFound", "CheckpointPending", "CheckpointRef", "CheckpointStatus",
-    "CheckpointStore", "InvalidCheckpointPath", "SaveTicket",
+    "CheckpointStore", "InvalidCheckpointPath", "SaveTicket", "is_expired",
 ]

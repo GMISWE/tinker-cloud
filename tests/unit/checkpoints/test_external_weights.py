@@ -70,6 +70,38 @@ class TestTtl:
         assert store.list("m") == [] and store.usage() == (0, 0)
         assert not is_expired({"status": "completed"})  # pre-ttl record: never expires
 
+    def test_set_ttl_moves_or_clears_expiry_of_any_persistent_kind(self, store):
+        w = store.begin_save("m", CheckpointKind.WEIGHTS, "w1", optimizer_config=ADAMW)
+        store.complete(w.ref)
+        assert store.get(w.ref)["expires_at"] is None
+        assert store.set_ttl(w.ref, 7200)
+        delta = datetime.fromisoformat(store.get(w.ref)["expires_at"]) - datetime.now(timezone.utc)
+        assert timedelta(minutes=119) < delta <= timedelta(hours=2)
+        created = store.get(w.ref)["created_at"]
+        assert store.set_ttl(w.ref, None) and store.get(w.ref)["expires_at"] is None
+        assert store.get(w.ref)["created_at"] == created   # listing order is not disturbed
+        assert store.get(w.ref)["status"] == "completed"
+
+    def test_set_ttl_refuses_unknown_ephemeral_and_already_expired(self, store):
+        assert not store.set_ttl(CheckpointRef.make("m", E, "nope"), 3600)
+        eph = store.begin_save("m", CheckpointKind.SAMPLER_WEIGHTS, "s", persist=False, optimizer_config=ADAMW)
+        assert not store.set_ttl(eph.ref, 3600)
+        t = store.begin_save("m", E, "hf1", ttl_seconds=3600, optimizer_config=ADAMW)
+        store.complete(t.ref)
+        rec = store.get(t.ref)
+        rec["expires_at"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        store._write(t.ref, rec)
+        assert not store.set_ttl(t.ref, None)   # gone to readers; the sweep still deletes it
+        assert store.sweep_expired() == 1
+
+    def test_a_shortened_ttl_is_swept(self, store):
+        t = store.begin_save("m", E, "hf1", optimizer_config=ADAMW)
+        (t.root / "weights.bin").write_bytes(b"weights")
+        store.complete(t.ref)
+        assert store.set_ttl(t.ref, 3600) and store.sweep_expired() == 0
+        rec = store.get(t.ref)
+        assert is_expired(rec, now=datetime.now(timezone.utc) + timedelta(hours=1, seconds=1))
+
 
 class TestSigner:
     def test_round_trip_tamper_and_expiry(self):
