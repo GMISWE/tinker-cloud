@@ -31,6 +31,7 @@ from ..core.dependencies import (
 )
 from ..storage import MetadataStorage, FuturesStorage
 from ..models.requests import (
+    MAX_PAGE_LIMIT,
     CreateModelRequest,
     DeleteModelRequest,
     UnloadModelRequest,
@@ -264,7 +265,7 @@ def _training_run(metadata: Dict, checkpoints: CheckpointService) -> TrainingRun
 
 @router.get("/api/v1/training_runs", response_model=TrainingRunsResponse)
 async def list_training_runs(
-    limit: int = Query(20, ge=1, le=1000),
+    limit: int = Query(20, ge=1, le=MAX_PAGE_LIMIT),
     offset: int = Query(0, ge=0),
     access_scope: Literal["owned", "accessible"] = "owned",   # the SDK's own default; one owner here, so no filter
     _: None = Depends(verify_api_key_dep),

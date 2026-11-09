@@ -142,10 +142,6 @@ class CheckpointService:
         )
         return {"type": "load_weights", "path": ref.uri, "model_id": model_id}
 
-    def delete_checkpoint(self, ref: CheckpointRef) -> bool:
-        """Remove a checkpoint's record and bytes. False if unknown."""
-        return self.store.delete(ref)
-
     def _checkpoint(self, rec: Dict[str, Any]) -> Checkpoint:
         """A store record (from store.list) as the SDK's Checkpoint, its size walked now."""
         kind = CheckpointKind(rec["kind"])
@@ -184,10 +180,6 @@ class CheckpointService:
                 continue
             latest[field] = self._checkpoint(rec)
         return latest
-
-    def set_ttl(self, ref: CheckpointRef, ttl_seconds: Optional[int]) -> bool:
-        """Expire a checkpoint ttl_seconds from now, or never (None). False if unknown."""
-        return self.store.set_ttl(ref, ttl_seconds)
 
     async def save_weights_for_sampler(
         self,
