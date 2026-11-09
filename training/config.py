@@ -31,6 +31,11 @@ BACKEND_CLASSES = {
 }
 
 
+def is_production() -> bool:
+    """ENV=production: the settings a deployment must choose refuse their development defaults."""
+    return os.getenv("ENV", "development") == "production"
+
+
 def split_api_keys(setting: str) -> FrozenSet[str]:
     """The keys a TINKER_API_KEY setting names: comma-separated, each stripped, empty ones dropped."""
     return frozenset(k.strip() for k in setting.split(",") if k.strip())
@@ -86,7 +91,11 @@ class RayConfig(BaseModel):
 
     address: Optional[str] = Field(
         default_factory=lambda: os.getenv("RAY_ADDRESS"),
-        description="Ray cluster address (e.g., ray://head:10001)"
+        description="Ray cluster address (RAY_ADDRESS), as ray.init takes it. The deploy's head runs no Ray Client server, so only a driver address (`auto`, `<ip>:<port>`) reaches it"
+    )
+    auth_mode: Optional[str] = Field(
+        default_factory=lambda: os.getenv("RAY_AUTH_MODE"),
+        description="RAY_AUTH_MODE as Ray reads it; `token` admits only processes holding the deployment's token"
     )
     dashboard_url: Optional[str] = Field(
         default_factory=lambda: os.getenv("RAY_DASHBOARD_URL"),
@@ -104,6 +113,14 @@ class RayConfig(BaseModel):
         default=True,
         description="Ignore Ray re-initialization errors"
     )
+
+    @validator("auth_mode", always=True)
+    def production_requires_token_auth(cls, v):
+        """Production refuses to start unless this process runs Ray in token mode; the head's own
+        mode is the deploy's to set."""
+        if v != "token" and is_production():
+            raise ValueError(f"Production requires Ray token auth: RAY_AUTH_MODE is {v!r}, not 'token'")
+        return v
 
 
 class ParallelismConfig(BaseModel):
@@ -183,8 +200,7 @@ class AuthConfig(BaseModel):
         """Production needs a key and refuses the dev key among the keys the setting names."""
         keys = split_api_keys(v)
         if not keys or DEV_API_KEY in keys:
-            env = os.getenv("ENV", "development")
-            if env == "production":
+            if is_production():
                 raise ValueError("Production requires a secure API key")
             logger.warning("Using default development API key")
         return v
@@ -229,7 +245,7 @@ class ExternalWeightsConfig(BaseModel):
     def key_or_random(cls, v):
         if v:
             return v
-        if os.getenv("ENV", "development") == "production":
+        if is_production():
             raise ValueError("Production requires TINKERCLOUD_URL_SIGNING_KEY")
         logger.warning("TINKERCLOUD_URL_SIGNING_KEY unset: signed download URLs are valid for this process only")
         return secrets.token_hex(32)

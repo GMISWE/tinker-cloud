@@ -54,3 +54,36 @@ def test_malformed_supported_models_is_a_startup_error(monkeypatch):
         TrainingConfig._get_default_models()
     monkeypatch.setenv("SUPPORTED_MODELS", '[{"model_name": "m", "max_context_length": 8}]')
     assert TrainingConfig._get_default_models()[0].model_name == "m"
+
+
+def _production(monkeypatch):
+    """ENV=production with the other production settings valid, so only Ray's auth mode decides."""
+    monkeypatch.setenv("ENV", "production")
+    monkeypatch.setenv("TINKER_API_KEY", "an-operator-key")
+    monkeypatch.setenv("TINKERCLOUD_URL_SIGNING_KEY", "a-signing-key")
+
+
+@pytest.mark.parametrize("mode", [None, "", "disabled"])
+def test_production_refuses_ray_auth_off(monkeypatch, mode):
+    from tinkercloud.training.config import TrainingConfig
+    _production(monkeypatch)
+    if mode is None:
+        monkeypatch.delenv("RAY_AUTH_MODE", raising=False)
+    else:
+        monkeypatch.setenv("RAY_AUTH_MODE", mode)
+    with pytest.raises(ValueError, match="RAY_AUTH_MODE"):
+        TrainingConfig()
+
+
+def test_production_takes_ray_auth_token(monkeypatch):
+    from tinkercloud.training.config import TrainingConfig
+    _production(monkeypatch)
+    monkeypatch.setenv("RAY_AUTH_MODE", "token")
+    assert TrainingConfig().ray.auth_mode == "token"
+
+
+def test_development_takes_ray_auth_unset(monkeypatch):
+    from tinkercloud.training.config import TrainingConfig
+    monkeypatch.delenv("ENV", raising=False)
+    monkeypatch.delenv("RAY_AUTH_MODE", raising=False)
+    assert TrainingConfig().ray.auth_mode is None

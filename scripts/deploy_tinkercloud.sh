@@ -78,7 +78,7 @@ done
 # Sets per-profile DEFAULTS; every one is overridable by the same-named env var.
 # shellcheck source=scripts/lib/cluster.sh
 # shellcheck disable=SC1091  # sourced by path at run time: KUBECONFIG, NS, DEFAULT_NODE
-. "$SCRIPT_DIR/lib/cluster.sh"
+. "$SCRIPT_DIR/lib/cluster.sh"   # KUBECONFIG, NS, kx, EX, EX_TIMEOUT, pod_cmd, ray_head, RAY_DRIVER_ADDRESS, TRUST_DOMAIN_LABEL
 BACKEND_ENV=""   # backend knobs exported to the server process (step 6)
 case "$PROFILE" in
   nemo_rl)
@@ -180,8 +180,7 @@ trap 'rm -rf "$TMP"' EXIT
 if [ "$TARGET" = k8s ]; then
   require_tunnel
   CP() { kubectl -n "$NS" cp "$1" "$POD:$2"; }
-  EX() { kubectl -n "$NS" exec "$POD" -- bash -c "$1"; }
-  EX_TIMEOUT() { timeout 30 kubectl -n "$NS" exec "$POD" -- bash -c "$1" || true; }
+  # EX, EX_TIMEOUT: lib/cluster.sh's
   # Capabilities the pod spec adds. Kubernetes fixes them at pod creation and
   # `kubectl apply` changes only the image, so an older pod keeps its old set.
   POD_CAPS="SYS_PTRACE"
@@ -211,9 +210,9 @@ elif [ "$TARGET" = docker ]; then
   # shellcheck disable=SC2086  # DOCKER may carry words ("sg docker -c")
   CP() { $DOCKER cp "$1" "$CONTAINER:$2"; }
   # shellcheck disable=SC2086
-  EX() { $DOCKER exec "$CONTAINER" bash -c "$1"; }
+  EX() { $DOCKER exec "$CONTAINER" bash -c "$(pod_cmd "$1")"; }
   # shellcheck disable=SC2086
-  EX_TIMEOUT() { timeout 30 $DOCKER exec "$CONTAINER" bash -c "$1" || true; }
+  EX_TIMEOUT() { timeout "$1" $DOCKER exec "$CONTAINER" bash -c "$(pod_cmd "$2")" || true; }
 else
   echo "unknown --target $TARGET"; exit 1
 fi
@@ -351,7 +350,8 @@ EOF
     [ "$READY" = True ] || { echo "ERROR: pod not Ready on $IMAGE after 20 min (running: $RUNNING_IMAGE)"; exit 1; }
   else
     echo "==> [1/6] starting container $CONTAINER (data: $DATA_DIR)"
-    $DOCKER run -d --name "$CONTAINER" --init --gpus all --network host \
+    # only the API port leaves the container: Ray's ports and the vLLM servers stay inside it
+    $DOCKER run -d --name "$CONTAINER" --init --gpus all -p 8000:8000 \
       --shm-size=32g -v "$DATA_DIR:/data" \
       -e PYTHONUNBUFFERED=1 -e TOKENIZERS_PARALLELISM=false \
       -e TINKER_API_KEY=tml-dev-key -e TINKERCLOUD_BACKEND="$BACKEND" \
@@ -364,6 +364,29 @@ else
   echo "==> [1/6] --code-only: restarting server on existing $TARGET target"
   [ "$TARGET" = k8s ] && check_pod_caps
   EX "pkill -f 'python3 -m trainin[g]' || true; sleep 8" || true
+fi
+
+# The policy admits, on every port, the pods of this pod's trust domain (Ray, NCCL bootstrap,
+# vLLM), and anyone else on the API port only; egress stays open (model downloads). It takes
+# effect only where the cluster's CNI enforces NetworkPolicy. Every deploy labels the pod and
+# applies the policy, so a pod created before either existed gets both.
+if [ "$TARGET" = k8s ]; then
+  kx label pod "$POD" "$TRUST_DOMAIN_LABEL=$POD" --overwrite > /dev/null
+  cat > "$TMP/netpol.yaml" <<EOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: $POD-trust-domain
+  namespace: $NS
+spec:
+  podSelector: {matchLabels: {$TRUST_DOMAIN_LABEL: $POD}}
+  policyTypes: [Ingress]
+  ingress:
+  - from: [{podSelector: {matchLabels: {$TRUST_DOMAIN_LABEL: $POD}}}]
+  - ports: [{port: 8000, protocol: TCP}]
+EOF
+  kx apply -f "$TMP/netpol.yaml" > /dev/null
+  echo "    NetworkPolicy $POD-trust-domain: pods labelled $TRUST_DOMAIN_LABEL=$POD on every port, anyone on :8000 (if the CNI enforces it)"
 fi
 
 # the megatron_bridge profile also bundles the bionemo-recipes evo2 recipe (built
@@ -444,18 +467,17 @@ fi
 
 # --- 5. ray head -------------------------------------------------------------
 echo "==> [5/6] ensuring Ray head is up"
-EX "ray status >/dev/null 2>&1 || { ray start --head --num-gpus $GPUS --disable-usage-stats > /tmp/ray_start.log 2>&1 < /dev/null; sleep 5; }
-ray status 2>/dev/null | grep GPU || true"
+# the server stops before its head may be replaced (a full deploy onto a running pod keeps its server)
+EX "pkill -f 'python3 -m trainin[g]' || true; sleep 8"
+EX "$(ray_head ensure "$GPUS")"
+EX "ray status 2>/dev/null | grep GPU || true"
 
 # --- 6. server ---------------------------------------------------------------
 echo "==> [6/6] starting API server (log: $SERVER_LOG)"
-# nemo_rl's server connects to the head as a driver; see pod_rotate_server.sh for why
-RAY_ADDR="ray://localhost:10001"
-[ "$BACKEND" = nemo_rl ] && RAY_ADDR=auto
 # NB: the detached child must have ALL fds redirected or the exec hangs (143);
 # even then the launch usually succeeded — verified below with a fresh probe.
-EX_TIMEOUT "
-export PYTHONPATH=/app NUM_GPUS=$GPUS RAY_ADDRESS=$RAY_ADDR
+EX_TIMEOUT 30 "
+export PYTHONPATH=/app NUM_GPUS=$GPUS RAY_ADDRESS=$RAY_DRIVER_ADDRESS
 export HF_TOKEN=\$(cat /tmp/hf_token.txt) HF_HOME=/data/.cache/huggingface \
        TINKER_API_KEY=tml-dev-key TINKERCLOUD_BACKEND=$BACKEND ALLOW_PARTIAL_BATCHES=true $BACKEND_ENV
 cd /app && setsid nohup python3 -m training > $SERVER_LOG 2>&1 < /dev/null &
