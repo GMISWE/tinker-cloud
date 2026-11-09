@@ -248,6 +248,8 @@ if [ "$CODE_ONLY" = 1 ] && [ "$RUN_SERVER" = 1 ]; then
     BACKEND_ENV=("${kept[@]}")
   fi
 fi
+# refuse a bad knob before anything is created or stopped
+if [ "$RUN_SERVER" = 1 ]; then BOOT_CMD=$(server_boot "$GPUS" "$BACKEND" "$SERVER_LOG" "${BACKEND_ENV[@]}"); fi
 
 # --- 1. create the pod / container -----------------------------------------
 if [ "$CODE_ONLY" = 0 ]; then
@@ -440,21 +442,17 @@ if [ -n "$HF_TOKEN_FILE" ]; then
 fi
 if [ "$RUN_SERVER" = 1 ]; then
   EX "$HF_TOKEN_CHECK" || {
-    echo "ERROR: no HF token in target; pass HF_TOKEN_FILE=<path>"; exit 1; }
+    echo "ERROR: no HF token in target (or the exec failed); pass HF_TOKEN_FILE=<path>"; exit 1; }
 else
   # bionemo: the Evo2 checkpoint (arcinstitute) is public; token optional.
-  EX "$HF_TOKEN_CHECK" > /dev/null || echo "    note: no HF token (fine for public weights)"
+  EX "$HF_TOKEN_CHECK" > /dev/null || echo "    note: no HF token, or the exec failed (fine for public weights)"
 fi
 
 # --- 4. in-container setup ---------------------------------------------------
 # A running server stops here, once: after every step that can fail without touching the target,
 # before setup replaces its code and packages and step 5 its Ray head. A RUN_SERVER=0 profile runs
 # no server.
-if [ "$RUN_SERVER" = 1 ]; then
-  # refuse bad input while the running server still serves
-  BOOT_CMD=$(server_boot "$GPUS" "$BACKEND" "$SERVER_LOG" "${BACKEND_ENV[@]}")
-  EX "$SERVER_STOP"
-fi
+if [ "$RUN_SERVER" = 1 ]; then EX "$SERVER_STOP"; fi
 echo "==> [4/6] running in-container setup (profile=$PROFILE)"
 EX "PROFILE=$PROFILE MILES_REPO='${MILES_REPO:-}' MILES_REF='${MILES_REF:-}' bash /tmp/setup_container.sh"
 
