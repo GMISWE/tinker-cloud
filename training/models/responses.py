@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from ..checkpoints import CheckpointStatus
+
 
 class AsyncOperationResponse(BaseModel):
     """Response for async operations returning a request_id."""
@@ -334,14 +336,20 @@ class UnloadModelResponse(_Result):
 
 # ============= Training Run Responses =============
 
-class CheckpointRecord(BaseModel):
-    """A checkpoint in the SDK's Checkpoint shape."""
+class Checkpoint(BaseModel):
+    """A checkpoint in the SDK's Checkpoint shape, plus `status` (an extension: the SDK
+    ignores it). Every route that reports a checkpoint returns this model. Nothing is
+    published and checkpoints carry no user metadata here, so `public` and `user_metadata`
+    always hold the SDK's own defaults."""
     checkpoint_id: str = Field(..., description="<kind>/<name>")
-    checkpoint_type: str = Field(..., description="training|sampler|external")
-    time: Optional[str] = Field(default=None, description="Creation timestamp")
+    checkpoint_type: Literal["training", "sampler", "external"] = Field(..., description="The SDK's CheckpointType")
+    time: str = Field(..., description="Creation timestamp (ISO 8601)")
     tinker_path: str = Field(..., description="tinker:// path of the checkpoint")
-    size_bytes: Optional[int] = Field(default=None, description="Bytes on disk (None when not computed)")
-    expires_at: Optional[str] = Field(default=None, description="Expiry (None = never expires)")
+    size_bytes: Optional[int] = Field(..., description="Bytes under the checkpoint's root; None when the root is gone")
+    status: CheckpointStatus = Field(..., description="Save state")
+    expires_at: Optional[str] = Field(..., description="Expiry (None = never expires)")
+    public: Literal[False] = Field(default=False, description="Whether the checkpoint is public (never, here)")
+    user_metadata: None = Field(default=None, description="User metadata (none is recorded)")
 
 
 class TrainingRunResponse(BaseModel):
@@ -353,8 +361,8 @@ class TrainingRunResponse(BaseModel):
     corrupted: bool = Field(default=False, description="Whether run is corrupted")
     lora_rank: int = Field(..., description="LoRA rank (0 if not LoRA)")
     last_request_time: str = Field(..., description="Last access time")
-    last_checkpoint: Optional[CheckpointRecord] = Field(default=None, description="Latest loadable training checkpoint")
-    last_sampler_checkpoint: Optional[CheckpointRecord] = Field(default=None, description="Latest loadable sampler checkpoint")
+    last_checkpoint: Optional[Checkpoint] = Field(default=None, description="Latest loadable training checkpoint")
+    last_sampler_checkpoint: Optional[Checkpoint] = Field(default=None, description="Latest loadable sampler checkpoint")
 
 
 class Cursor(BaseModel):
@@ -368,6 +376,12 @@ class TrainingRunsResponse(BaseModel):
     """GET /api/v1/training_runs (SDK TrainingRunsResponse)."""
     training_runs: List[TrainingRunResponse] = Field(..., description="This page of training runs")
     cursor: Cursor = Field(..., description="Pagination")
+
+
+class CheckpointsListResponse(BaseModel):
+    """GET .../checkpoints (SDK CheckpointsListResponse); a run's own list is unpaginated (cursor None)."""
+    checkpoints: List[Checkpoint] = Field(..., description="Newest first")
+    cursor: Optional[Cursor] = Field(..., description="Pagination, or None for one run's full list")
 
 
 # ============= Sampling Responses =============

@@ -6,7 +6,7 @@ import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..models.requests import DEFAULT_PROJECT, LOCAL_OWNER, SessionSearchRequest, SessionStatusQuery
+from ..models.requests import LOCAL_OWNER, SessionSearchRequest, SessionStatusQuery, require_known_projects
 from .sessions import Session
 
 
@@ -14,10 +14,6 @@ def str_metadata(user_metadata: Dict[str, Any]) -> Dict[str, str]:
     """user_metadata as the SDK reads it (dict[str, str]): create_session accepted any JSON
     value, so a non-string is its JSON text. Search matches against the same encoding."""
     return {k: v if isinstance(v, str) else json.dumps(v) for k, v in user_metadata.items()}
-
-
-class UnknownProject(ValueError):
-    """A project id other than the one this server has (a 404, as Tinker answers an unknown project)."""
 
 
 def status_of(session: Session) -> Dict[str, Any]:
@@ -67,9 +63,7 @@ def _after_cursor(s: Session, req: SessionSearchRequest) -> bool:
 def search(sessions: List[Session], req: SessionSearchRequest) -> Tuple[List[Session], Optional[Dict[str, str]]]:
     """`sessions` newest first; returns one page and the next cursor (None once exhausted).
     Raises UnknownProject for a project id this server does not have."""
-    unknown = [p for p in (req.project_ids or []) if p != DEFAULT_PROJECT]   # None: every listable project (SDK)
-    if unknown:
-        raise UnknownProject(f"project {', '.join(unknown)} not found; this server has one project, {DEFAULT_PROJECT!r}")
+    require_known_projects(req.project_ids or [])   # None: every listable project (SDK)
     if req.owner.type == "user":
         assert req.owner.owner_urns is not None  # SearchOwner's validator pairs them
         if LOCAL_OWNER not in req.owner.owner_urns:

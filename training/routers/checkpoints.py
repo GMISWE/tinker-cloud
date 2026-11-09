@@ -51,6 +51,8 @@ from ..models.requests import (
 )
 from ..models.responses import (
     AsyncOperationResponse,
+    CheckpointsListResponse,
+    Cursor,
     SaveWeightsForSamplerResult,
     WeightsInfoResponse,
 )
@@ -359,31 +361,31 @@ def _create_via_load(
     return AsyncOperationResponse(request_id=request_id, model_id=model_id)
 
 
-@router.get("/api/v1/training_runs/{model_id}/checkpoints")
+@router.get("/api/v1/training_runs/{model_id}/checkpoints", response_model=CheckpointsListResponse)
 async def list_checkpoints(
     model_id: str,
     _: None = Depends(verify_api_key_dep),
     service: CheckpointService = Depends(get_checkpoint_service),
     metadata_storage: MetadataStorage = Depends(get_metadata_storage),
 ):
-    """Checkpoints of a training run, in the SDK's CheckpointsListResponse shape."""
+    """Checkpoints of a training run, unpaginated."""
     if metadata_storage.load_training_run(model_id) is None:
         raise HTTPException(status_code=404, detail=f"Training run not found: {model_id}")
-    return {"checkpoints": service.list_checkpoints(model_id), "cursor": None}
+    return CheckpointsListResponse(checkpoints=service.list_checkpoints(model_id), cursor=None)
 
 
-@router.get("/api/v1/checkpoints")
+@router.get("/api/v1/checkpoints", response_model=CheckpointsListResponse)
 async def list_user_checkpoints(
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     _: None = Depends(verify_api_key_dep),
     service: CheckpointService = Depends(get_checkpoint_service),
 ):
-    """Every training run's checkpoints, newest first, in the SDK's CheckpointsListResponse
-    shape with a cursor (list_user_checkpoints; `tinker checkpoint list` with no run id).
-    Owners are not tracked, so a key sees every run's checkpoints."""
+    """Every training run's checkpoints, newest first, with a cursor (list_user_checkpoints;
+    `tinker checkpoint list` with no run id). Owners are not tracked, so a key sees every
+    run's checkpoints."""
     page, total = service.list_all_checkpoints(limit=limit, offset=offset)
-    return {"checkpoints": page, "cursor": {"offset": offset, "limit": limit, "total_count": total}}
+    return CheckpointsListResponse(checkpoints=page, cursor=Cursor(offset=offset, limit=limit, total_count=total))
 
 
 # SDK CheckpointType -> store kind (the inverse of CHECKPOINT_TYPES)
@@ -393,12 +395,16 @@ _KIND_VALUES = {k.value for k in CHECKPOINT_TYPES}
 _KINDS_HELP = "|".join(sorted(_KIND_VALUES))
 
 
-def _delete(service, model_id, checkpoint_type, checkpoint_id):
-    if checkpoint_type not in _KIND_OF_TYPE:
-        raise HTTPException(status_code=400, detail=f"checkpoint_type must be one of {_TYPES_HELP}")
-    ref = CheckpointRef.make(model_id, _KIND_OF_TYPE[checkpoint_type], checkpoint_id)
+def _typed_ref(model_id: str, kind: str, checkpoint_id: str) -> CheckpointRef:
+    """The ref a `<kind>/<id>` path segment names; 400 for an unknown kind."""
+    if kind not in _KIND_VALUES:
+        raise HTTPException(status_code=400, detail=f"checkpoint path must be <{_KINDS_HELP}>/<id>")
+    return CheckpointRef.make(model_id, CheckpointKind(kind), checkpoint_id)
+
+
+def _delete(service: CheckpointService, ref: CheckpointRef) -> Response:
     if not service.delete_checkpoint(ref):
-        raise HTTPException(status_code=404, detail=f"Checkpoint not found: {checkpoint_type} {checkpoint_id} of {model_id}")
+        raise HTTPException(status_code=404, detail=f"Checkpoint not found: {ref.uri}")
     return Response(status_code=204)
 
 
@@ -410,9 +416,7 @@ async def delete_checkpoint_typed(
     metadata_storage: MetadataStorage = Depends(get_metadata_storage),
 ):
     """DELETE .../checkpoints/<kind>/<id>, kind in weights|sampler_weights|external_weights."""
-    if kind not in _KIND_VALUES:
-        raise HTTPException(status_code=400, detail=f"checkpoint path must be <{_KINDS_HELP}>/<id>")
-    return _delete(service, model_id, CHECKPOINT_TYPES[CheckpointKind(kind)], checkpoint_id)
+    return _delete(service, _typed_ref(model_id, kind, checkpoint_id))
 
 
 @router.put("/api/v1/training_runs/{model_id}/checkpoints/{kind}/{checkpoint_id}/ttl", status_code=204)
@@ -423,9 +427,7 @@ async def set_checkpoint_ttl(
 ):
     """Expire a checkpoint ttl_seconds from now, or never (null); the background sweep
     deletes it once expired. The SDK sends the checkpoint id `<kind>/<name>` unencoded."""
-    if kind not in _KIND_VALUES:
-        raise HTTPException(status_code=400, detail=f"checkpoint path must be <{_KINDS_HELP}>/<id>")
-    ref = CheckpointRef.make(model_id, CheckpointKind(kind), checkpoint_id)
+    ref = _typed_ref(model_id, kind, checkpoint_id)
     if not service.set_ttl(ref, request.ttl_seconds):
         raise HTTPException(status_code=404, detail=f"Checkpoint not found: {ref.uri}")
     return Response(status_code=204)
@@ -442,7 +444,9 @@ async def delete_checkpoint_bare(
     if not checkpoint_type:
         raise HTTPException(status_code=400, detail=f"specify the kind: .../checkpoints/<{_KINDS_HELP}>/<id> "
                             f"or ?checkpoint_type=<{_TYPES_HELP}>")
-    return _delete(service, model_id, checkpoint_type, checkpoint_id)
+    if checkpoint_type not in _KIND_OF_TYPE:
+        raise HTTPException(status_code=400, detail=f"checkpoint_type must be one of {_TYPES_HELP}")
+    return _delete(service, CheckpointRef.make(model_id, _KIND_OF_TYPE[checkpoint_type], checkpoint_id))
 
 
 # ============================================================================

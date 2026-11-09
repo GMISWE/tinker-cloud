@@ -1,20 +1,10 @@
 """Training runs through the SDK's RestClient and the `tinker` CLI: list_training_runs pages
 every run the server recorded, and a run reports its newest loadable checkpoints."""
 import json
-import os
-import subprocess
-import sys
 
-import pytest
 import requests
-import tinker
 
-from .conftest import API_KEY
-
-
-@pytest.fixture
-def rest(server, service_client):
-    return tinker.RestClient(base_url=server.base_url, api_key=API_KEY)
+from .conftest import API_KEY, run_cli
 
 
 def _created(service_client, rank):
@@ -88,8 +78,15 @@ def test_bad_paging_is_refused(server):
 
 def test_tinker_cli_run_list(service_client, server):
     tc = _created(service_client, rank=2)
-    env = {**os.environ, "TINKER_BASE_URL": server.base_url, "TINKER_API_KEY": API_KEY}
-    out = subprocess.run([sys.executable, "-m", "tinker.cli", "--format", "json", "run", "list", "--limit", "0"],
-                         env=env, capture_output=True, text=True, timeout=120)
+    out = run_cli(server, "run", "list", "--limit", "0")
     assert out.returncode == 0, out.stderr
     assert tc.model_id in {r["training_run_id"] for r in json.loads(out.stdout)["runs"]}
+
+
+def test_an_unknown_project_is_404_and_the_default_project_lists_every_run(service_client, server, rest):
+    tc = _created(service_client, rank=2)
+    r = requests.get(f"{server.base_url}/api/v1/training_runs", params={"project_id": "elsewhere"},
+                     headers={"X-API-Key": API_KEY}, timeout=30)
+    assert r.status_code == 404 and "elsewhere" in r.json()["error"]   # as sessions/search answers
+    ids = {r.training_run_id for r in rest.list_training_runs(limit=1000, project_id="default").result().training_runs}
+    assert tc.model_id in ids

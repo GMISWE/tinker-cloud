@@ -15,6 +15,7 @@ from tinkercloud.training.checkpoints import (
     CheckpointRef,
     InvalidCheckpointPath,
 )
+from tinkercloud.training.checkpoints import store as store_module
 from tinkercloud.training.checkpoints.store import is_expired
 from tinkercloud.training.utils import signed_urls
 
@@ -70,8 +71,9 @@ class TestTtl:
         assert store.list("m") == [] and store.usage() == (0, 0)
         assert not is_expired({"status": "completed"})  # pre-ttl record: never expires
 
-    def test_set_ttl_moves_or_clears_expiry_of_any_persistent_kind(self, store):
-        w = store.begin_save("m", CheckpointKind.WEIGHTS, "w1", optimizer_config=ADAMW)
+    @pytest.mark.parametrize("kind", [CheckpointKind.WEIGHTS, CheckpointKind.SAMPLER_WEIGHTS, E])
+    def test_set_ttl_moves_or_clears_expiry_of_any_persistent_kind(self, store, kind):
+        w = store.begin_save("m", kind, "w1", optimizer_config=ADAMW)
         store.complete(w.ref)
         assert store.get(w.ref)["expires_at"] is None
         assert store.set_ttl(w.ref, 7200)
@@ -94,13 +96,20 @@ class TestTtl:
         assert not store.set_ttl(t.ref, None)   # gone to readers; the sweep still deletes it
         assert store.sweep_expired() == 1
 
-    def test_a_shortened_ttl_is_swept(self, store):
+    def test_a_shortened_ttl_is_swept_once_it_has_passed(self, store, monkeypatch):
         t = store.begin_save("m", E, "hf1", optimizer_config=ADAMW)
         (t.root / "weights.bin").write_bytes(b"weights")
         store.complete(t.ref)
         assert store.set_ttl(t.ref, 3600) and store.sweep_expired() == 0
-        rec = store.get(t.ref)
-        assert is_expired(rec, now=datetime.now(timezone.utc) + timedelta(hours=1, seconds=1))
+
+        class _AnHourLater(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime.now(tz) + timedelta(hours=1, seconds=1)
+
+        monkeypatch.setattr(store_module, "datetime", _AnHourLater)
+        assert store.sweep_expired() == 1
+        assert not t.root.exists() and store.get(t.ref) is None and store.list("m") == []
 
 
 class TestSigner:

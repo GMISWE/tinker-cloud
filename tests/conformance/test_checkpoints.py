@@ -1,10 +1,16 @@
 """Checkpoint listing, typed delete, and load_weights as a first request only."""
 import json
+import time
+from datetime import datetime, timedelta, timezone
 
 import requests
+from fastapi import FastAPI
 from tinker import types
 
-from .conftest import API_KEY, make_datum
+from tinkercloud.training.routers import checkpoints as checkpoint_routes
+from tinkercloud.training.routers import models as model_routes
+
+from .conftest import API_KEY, make_datum, run_cli
 
 
 def _delete(server, model_id, checkpoint_id, **q):
@@ -159,22 +165,7 @@ def test_sampler_from_a_checkpoint_path_is_pinned_to_its_version(service_client,
     assert pinned and pinned[-1] == 1, pinned
 
 
-def _rest(server):
-    import tinker
-    return tinker.RestClient(base_url=server.base_url, api_key=API_KEY)
-
-
-def _cli(server, *args, timeout=120):
-    import os
-    import subprocess
-    import sys
-    env = {**os.environ, "TINKER_BASE_URL": server.base_url, "TINKER_API_KEY": API_KEY}
-    return subprocess.run([sys.executable, "-m", "tinker.cli", "--format", "json", *args],
-                          env=env, capture_output=True, text=True, timeout=timeout)
-
-
-def test_list_user_checkpoints_pages_every_run(service_client, server):
-    rest = _rest(server)
+def test_list_user_checkpoints_pages_every_run(service_client, server, rest):
     a = service_client.create_lora_training_client(base_model="fake/tiny", rank=2)
     b = service_client.create_lora_training_client(base_model="fake/tiny", rank=2)
     pa = a.save_state("u1").result().path
@@ -195,9 +186,7 @@ def test_list_user_checkpoints_pages_every_run(service_client, server):
         assert r.status_code == 422, (q, r.text)
 
 
-def test_set_checkpoint_ttl(service_client, server):
-    import time
-    rest = _rest(server)
+def test_set_checkpoint_ttl(service_client, server, rest):
     tc = service_client.create_lora_training_client(base_model="fake/tiny", rank=2)
     p = tc.save_state("t1").result().path
 
@@ -216,28 +205,77 @@ def test_set_checkpoint_ttl(service_client, server):
     def put(path, body):
         return requests.put(f"{url}/{path}/ttl", json=body, headers={"X-API-Key": API_KEY}, timeout=30)
 
-    for bad in (59, 3599, 10 * 365 * 24 * 3600 + 1):
+    for bad in (3599, 10 * 365 * 24 * 3600 + 1):   # one below each bound
         assert put("weights/t1", {"ttl_seconds": bad}).status_code == 422, bad
+    for ok in (3600, 10 * 365 * 24 * 3600):
+        assert put("weights/t1", {"ttl_seconds": ok}).status_code == 204, ok
     assert put("weights/nope", {"ttl_seconds": 3600}).status_code == 404
     assert put("sampler_weights/t1", {"ttl_seconds": 3600}).status_code == 404   # the kinds are separate ids
     assert put("bogus/t1", {"ttl_seconds": 3600}).status_code == 400
 
-    out = _cli(server, "checkpoint", "set-ttl", p, "--ttl", "3600")
+    out = run_cli(server, "checkpoint", "set-ttl", p, "--ttl", "3600")
     assert out.returncode == 0, out.stderr
     assert 3500 < expires().timestamp() - time.time() <= 3600
 
 
-def test_tinker_cli_checkpoint_list_and_download(service_client, server, tmp_path):
+def test_tinker_cli_checkpoint_list_and_download(service_client, server, rest, tmp_path):
     tc = service_client.create_lora_training_client(base_model="fake/tiny", rank=2)
     p = tc.save_state("dl").result().path
 
-    out = _cli(server, "checkpoint", "list", "--limit", "0")
+    out = run_cli(server, "checkpoint", "list", "--limit", "0")
     assert out.returncode == 0, out.stderr
     assert p in {c["tinker_path"] for c in json.loads(out.stdout)["checkpoints"]}
 
     # a training checkpoint downloads through a temporary external export whose ttl the CLI renews
-    out = _cli(server, "checkpoint", "download", p, "--output", str(tmp_path / "out"))
+    out = run_cli(server, "checkpoint", "download", p, "--output", str(tmp_path / "out"))
     assert out.returncode == 0, out.stderr
     assert any(f.is_file() for f in (tmp_path / "out").rglob("*"))
-    left = _rest(server).list_user_checkpoints(limit=1000).result().checkpoints
+    left = rest.list_user_checkpoints(limit=1000).result().checkpoints
     assert not [c for c in left if c.checkpoint_type == "external" and c.tinker_path.endswith("/download")]
+
+
+def test_every_route_reports_one_checkpoint_shape(service_client, server, rest):
+    tc = service_client.create_lora_training_client(base_model="fake/tiny", rank=2)
+    p = tc.save_state("shape").result().path
+
+    def get(path):
+        return requests.get(server.base_url + path, headers={"X-API-Key": API_KEY}, timeout=30).json()
+
+    [own] = [c for c in get(f"/api/v1/training_runs/{tc.model_id}/checkpoints")["checkpoints"] if c["tinker_path"] == p]
+    [every] = [c for c in get("/api/v1/checkpoints?limit=1000")["checkpoints"] if c["tinker_path"] == p]
+    last = get(f"/api/v1/training_runs/{tc.model_id}")["last_checkpoint"]
+    assert own == every == last   # one model: status and size on the run's last_checkpoint too
+    assert own["status"] == "completed" and own["size_bytes"] and own["time"]
+    [typed] = [c for c in rest.list_checkpoints(tc.model_id).result().checkpoints if c.tinker_path == p]
+    assert isinstance(typed.time, datetime)
+
+
+def test_checkpoint_schema_is_one_model_with_a_required_time():
+    app = FastAPI()
+    app.include_router(checkpoint_routes.router)
+    app.include_router(model_routes.router)
+    spec = app.openapi()
+    schemas = spec["components"]["schemas"]
+
+    def body(path):
+        return spec["paths"][path]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
+
+    one = "#/components/schemas/CheckpointsListResponse"
+    assert body("/api/v1/checkpoints") == body("/api/v1/training_runs/{model_id}/checkpoints") == one
+    assert schemas["CheckpointsListResponse"]["properties"]["checkpoints"]["items"] == {"$ref": "#/components/schemas/Checkpoint"}
+    run = schemas["TrainingRunResponse"]["properties"]
+    for field in ("last_checkpoint", "last_sampler_checkpoint"):
+        assert {"$ref": "#/components/schemas/Checkpoint"} in run[field]["anyOf"]
+    checkpoint = schemas["Checkpoint"]
+    assert "time" in checkpoint["required"]
+    assert checkpoint["properties"]["checkpoint_type"]["enum"] == ["training", "sampler", "external"]
+
+
+def test_tinker_cli_deletes_checkpoints_before_a_date(service_client, server, rest):
+    tc = service_client.create_lora_training_client(base_model="fake/tiny", rank=2)
+    tc.save_state("old").result()
+    tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # the CLI compares each checkpoint's time with an aware date: a time without an offset is a TypeError
+    out = run_cli(server, "checkpoint", "delete", "--run-id", tc.model_id, "--before", tomorrow, "--yes")
+    assert out.returncode == 0, out.stderr
+    assert rest.list_checkpoints(tc.model_id).result().checkpoints == []

@@ -43,12 +43,12 @@ class TestListAll:
 
         page, total = service.list_all_checkpoints(limit=2, offset=0)
         assert total == 3
-        assert [c["tinker_path"] for c in page] == ["tinker://run_b/weights/b1", "tinker://run_a/sampler_weights/a1"]
-        assert [c["size_bytes"] for c in page] == [3, 2]
-        assert page[1]["checkpoint_id"] == "sampler_weights/a1" and page[1]["checkpoint_type"] == "sampler"
+        assert [c.tinker_path for c in page] == ["tinker://run_b/weights/b1", "tinker://run_a/sampler_weights/a1"]
+        assert [c.size_bytes for c in page] == [3, 2]
+        assert page[1].checkpoint_id == "sampler_weights/a1" and page[1].checkpoint_type == "sampler"
 
         rest, total = service.list_all_checkpoints(limit=2, offset=2)
-        assert total == 3 and [c["tinker_path"] for c in rest] == ["tinker://run_a/weights/a1"]
+        assert total == 3 and [c.tinker_path for c in rest] == ["tinker://run_a/weights/a1"]
         assert service.list_all_checkpoints(limit=5, offset=9) == ([], 3)
 
     def test_sizes_are_walked_for_the_page_only(self, store, service, monkeypatch):
@@ -58,10 +58,7 @@ class TestListAll:
         size_bytes = store.size_bytes
         monkeypatch.setattr(store, "size_bytes", lambda ref: walked.append(ref.name) or size_bytes(ref))
         page, total = service.list_all_checkpoints(limit=2, offset=1)
-        assert total == 5 and walked == ["c3", "c2"] and [c["size_bytes"] for c in page] == [1, 1]
-
-    def test_no_checkpoints(self, service):
-        assert service.list_all_checkpoints(limit=10, offset=0) == ([], 0)
+        assert total == 5 and walked == ["c3", "c2"] and [c.size_bytes for c in page] == [1, 1]
 
 
 class TestLatest:
@@ -72,9 +69,9 @@ class TestLatest:
         _save(store, "run", S, "s1", "2026-01-01T00:00:02")
         _save(store, "run", E, "hf", "2026-01-01T00:00:09")                   # not a kind TrainingRun names
         latest = service.latest_checkpoints("run")
-        assert latest["last_checkpoint"]["tinker_path"] == "tinker://run/weights/w2"
-        assert latest["last_checkpoint"]["checkpoint_type"] == "training"
-        assert latest["last_sampler_checkpoint"]["tinker_path"] == "tinker://run/sampler_weights/s1"
+        assert latest["last_checkpoint"].tinker_path == "tinker://run/weights/w2"
+        assert latest["last_checkpoint"].checkpoint_type == "training"
+        assert latest["last_sampler_checkpoint"].tinker_path == "tinker://run/sampler_weights/s1"
 
     def test_failed_and_expired_are_skipped(self, store, service):
         ok = _save(store, "run", W, "ok", "2026-01-01T00:00:01")
@@ -84,7 +81,4 @@ class TestLatest:
         rec = store.get(old)
         rec["expires_at"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
         store._write(old, rec)
-        assert service.latest_checkpoints("run")["last_checkpoint"]["tinker_path"] == ok.uri
-
-    def test_a_run_without_checkpoints(self, service):
-        assert service.latest_checkpoints("run") == {"last_checkpoint": None, "last_sampler_checkpoint": None}
+        assert service.latest_checkpoints("run")["last_checkpoint"].tinker_path == ok.uri

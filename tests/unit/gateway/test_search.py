@@ -1,9 +1,9 @@
 """gateway.search: the documented filters and the cursor, without a server."""
 import pytest
 
-from tinkercloud.training.gateway.search import UnknownProject, search
+from tinkercloud.training.gateway.search import search
 from tinkercloud.training.gateway.sessions import SessionStore
-from tinkercloud.training.models.requests import SessionSearchRequest
+from tinkercloud.training.models.requests import SessionSearchRequest, UnknownProject
 
 
 def _store_with(n):

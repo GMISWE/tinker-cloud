@@ -23,6 +23,7 @@ from ..core.dependencies import (
     verify_api_key_dep,
     get_checkpoint_service,
     get_model_service, 
+    known_project,
     get_metadata_storage,
     get_futures_storage, 
     get_training_clients,
@@ -266,20 +267,20 @@ async def list_training_runs(
     limit: int = Query(20, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     access_scope: Literal["owned", "accessible"] = "owned",
-    project_id: Optional[str] = None,
+    _project: Optional[str] = Depends(known_project),
     _: None = Depends(verify_api_key_dep),
+    service: ModelService = Depends(get_model_service),
     checkpoints: CheckpointService = Depends(get_checkpoint_service),
     metadata_storage: MetadataStorage = Depends(get_metadata_storage),
 ):
     """Every training run this server has recorded, live or deleted (a deleted run's
-    checkpoints still resume), newest first by creation so offsets stay stable while runs
-    train. Owners and projects are not tracked: every key sees every run, so access_scope
-    and project_id do not filter (as on the billing usage route)."""
-    runs = metadata_storage.list_training_runs(limit=10**9)
-    runs.sort(key=lambda m: (m.get("created_at") or "", m["training_run_id"]), reverse=True)
-    page = [_training_run(m, checkpoints) for m in runs[offset:offset + limit]]
+    checkpoints still resume). The server has one implicit owner and one project, as
+    session search: access_scope does not filter, and a project_id other than the
+    default one is a 404."""
+    runs, total = service.list_training_runs(limit=limit, offset=offset, metadata_storage=metadata_storage)
     return TrainingRunsResponse(
-        training_runs=page, cursor=Cursor(offset=offset, limit=limit, total_count=len(runs)),
+        training_runs=[_training_run(m, checkpoints) for m in runs],
+        cursor=Cursor(offset=offset, limit=limit, total_count=total),
     )
 
 

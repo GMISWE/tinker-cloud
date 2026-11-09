@@ -10,12 +10,13 @@ import logging
 import os
 import time
 import uuid
-from datetime import datetime
-from typing import Dict, Any, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Dict, Any, List, Optional, Tuple
 
 from ..backends.base import TrainingBackend
 from ..checkpoints import CheckpointKind, CheckpointRef, CheckpointStatus, CheckpointStore, is_expired
 from ..models.requests import OptimizerConfig
+from ..models.responses import Checkpoint
 from ..storage import MetadataStorage
 
 logger = logging.getLogger(__name__)
@@ -145,47 +146,43 @@ class CheckpointService:
         """Remove a checkpoint's record and bytes. False if unknown."""
         return self.store.delete(ref)
 
-    @staticmethod
-    def _tinker_shape(rec: Dict[str, Any]) -> Dict[str, Any]:
-        """A store record (from store.list) as the SDK's Checkpoint."""
+    def _checkpoint(self, rec: Dict[str, Any]) -> Checkpoint:
+        """A store record (from store.list) as the SDK's Checkpoint, its size walked now."""
         kind = CheckpointKind(rec["kind"])
-        return {
-            "checkpoint_id": f"{kind.value}/{rec['name']}",
-            "checkpoint_type": CHECKPOINT_TYPES[kind],
-            "time": rec.get("created_at"),
-            "tinker_path": rec["uri"],
-            "size_bytes": rec.get("size_bytes"),
-            "status": rec.get("status"),
-            "expires_at": rec.get("expires_at"),  # absent on records older than ttl support
-        }
+        return Checkpoint(
+            checkpoint_id=f"{kind.value}/{rec['name']}",
+            checkpoint_type=CHECKPOINT_TYPES[kind],
+            # created_at is naive UTC (MetadataStorage.save_checkpoint); the SDK CLI compares it with aware dates
+            time=datetime.fromisoformat(rec["created_at"]).replace(tzinfo=timezone.utc).isoformat(),
+            tinker_path=rec["uri"],
+            size_bytes=self.store.size_bytes(CheckpointRef.parse(rec["uri"])),
+            status=rec["status"],
+            expires_at=rec.get("expires_at"),  # absent on records older than ttl support
+        )
 
-    def list_checkpoints(self, model_id: str) -> list:
-        """Tinker-shaped checkpoint records for a training run."""
-        return [self._tinker_shape(rec) for rec in self.store.list(model_id)]
+    def list_checkpoints(self, model_id: str) -> List[Checkpoint]:
+        """A training run's checkpoints, newest first."""
+        return [self._checkpoint(rec) for rec in self.store.list(model_id, with_size=False)]
 
-    def list_all_checkpoints(self, limit: int, offset: int) -> Tuple[list, int]:
+    def list_all_checkpoints(self, limit: int, offset: int) -> Tuple[List[Checkpoint], int]:
         """One page of every training run's checkpoints, newest first, and the
         total. Sizes are walked for the page only, not for every checkpoint."""
         records = [rec for model_id in self.store.model_ids() for rec in self.store.list(model_id, with_size=False)]
-        records.sort(key=lambda r: (r.get("created_at") or "", r["uri"]), reverse=True)
-        page = []
-        for rec in records[offset:offset + limit]:
-            rec["size_bytes"] = self.store.size_bytes(CheckpointRef.parse(rec["uri"]))
-            page.append(self._tinker_shape(rec))
-        return page, len(records)
+        records.sort(key=lambda r: (r["created_at"], r["uri"]), reverse=True)
+        return [self._checkpoint(rec) for rec in records[offset:offset + limit]], len(records)
 
-    def latest_checkpoints(self, model_id: str) -> Dict[str, Optional[Dict[str, Any]]]:
+    def latest_checkpoints(self, model_id: str) -> Dict[str, Optional[Checkpoint]]:
         """A run's newest loadable checkpoint of each kind a TrainingRun names:
         completed and not expired, so the path it reports still resolves."""
-        latest: Dict[str, Optional[Dict[str, Any]]] = {"last_checkpoint": None, "last_sampler_checkpoint": None}
+        latest: Dict[str, Optional[Checkpoint]] = {"last_checkpoint": None, "last_sampler_checkpoint": None}
         field_of = {CheckpointKind.WEIGHTS: "last_checkpoint", CheckpointKind.SAMPLER_WEIGHTS: "last_sampler_checkpoint"}
         for rec in self.store.list(model_id, with_size=False):   # newest first
-            field = field_of.get(CheckpointKind(rec["kind"]))
+            field = field_of.get(CheckpointKind(rec["kind"]))   # None: a run names no external checkpoint
             if field is None or latest[field] is not None:
                 continue
-            if rec.get("status") != CheckpointStatus.COMPLETED.value or is_expired(rec):
+            if rec["status"] != CheckpointStatus.COMPLETED.value or is_expired(rec):
                 continue
-            latest[field] = self._tinker_shape(rec)
+            latest[field] = self._checkpoint(rec)
         return latest
 
     def set_ttl(self, ref: CheckpointRef, ttl_seconds: Optional[int]) -> bool:

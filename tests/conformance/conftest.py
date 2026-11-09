@@ -141,6 +141,19 @@ def service_client(server):
     return tinker.ServiceClient(base_url=server.base_url, api_key=API_KEY)
 
 
+@pytest.fixture
+def rest(server, service_client):
+    import tinker
+    return tinker.RestClient(base_url=server.base_url, api_key=API_KEY)
+
+
+def run_cli(server, *args, timeout=120):
+    """`python -m tinker.cli --format json <args>` against the server."""
+    env = {**os.environ, "TINKER_BASE_URL": server.base_url, "TINKER_API_KEY": API_KEY}
+    return subprocess.run([sys.executable, "-m", "tinker.cli", "--format", "json", *args],
+                          env=env, capture_output=True, text=True, timeout=timeout)
+
+
 def make_datum(tokens):
     import tinker
     return tinker.Datum(

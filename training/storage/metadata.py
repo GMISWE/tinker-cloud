@@ -150,7 +150,8 @@ class MetadataStorage:
         self,
         model_id: Optional[str] = None,
         base_model: Optional[str] = None,
-        limit: int = 100
+        *,
+        limit: Optional[int],
     ) -> List[Dict[str, Any]]:
         """
         List all training runs with optional filters.
@@ -158,7 +159,7 @@ class MetadataStorage:
         Args:
             model_id: Filter by model ID
             base_model: Filter by base model name
-            limit: Maximum number of results
+            limit: Maximum number of results; None returns every run
 
         Returns:
             List of training run metadata dicts
@@ -171,7 +172,7 @@ class MetadataStorage:
             key=lambda p: p.stat().st_mtime,
             reverse=True  # Most recent first
         ):
-            if len(runs) >= limit:
+            if limit is not None and len(runs) >= limit:
                 break
 
             try:

@@ -4,7 +4,7 @@ Request models for the training API.
 This module defines Pydantic models for all API request payloads,
 providing validation and documentation.
 """
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, Iterable, List, Literal, Optional, Union
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StrictInt, ValidationError, validator, model_validator
 
@@ -534,6 +534,17 @@ class CreateSessionRequest(BaseModel):
 # defaults and bounds. One implicit owner and project: this server has no accounts.
 LOCAL_OWNER = "urn:tinkercloud:owner:local"
 DEFAULT_PROJECT = "default"
+
+
+class UnknownProject(ValueError):
+    """A project id other than the one this server has (a 404, as Tinker answers an unknown project)."""
+
+
+def require_known_projects(project_ids: Iterable[str]) -> None:
+    """Raise UnknownProject unless every id is DEFAULT_PROJECT."""
+    unknown = [p for p in project_ids if p != DEFAULT_PROJECT]
+    if unknown:
+        raise UnknownProject(f"project {', '.join(unknown)} not found; this server has one project, {DEFAULT_PROJECT!r}")
 
 
 class SessionStatusQuery(BaseModel):
