@@ -7,6 +7,7 @@ once; a claim its worker did not settle is taken again once it is CLAIM_LEASE_S 
 """
 import json
 import logging
+import os
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -25,6 +26,33 @@ SAMPLER_COLUMNS = "sampler_id, session_id, model_id, base_model, model_path, pin
 # released for a retry). A worker killed mid-free settles nothing, so a claim this old is taken again;
 # so is one whose delete is still running, and the engine then runs that teardown a second time.
 CLAIM_LEASE_S = 600.0
+
+
+_process: Tuple[int, str] = (0, "")
+
+
+def _worker() -> str:
+    """This process as a holder of pending create requests: its pid and a nonce drawn once per
+    process, so a later process that is given the same pid is a different worker."""
+    global _process
+    if _process[0] != os.getpid():   # first call, or the first after a fork
+        _process = (os.getpid(), uuid.uuid4().hex[:8])
+    return f"{_process[0]}:{_process[1]}"
+
+
+def _worker_alive(worker: str) -> bool:
+    """Whether the process that recorded `worker` still runs. Every gateway worker runs on one host,
+    so its pid is checked here; a reused pid reads as alive, which keeps a row, never drops one."""
+    pid = int(worker.split(":", 1)[0])
+    if pid == os.getpid():
+        return worker == _worker()
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:   # a process of another user holds the pid: it runs
+        return True
+    return True
 
 
 def _now() -> str:
@@ -91,14 +119,16 @@ class SessionStore:
             created_at TEXT NOT NULL, PRIMARY KEY (session_id, model_id))""")
         c.execute("""CREATE TABLE IF NOT EXISTS model_reaps (
             model_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, claimed_at TEXT)""")
+        # a model's create requests that have no answer yet, per worker that forwarded them
+        c.execute("""CREATE TABLE IF NOT EXISTS model_requests (
+            model_id TEXT NOT NULL, worker TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (model_id, worker))""")
         # columns added after the first release; a pre-existing file lacks them
         self._add_missing_columns("sessions", {"finished_at": "TEXT", "finish_reason": "TEXT", "finish_detail": "TEXT",
                                                "display_name": "TEXT"})
         self._add_missing_columns("samplers", {"client_counter": "INTEGER NOT NULL DEFAULT 0", "pinned_version": "INTEGER"})
-        # pending: requests that create the model and have no answer yet; confirmed: the engine accepted one
-        # (a row from before these columns is an accepted model)
-        self._add_missing_columns("session_models", {"engine": "TEXT", "pending": "INTEGER NOT NULL DEFAULT 0",
-                                                     "confirmed": "INTEGER NOT NULL DEFAULT 1"})
+        # confirmed: the engine accepted a request that creates the model (a row from before the column
+        # is an accepted model). A file written by an earlier release also has an unused `pending` column.
+        self._add_missing_columns("session_models", {"engine": "TEXT", "confirmed": "INTEGER NOT NULL DEFAULT 1"})
         c.execute("CREATE INDEX IF NOT EXISTS idx_samplers_session ON samplers(session_id)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_sessions_heartbeat ON sessions(last_heartbeat)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_session_models_seq ON session_models(session_id, model_seq_id)")
@@ -216,30 +246,54 @@ class SessionStore:
     # ------------------------------------------------------------------ models
 
     def add_model(self, session_id: str, model_id: str, model_seq_id: int, base_model: Optional[str], engine: str) -> None:
-        """Record a model at submit, with one more request pending for it: a retried create-via-load, or
-        another load racing it, finds the row the first one wrote and leaves it as it is. settle_model
-        ends each request. A create the engine fails later is dropped when the engine reports it (a
-        report that itself fails leaves the row to its delete or the reaper); a delete of a model the
-        engine never had gets the engine's 404 and drops the row."""
-        self._write("INSERT INTO session_models (session_id, model_id, model_seq_id, base_model, created_at, engine, pending, confirmed) "
-                    "VALUES (?, ?, ?, ?, ?, ?, 1, 0) ON CONFLICT (session_id, model_id) DO UPDATE SET pending = pending + 1",
-                    (session_id, model_id, model_seq_id, base_model, _now(), engine))
+        """Record a model at submit, and one more request pending for it from this worker: a retried
+        create-via-load, or another load racing it, finds the row the first one wrote and leaves it as
+        it is. settle_model ends each request. A create the engine fails later is dropped when the
+        engine reports it (a report that itself fails leaves the row to its delete or the reaper); a
+        delete of a model the engine never had gets the engine's 404 and drops the row."""
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._write("INSERT INTO session_models (session_id, model_id, model_seq_id, base_model, created_at, engine, confirmed) "
+                        "VALUES (?, ?, ?, ?, ?, ?, 0) ON CONFLICT (session_id, model_id) DO NOTHING",
+                        (session_id, model_id, model_seq_id, base_model, _now(), engine))
+            self._write("INSERT INTO model_requests (model_id, worker, n) VALUES (?, ?, 1) "
+                        "ON CONFLICT (model_id, worker) DO UPDATE SET n = n + 1", (model_id, _worker()))
+            self._conn.execute("COMMIT")
+        except BaseException:   # the transaction's own rollback; the error goes on
+            self._conn.execute("ROLLBACK")
+            raise
 
     def settle_model(self, model_id: str, accepted: Optional[bool]) -> None:
         """A request add_model counted has its answer. True: the engine accepted it, and the row stays.
         False: the engine refused it, and the row goes unless the engine accepted another request for the
-        model or one is still pending; two loads of one create-via-load id race, and the refused one may
-        answer first or last. None: no answer (the engine unreachable), and the row stays for its delete
-        or the reaper. A row that is gone stays gone: the engine reported the create failed."""
-        self._write("UPDATE session_models SET pending = MAX(pending - 1, 0), confirmed = confirmed OR ? WHERE model_id = ?",
-                    (int(accepted is True), model_id))
-        if accepted is False:
-            self._write("DELETE FROM session_models WHERE model_id = ? AND confirmed = 0 AND pending = 0", (model_id,))
+        model or a running worker still waits on one; two loads of one create-via-load id race, and the
+        refused one may answer first or last. A request whose worker died unanswered holds nothing.
+        None: no answer (the engine unreachable), and the row stays for its delete or the reaper. A row
+        that is gone stays gone: the engine reported the create failed."""
+        worker = _worker()
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._write("UPDATE model_requests SET n = n - 1 WHERE model_id = ? AND worker = ?", (model_id, worker))
+            self._write("DELETE FROM model_requests WHERE model_id = ? AND worker = ? AND n <= 0", (model_id, worker))
+            if accepted is True:
+                self._write("UPDATE session_models SET confirmed = 1 WHERE model_id = ?", (model_id,))
+            elif accepted is False:
+                holders = [w for (w,) in self._read("SELECT worker FROM model_requests WHERE model_id = ?", (model_id,))]
+                for gone in [w for w in holders if not _worker_alive(w)]:
+                    self._write("DELETE FROM model_requests WHERE model_id = ? AND worker = ?", (model_id, gone))
+                    holders.remove(gone)
+                if not holders:
+                    self._write("DELETE FROM session_models WHERE model_id = ? AND confirmed = 0", (model_id,))
+            self._conn.execute("COMMIT")
+        except BaseException:   # the transaction's own rollback; the error goes on
+            self._conn.execute("ROLLBACK")
+            raise
 
     def remove_model(self, model_id: str) -> Optional[str]:
         """Drop the model and pending reap rows; the session that owned it, or None."""
         rows = self._read("SELECT session_id FROM session_models WHERE model_id = ?", (model_id,))
         self._write("DELETE FROM model_reaps WHERE model_id = ?", (model_id,))
+        self._write("DELETE FROM model_requests WHERE model_id = ?", (model_id,))
         self._claims.pop(model_id, None)
         if not rows:
             return None

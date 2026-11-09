@@ -19,7 +19,8 @@ from ..models.responses import (
 )
 from ..core.dependencies import (
     verify_api_key_dep,
-    get_runtime, 
+    get_auth,
+    get_runtime,
     get_config,
 )
 from ..core.task_manager import TaskManager
@@ -33,42 +34,19 @@ router = APIRouter(
 )
 
 
-def _visible_model_ids(request: Request, training_clients):
-    """Live model ids for a caller holding the API key; None for anyone else (probes)."""
-    auth = request.app.state.auth
-    return list(training_clients.keys()) if auth.is_valid(request.headers.get(auth.header_name)) else None
-
-
 @router.get("/health", response_model=HealthResponse)
-async def health_simple(request: Request):
-    """Health check for k8s probes (backward compatibility)"""
-    runtime = get_runtime(request)
-    training_clients = runtime.training_clients
-
-    return HealthResponse(
-        status="healthy",
-        version="3.1.0",
-        timestamp=datetime.now().isoformat(),
-        ray_initialized=ray.is_initialized(),
-        active_training_clients=len(training_clients),
-        model_ids=_visible_model_ids(request, training_clients),
-        futures_count=TaskManager.inflight_count()
-    )
-
-
 @router.get("/api/v1/health", response_model=HealthResponse)
 async def health(request: Request):
-    """Health check endpoint - refactored with typed response"""
-    runtime = get_runtime(request)
-    training_clients = runtime.training_clients
-
+    """Health for probes (keyless) and clients: live model ids only for a caller holding the API key."""
+    training_clients = get_runtime(request).training_clients
+    auth = get_auth(request)
     return HealthResponse(
         status="healthy",
         version="3.1.0",
         timestamp=datetime.now().isoformat(),
         ray_initialized=ray.is_initialized(),
         active_training_clients=len(training_clients),
-        model_ids=_visible_model_ids(request, training_clients),
+        model_ids=list(training_clients.keys()) if auth.is_valid(request.headers.get(auth.header_name)) else None,
         futures_count=TaskManager.inflight_count()
     )
 

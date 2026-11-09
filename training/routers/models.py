@@ -17,7 +17,7 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
 from ..services.checkpoint_service import CheckpointService
-from ..services.model_service import ModelService
+from ..services.model_service import DeleteInProgress, ModelService
 from ..core.task_manager import TaskManager
 from ..core.dependencies import (
     verify_api_key_dep,
@@ -116,12 +116,7 @@ async def create_model(
             )
         except Exception:
             # the gateway recorded the model at submit; a create that fails is reported before the future is
-            gateway = http_request.app.state.gateway_client
-            if gateway is not None:   # None: an engine with no gateway
-                try:
-                    await gateway.model_failed(model_id)
-                except httpx.HTTPError:   # the create's own error is the one to report; the row's fate is logged beside it
-                    logger.exception("Gateway did not drop the failed model %s", model_id)
+            await report_model_failed(http_request, model_id)
             raise
 
     # Create async task
@@ -137,6 +132,18 @@ async def create_model(
         request_id=request_id,
         model_id=model_id
     )
+
+
+async def report_model_failed(http_request: Request, model_id: str) -> None:
+    """Tell the gateway, which recorded `model_id` at submit, that no such model is coming: its row
+    goes now, not at the next delete. A gateway that does not answer is logged beside the create's
+    own error, which is the one the request reports."""
+    gateway = http_request.app.state.gateway_client
+    if gateway is not None:   # None: an engine with no gateway
+        try:
+            await gateway.model_failed(model_id)
+        except httpx.HTTPError:
+            logger.exception("Gateway did not drop the failed model %s", model_id)
 
 
 @router.post("/api/v1/delete_model", response_model=DeleteModelResponse)
@@ -157,6 +164,8 @@ async def delete_model(
         return DeleteModelResponse(**result)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
+    except DeleteInProgress as e:   # the gateway treats it as not confirmed and retries
+        raise HTTPException(status_code=409, detail=str(e)) from e
 
 
 @router.post("/api/v1/unload_model", response_model=AsyncOperationResponse)

@@ -17,14 +17,14 @@ Endpoints:
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Dict, Set
+from typing import Dict
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 
 from ..services.checkpoint_service import CheckpointService
 from ..services.model_service import ModelService
+from .models import report_model_failed
 from ..core.task_manager import TaskManager
 from ..config import TrainingConfig
 from ..core.dependencies import (
@@ -297,21 +297,6 @@ async def load_weights(
 # retried load finds the first one's future, and no second create of the model can be filed while
 # the first waits to run.
 CREATE_VIA_LOAD_SEQ_ID = 0
-# create-via-load models whose create raised in this process, marked as it raises: a retry that
-# arrives while that request's own report is on its way, its future still pending, reports it too
-_FAILED_CREATES: Set[str] = set()
-
-
-async def _no_model(http_request: Request, model_id: str) -> None:
-    """Tell the gateway, which recorded `model_id` at submit, that no such model is coming: its row
-    goes now, not at the next delete. A gateway that does not answer is logged; the request's own
-    answer stands."""
-    gateway = http_request.app.state.gateway_client
-    if gateway is not None:   # None: an engine with no gateway
-        try:
-            await gateway.model_failed(model_id)
-        except httpx.HTTPError:
-            logger.exception("Gateway did not drop the failed model %s", model_id)
 
 
 async def _create_via_load(
@@ -331,8 +316,8 @@ async def _create_via_load(
     and LoRA config are the checkpoint's run's; the optimizer family is the
     checkpoint's when its state is restored, else the declared one (AdamW by default).
     The same request again (the SDK resends one whose answer it lost) is answered with
-    the first one's future, before or after it has run; another load naming the model
-    is refused."""
+    the first one's future, before or after it has run, or after its create failed; after
+    the model it made was deleted, and to another load naming the model, it is refused."""
     assert request.session_id is not None and request.model_seq_id is not None  # creates() checked both
     model_id = f"{request.session_id}:train:{request.model_seq_id}"
     try:
@@ -340,16 +325,17 @@ async def _create_via_load(
     except DuplicateSeqId as e:   # another load took the id first
         if model_id in training_clients:
             raise HTTPException(status_code=400, detail=f"Model {model_id} already exists: create-via-load creates it") from None
-        status = (futures_storage.get_future(e.request_id) or {}).get("status")
         raise HTTPException(status_code=400, detail=f"Model {model_id} is taken by an earlier load_weights with another "
-                                                    f"body ({e.request_id}, {status}): load into a new model_seq_id") from None
+                                                    f"body ({e.request_id}, {e.status}): load into a new model_seq_id") from None
     if first is not None:
-        status = (futures_storage.get_future(first) or {}).get("status")
-        if model_id not in training_clients and (status != "pending" or model_id in _FAILED_CREATES):
-            # no model is coming (its create failed, or it was deleted since), and this retry recorded
-            # it at the gateway again: the row goes again
-            await _no_model(http_request, model_id)
-        return AsyncOperationResponse(request_id=first, model_id=model_id)
+        if model_id in training_clients or (first.status == "pending" and not first.create_failed):
+            return AsyncOperationResponse(request_id=first.request_id, model_id=model_id)   # made, or on its way
+        if first.status == "completed":   # the gateway drops the row this resend recorded on the refusal
+            raise HTTPException(status_code=400, detail=f"Model {model_id} was deleted after {first.request_id} created it: "
+                                                        f"load into a new model_seq_id")
+        # its create failed: this resend recorded the model at the gateway again, so the row goes again
+        await report_model_failed(http_request, model_id)
+        return AsyncOperationResponse(request_id=first.request_id, model_id=model_id)
     if model_id in training_clients:
         raise HTTPException(status_code=400, detail=f"Model {model_id} already exists: create-via-load creates it")
     ref = CheckpointRef.parse(request.path)           # 400 on a malformed path
@@ -384,16 +370,16 @@ async def _create_via_load(
                 training_runs_metadata=training_runs_metadata, optimizer_config=optimizer_config,
             )
         except Exception:
-            # the gateway recorded the model at submit; a create that fails is reported before the future is
-            _FAILED_CREATES.add(model_id)
-            await _no_model(http_request, model_id)
+            # the gateway recorded the model at submit; a create that fails is reported before the future
+            # is, and marked first, so a resend that arrives while the report is on its way reports too
+            futures_storage.mark_create_failed(request_id)
+            await report_model_failed(http_request, model_id)
             raise
         return await service.load_weights(
             model_id=model_id, request_id=request_id, ref=ref, optimizer=request.optimizer,
             training_clients=training_clients, metadata_storage=metadata_storage,
         )
 
-    _FAILED_CREATES.discard(model_id)   # filed again once the first future aged out of the futures table
     request_id = task_manager.create_task(
         request_id=request_id, operation="load_weights", model_id=model_id,
         payload=request.dict(), seq_id=CREATE_VIA_LOAD_SEQ_ID, task_func=execute,

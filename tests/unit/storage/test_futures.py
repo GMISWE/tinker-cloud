@@ -83,11 +83,37 @@ def test_legacy_schema_is_rebuilt(tmp_path):
     s2.close()
 
 
-def test_cleanup(store):
-    store.save_future("r1", "forward", {}, model_id="m")
+def test_cleanup_ages_out_finished_futures_and_keeps_pending_ones(store):
+    """A pending future's operation still runs, and a create-via-load resend is matched against it:
+    cleanup at any age, 0 included, used to delete it, and the resend then filed a second create."""
+    store.save_future("done", "forward", {}, model_id="m")
+    store.update_status("done", "completed", {"ok": True})
+    store.save_future("running", "load_weights", {"p": 1}, model_id="s:train:0", seq_id=0)
     assert store.cleanup_old_futures(max_age_hours=24) == 0
     assert store.cleanup_old_futures(max_age_hours=0) == 1
-    assert store.get_future("r1") is None
+    assert store.get_future("done") is None
+    assert store.filed("s:train:0", 0, "load_weights", {"p": 1}).request_id == "running"
+
+
+def test_purge_all_deletes_pending_futures_too(store):
+    """At a server start no earlier operation runs: a pending future left behind would never settle."""
+    store.save_future("running", "forward", {}, model_id="m")
+    assert store.purge_all() == 1
+    assert store.get_future("running") is None
+
+
+def test_filed_returns_the_status_and_the_failed_create_mark_with_the_id(store):
+    """The create-via-load dedup reads the earlier request's status in the same locked read as its id."""
+    store.save_future("r1", "load_weights", {"p": 1}, model_id="s:train:0", seq_id=0)
+    assert store.filed("s:train:0", 0, "load_weights", {"p": 1}) == ("r1", "pending", False)
+    store.mark_create_failed("r1")
+    assert store.filed("s:train:0", 0, "load_weights", {"p": 1}) == ("r1", "pending", True)
+    store.update_status("r1", "failed", {"error": "x"})
+    assert store.filed("s:train:0", 0, "load_weights", {"p": 1}) == ("r1", "failed", True)
+    assert store.filed("s:train:0", 1, "load_weights", {"p": 1}) is None
+    with pytest.raises(DuplicateSeqId) as e:
+        store.filed("s:train:0", 0, "load_weights", {"p": 2})
+    assert (e.value.request_id, e.value.status) == ("r1", "failed")
 
 
 def test_result_proto_is_stored_beside_the_json(store, tmp_path):

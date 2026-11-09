@@ -19,14 +19,14 @@ from collections import OrderedDict
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, NamedTuple, Optional
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
 _COLUMNS = ("request_id", "model_id", "operation", "status", "result",
             "created_at", "updated_at", "seq_id", "payload_hash", "payload_bytes",
-            "result_proto")
+            "result_proto", "create_failed")
 
 
 def _serialize_result(result: Any) -> Optional[str]:
@@ -42,11 +42,20 @@ def _as_plain(result: Any) -> Any:
     return result
 
 class DuplicateSeqId(ValueError):
-    """A (model_id, seq_id) pair was reused with a different request; `request_id` is the one filed there."""
+    """A (model_id, seq_id) pair was reused with a different request; `request_id` is the one filed
+    there, `status` its status."""
 
-    def __init__(self, message: str, request_id: str) -> None:
+    def __init__(self, message: str, request_id: str, status: str) -> None:
         super().__init__(message)
         self.request_id = request_id
+        self.status = status
+
+
+class Filed(NamedTuple):
+    """The request filed under a (model_id, seq_id), read in one locked statement."""
+    request_id: str
+    status: str
+    create_failed: bool   # the model create this request runs raised (mark_create_failed)
 
 
 class FuturesStorage:
@@ -90,7 +99,8 @@ class FuturesStorage:
                 seq_id INTEGER,
                 payload_hash TEXT NOT NULL,
                 payload_bytes INTEGER NOT NULL,
-                result_proto BLOB
+                result_proto BLOB,
+                create_failed INTEGER NOT NULL DEFAULT 0
             )
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_futures_status ON futures(status)")
@@ -117,6 +127,7 @@ class FuturesStorage:
     def _row_to_future(row: tuple) -> Dict[str, Any]:
         fut = dict(zip(_COLUMNS, row))
         fut["result"] = json.loads(fut["result"]) if fut["result"] else None
+        fut["create_failed"] = bool(fut["create_failed"])
         return fut
 
     def _cache_put(self, fut: Dict[str, Any]) -> None:
@@ -134,27 +145,37 @@ class FuturesStorage:
         ).fetchone()
         return self._row_to_future(row) if row else None
 
-    def filed(self, model_id: str, seq_id: int, operation: str, payload: Dict[str, Any]) -> Optional[str]:
+    def filed(self, model_id: str, seq_id: int, operation: str, payload: Dict[str, Any]) -> Optional[Filed]:
         """The request filed under (model_id, seq_id) when this one is it again (the same operation
         and payload: a retry), or None when nothing is filed there. Another request there raises
         DuplicateSeqId."""
         with self._lock:
             return self._filed(model_id, seq_id, operation, self.payload_hash(payload))
 
-    def _filed(self, model_id: str, seq_id: int, operation: str, phash: str) -> Optional[str]:
+    def _filed(self, model_id: str, seq_id: int, operation: str, phash: str) -> Optional[Filed]:
         # caller holds the lock
         row = self._conn.execute(
-            "SELECT request_id, operation, payload_hash FROM futures WHERE model_id = ? AND seq_id = ?",
+            "SELECT request_id, operation, payload_hash, status, create_failed FROM futures WHERE model_id = ? AND seq_id = ?",
             (model_id, seq_id),
         ).fetchone()
         if row is None:
             return None
-        if row[1] != operation or row[2] != phash:
+        request_id, filed_operation, filed_hash, status, create_failed = row
+        if filed_operation != operation or filed_hash != phash:
             raise DuplicateSeqId(
                 f"Training request sequence number {seq_id} was reused for {model_id} "
-                f"with a different {'operation' if row[1] != operation else 'payload'}", row[0]
+                f"with a different {'operation' if filed_operation != operation else 'payload'}", request_id, status
             ) from None
-        return row[0]
+        return Filed(request_id, status, bool(create_failed))
+
+    def mark_create_failed(self, request_id: str) -> None:
+        """Mark the model create that `request_id` runs as failed, before its future settles: a resend
+        that reads the future in between sees it."""
+        with self._lock:
+            self._conn.execute("UPDATE futures SET create_failed = 1 WHERE request_id = ?", (request_id,))
+            fut = self._cache.get(request_id)
+            if fut is not None:
+                fut["create_failed"] = True
 
     # --------------------------------------------------------------- lifecycle
     def save_future(
@@ -180,7 +201,7 @@ class FuturesStorage:
             "request_id": request_id, "model_id": model_id, "operation": operation,
             "status": "pending", "result": None, "created_at": now, "updated_at": now,
             "seq_id": seq_id, "payload_hash": phash, "payload_bytes": pbytes,
-            "result_proto": None,
+            "result_proto": None, "create_failed": False,
         }
         with self._lock:
             try:
@@ -194,8 +215,8 @@ class FuturesStorage:
                     owner = self._filed(model_id, seq_id, operation, phash)   # another request: DuplicateSeqId
                 if owner is None:
                     raise
-                logger.info("[%s] retry of seq_id %s for %s -> %s", request_id, seq_id, model_id, owner)
-                return owner
+                logger.info("[%s] retry of seq_id %s for %s -> %s", request_id, seq_id, model_id, owner.request_id)
+                return owner.request_id
             self._cache_put(fut)
         return request_id
 
@@ -266,15 +287,24 @@ class FuturesStorage:
         return row is not None
 
     def cleanup_old_futures(self, max_age_hours: int = 24) -> int:
-        """Delete futures created more than `max_age_hours` ago; returns the count."""
+        """Delete finished futures created more than `max_age_hours` ago; returns the count. A pending
+        one stays: its operation still runs, and a create-via-load resend is matched against it."""
         cutoff = (datetime.utcnow() - timedelta(hours=max_age_hours)).isoformat()
         with self._lock:
-            for rid in [r for r, f in self._cache.items() if f["created_at"] < cutoff]:
+            for rid in [r for r, f in self._cache.items() if f["created_at"] < cutoff and f["status"] != "pending"]:
                 del self._cache[rid]
-            removed = self._conn.execute("DELETE FROM futures WHERE created_at < ?", (cutoff,)).rowcount
+            removed = self._conn.execute("DELETE FROM futures WHERE created_at < ? AND status != 'pending'",
+                                         (cutoff,)).rowcount
         if removed:
             logger.info("Cleaned up %d futures older than %dh", removed, max_age_hours)
         return removed
+
+    def purge_all(self) -> int:
+        """Delete every future, pending ones included; returns the count. For a server start: no
+        operation of an earlier process runs any more."""
+        with self._lock:
+            self._cache.clear()
+            return self._conn.execute("DELETE FROM futures").rowcount
 
     def get_stats(self) -> Dict[str, int]:
         with self._lock:

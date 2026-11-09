@@ -10,7 +10,7 @@ All model lifecycle operations delegate to the TrainingBackend instance.
 """
 import logging
 from datetime import datetime
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Set, Tuple
 
 from ..backends.base import TrainingBackend
 from ..models.requests import OptimizerConfig
@@ -23,6 +23,10 @@ from ..utils.model_config import detect_architecture, detect_num_gpus
 logger = logging.getLogger(__name__)
 
 
+class DeleteInProgress(Exception):
+    """A delete of this model is already running; this one did not start."""
+
+
 class ModelService:
     """Service for managing ML model lifecycle and resources."""
 
@@ -30,6 +34,7 @@ class ModelService:
         self.backend = backend
         self.store = store
         self.sample_futures = sample_futures
+        self._deleting: Set[str] = set()   # model ids whose backend delete is running
 
     def require_optimizer(self, optimizer_config: OptimizerConfig) -> None:
         """Raises ValueError (a 400) naming the backend when it does not serve
@@ -136,12 +141,20 @@ class ModelService:
         training_clients: Dict[str, Dict[str, Any]],
         metadata_storage: MetadataStorage,
     ) -> Dict[str, Any]:
-        """Delete training client and release GPU resources."""
+        """Delete training client and release GPU resources. One delete per model runs at a time:
+        another that arrives while it runs raises DeleteInProgress and never reaches the backend,
+        whose teardown would otherwise run twice (the model leaves `training_clients` only after it)."""
         if model_id not in training_clients:
             raise KeyError(f"Model {model_id} not found")
+        if model_id in self._deleting:
+            raise DeleteInProgress(f"Model {model_id}: a delete is in progress")
 
         client_info = training_clients[model_id]
-        await self.backend.delete_model(client_info["backend_handle"])
+        self._deleting.add(model_id)
+        try:
+            await self.backend.delete_model(client_info["backend_handle"])
+        finally:
+            self._deleting.discard(model_id)
 
         # Registry first, route second: a sample resolves handle and route in
         # one synchronous stretch, so it sees "model gone", never a bare
