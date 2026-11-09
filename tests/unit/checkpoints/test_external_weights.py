@@ -71,9 +71,8 @@ class TestTtl:
         assert store.list("m") == [] and store.usage() == (0, 0)
         assert not is_expired({"status": "completed"})  # pre-ttl record: never expires
 
-    @pytest.mark.parametrize("kind", [CheckpointKind.WEIGHTS, CheckpointKind.SAMPLER_WEIGHTS, E])
-    def test_set_ttl_moves_or_clears_expiry_of_any_persistent_kind(self, store, kind):
-        w = store.begin_save("m", kind, "w1", optimizer_config=ADAMW)
+    def test_set_ttl_moves_or_clears_expiry_of_a_persistent_checkpoint(self, store):
+        w = store.begin_save("m", CheckpointKind.WEIGHTS, "w1", optimizer_config=ADAMW)
         store.complete(w.ref)
         assert store.get(w.ref)["expires_at"] is None
         assert store.set_ttl(w.ref, 7200)

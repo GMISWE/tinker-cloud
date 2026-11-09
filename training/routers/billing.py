@@ -25,8 +25,8 @@ GIGABYTE = 2 ** 30
 
 @router.get("/api/v1/billing/usage/checkpoints/current", response_model=CurrentCheckpointStorageUsageResponse)
 async def current_checkpoint_storage_usage(
-    project_id: Optional[str] = Depends(known_project),
     _: None = Depends(verify_api_key_dep),
+    project_id: Optional[str] = Depends(known_project),
     store: CheckpointStore = Depends(get_checkpoint_store),
 ):
     """One row aggregating every completed persistent checkpoint on this server. The server

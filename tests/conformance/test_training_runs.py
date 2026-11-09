@@ -90,3 +90,9 @@ def test_an_unknown_project_is_404_and_the_default_project_lists_every_run(servi
     assert r.status_code == 404 and "elsewhere" in r.json()["error"]   # as sessions/search answers
     ids = {r.training_run_id for r in rest.list_training_runs(limit=1000, project_id="default").result().training_runs}
     assert tc.model_id in ids
+
+
+def test_an_unknown_project_without_a_key_is_401_not_404(server):
+    for path in ("/api/v1/training_runs", "/api/v1/billing/usage/checkpoints/current"):
+        r = requests.get(f"{server.base_url}{path}", params={"project_id": "elsewhere"}, timeout=30)
+        assert r.status_code == 401, (path, r.text)   # the key first: no project names to a caller without one
