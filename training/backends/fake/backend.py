@@ -16,6 +16,8 @@ function of the inputs:
 
 Set FAKE_BACKEND_TRACE=<path> to append one JSON line per backend call
 ({"op", "model_id", ...args}) — tests read this instead of poking internals.
+Set FAKE_BACKEND_GATE=<dir> to hold a model's create while <dir>/<model_id>.hold
+exists, and fail it when <dir>/<model_id>.fail exists.
 """
 import asyncio
 import json
@@ -93,6 +95,7 @@ class FakeBackend(TrainingBackend[FakeHandle]):
         self.overrides = overrides or {}
         self._models: Dict[str, FakeHandle] = {}
         self._trace_path = os.getenv("FAKE_BACKEND_TRACE")
+        self._gate = os.getenv("FAKE_BACKEND_GATE")
         # overrides {"base_models": [...]}: the base models it serves as base-model samplers
         # (the automodel stand-in); none by default, like every GPU backend but automodel
         self._base_models = tuple(self.overrides.get("base_models", ()))
@@ -119,6 +122,11 @@ class FakeBackend(TrainingBackend[FakeHandle]):
         rl_config: Optional[Dict[str, Any]] = None, rollout_config: Optional[Dict[str, Any]] = None,
         native_root: Optional[Path] = None, *, optimizer: str,
     ) -> FakeHandle:
+        if self._gate:
+            while (Path(self._gate) / f"{model_id}.hold").exists():
+                await asyncio.sleep(0.02)
+            if (Path(self._gate) / f"{model_id}.fail").exists():
+                raise BackendError(f"create of {model_id} failed by {self._gate}", backend="fake", operation="create_model")
         # A model directory is read like the GPU backends read theirs (head,
         # context window); a bare name ("fake/tiny") is the test double.
         raw = read_raw_hf_config(base_model) if (Path(base_model) / "config.json").is_file() else None

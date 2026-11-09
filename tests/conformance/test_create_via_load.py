@@ -95,6 +95,33 @@ def test_the_new_model_steps_and_saves_under_its_id(server, checkpoint):
     assert "already exists" in r.text
 
 
+def test_a_retry_of_a_failed_create_via_load_leaves_no_model_in_the_session(server, checkpoint):
+    """The first create fails and the gateway drops the model it recorded. The SDK then resends the load:
+    the gateway records the model again, and the engine, answering with the failed future, has it dropped
+    again. Another load naming the model is refused for the failed create."""
+    import requests
+    from .conftest import API_KEY
+    session_id = _session(server)
+    model_id = f"{session_id}:train:0"
+    (server.gate / f"{model_id}.fail").touch()
+
+    def runs():
+        r = requests.get(f"{server.base_url}/api/v1/sessions/{session_id}", headers={"X-API-Key": API_KEY}, timeout=30)
+        return r.json()["training_run_ids"]
+
+    load = {"session_id": session_id, "model_seq_id": 0, "path": checkpoint, "optimizer": False}
+    first = server.post("/api/v1/load_weights", load)
+    assert first.status_code == 200 and first.json()["model_id"] == model_id, first.text
+    assert _future(server, first.json()["request_id"]).status_code == 400
+    assert runs() == []
+    retry = server.post("/api/v1/load_weights", load)
+    assert retry.status_code == 200 and retry.json() == first.json(), retry.text
+    assert runs() == []
+    r = server.post("/api/v1/load_weights", {**load, "optimizer": True})
+    assert r.status_code == 400 and "failed" in r.text and "already exists" not in r.text, r.text
+    assert runs() == []
+
+
 def test_a_refused_create_via_load_leaves_no_model_in_the_session(server, checkpoint):
     import requests
     from .conftest import API_KEY

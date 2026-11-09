@@ -42,7 +42,11 @@ def _as_plain(result: Any) -> Any:
     return result
 
 class DuplicateSeqId(ValueError):
-    """A (model_id, seq_id) pair was reused with a different request."""
+    """A (model_id, seq_id) pair was reused with a different request; `request_id` is the one filed there."""
+
+    def __init__(self, message: str, request_id: str) -> None:
+        super().__init__(message)
+        self.request_id = request_id
 
 
 class FuturesStorage:
@@ -130,15 +134,27 @@ class FuturesStorage:
         ).fetchone()
         return self._row_to_future(row) if row else None
 
-    def find_by_seq_id(self, model_id: str, seq_id: int) -> Optional[Dict[str, Any]]:
+    def filed(self, model_id: str, seq_id: int, operation: str, payload: Dict[str, Any]) -> Optional[str]:
+        """The request filed under (model_id, seq_id) when this one is it again (the same operation
+        and payload: a retry), or None when nothing is filed there. Another request there raises
+        DuplicateSeqId."""
         with self._lock:
-            row = self._conn.execute(
-                "SELECT request_id, operation, payload_hash FROM futures WHERE model_id = ? AND seq_id = ?",
-                (model_id, seq_id),
-            ).fetchone()
+            return self._filed(model_id, seq_id, operation, self.payload_hash(payload))
+
+    def _filed(self, model_id: str, seq_id: int, operation: str, phash: str) -> Optional[str]:
+        # caller holds the lock
+        row = self._conn.execute(
+            "SELECT request_id, operation, payload_hash FROM futures WHERE model_id = ? AND seq_id = ?",
+            (model_id, seq_id),
+        ).fetchone()
         if row is None:
             return None
-        return {"request_id": row[0], "operation": row[1], "payload_hash": row[2]}
+        if row[1] != operation or row[2] != phash:
+            raise DuplicateSeqId(
+                f"Training request sequence number {seq_id} was reused for {model_id} "
+                f"with a different {'operation' if row[1] != operation else 'payload'}", row[0]
+            ) from None
+        return row[0]
 
     # --------------------------------------------------------------- lifecycle
     def save_future(
@@ -173,21 +189,13 @@ class FuturesStorage:
                     tuple(fut[c] for c in _COLUMNS),
                 )
             except sqlite3.IntegrityError:
-                row = None
+                owner = None
                 if seq_id is not None and model_id is not None:
-                    row = self._conn.execute(
-                        "SELECT request_id, operation, payload_hash FROM futures WHERE model_id = ? AND seq_id = ?",
-                        (model_id, seq_id),
-                    ).fetchone()
-                if row and row[1] == operation and row[2] == phash:
-                    logger.info("[%s] retry of seq_id %s for %s -> %s", request_id, seq_id, model_id, row[0])
-                    return row[0]
-                if row:
-                    raise DuplicateSeqId(
-                        f"Training request sequence number {seq_id} was reused for {model_id} "
-                        f"with a different {'operation' if row[1] != operation else 'payload'}"
-                    ) from None
-                raise
+                    owner = self._filed(model_id, seq_id, operation, phash)   # another request: DuplicateSeqId
+                if owner is None:
+                    raise
+                logger.info("[%s] retry of seq_id %s for %s -> %s", request_id, seq_id, model_id, owner)
+                return owner
             self._cache_put(fut)
         return request_id
 

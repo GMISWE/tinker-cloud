@@ -40,7 +40,8 @@ class Server:
         self.trace_path = tmp / "trace.jsonl"
         self.log_path = tmp / "server.log"
         self.engine_log_path = tmp / "engine.log"
-        for d in (self.metadata_dir, self.checkpoint_base):
+        self.gate = tmp / "gate"   # the fake backend holds or fails a model's create on a file here
+        for d in (self.metadata_dir, self.checkpoint_base, self.gate):
             d.mkdir(parents=True, exist_ok=True)
         env = {
             **os.environ,
@@ -50,6 +51,7 @@ class Server:
             "TINKERCLOUD_BACKEND": "fake",
             "TINKER_API_KEY": API_KEY,
             "FAKE_BACKEND_TRACE": str(self.trace_path),
+            "FAKE_BACKEND_GATE": str(self.gate),
             "TINKERCLOUD_URL_SIGNING_KEY": SIGNING_KEY,
             "TRAINING_HOST": "127.0.0.1",
             "TRAINING_PORT": str(self.port),

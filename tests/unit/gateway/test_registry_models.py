@@ -1,10 +1,11 @@
 """The model registry is written at submit: the gateway mints the id, records the model under its
 session before the engine answers, and drops the row when the engine has deleted the model or never had it."""
+import asyncio
 import re
 
 import orjson
 
-from .support import Harness, run, serve_uds
+from .support import MODEL, Harness, run, serve_uds
 
 ID = re.compile(r"^model_fake_[0-9a-f]{16}$")
 
@@ -120,6 +121,73 @@ def test_a_create_without_session_fields_is_the_engines_422(tmp_path):
                 r = await h.post_json("/api/v1/create_model", {"base_model": "fake/tiny"})
                 assert r.status_code == 200   # the recording engine answers 200; a real engine's pydantic says 422
                 assert "x-model-id" not in h.engine.requests[-1]["headers"]
+        finally:
+            await h.close()
+    run(main())
+
+
+def test_a_refused_second_create_via_load_leaves_the_first_requests_row(tmp_path):
+    """create-via-load records the SDK's own id `{session}:train:{seq}` at submit. The engine refusing
+    the first request leaves no row; refusing another load naming the model (it exists) leaves the row
+    the first wrote."""
+    async def main():
+        h = Harness(str(tmp_path))
+        try:
+            async with serve_uds(h.engine, h.engine_socket):
+                await h.register()
+                sid = await h.create_session()
+                load = {"session_id": sid, "model_seq_id": 0, "path": f"tinker://{MODEL}/weights/w"}
+                h.engine.answers["/api/v1/load_weights"] = 400
+                assert (await h.post_json("/api/v1/load_weights", load)).status_code == 400
+                assert (await h.get(f"/api/v1/sessions/{sid}")).json()["training_run_ids"] == []
+                del h.engine.answers["/api/v1/load_weights"]
+                assert (await h.post_json("/api/v1/load_weights", load)).status_code == 200
+                assert (await h.get(f"/api/v1/sessions/{sid}")).json()["training_run_ids"] == [f"{sid}:train:0"]
+                h.engine.answers["/api/v1/load_weights"] = 400   # "already exists"
+                assert (await h.post_json("/api/v1/load_weights", {**load, "optimizer": True})).status_code == 400
+                assert (await h.get(f"/api/v1/sessions/{sid}")).json()["training_run_ids"] == [f"{sid}:train:0"]
+        finally:
+            await h.close()
+    run(main())
+
+
+def test_a_refused_load_racing_an_accepted_one_leaves_the_row(tmp_path):
+    """Loads a and b create one model, `{session}:train:0`: a writes the row, both reach the engine,
+    the engine accepts b and refuses a. The model is b's, so the row stays, whichever answer the
+    gateway sees first."""
+    async def main():
+        h = Harness(str(tmp_path))
+        release = {"a": asyncio.Event(), "b": asyncio.Event()}
+        arrived = {"a": asyncio.Event(), "b": asyncio.Event()}
+
+        def hold(request):
+            if request["path"] != "/api/v1/load_weights":
+                return None
+            name = orjson.loads(request["body"])["path"].rsplit("/", 1)[1]
+            arrived[name].set()
+            return release[name].wait()
+        h.engine.on_request = hold
+        try:
+            async with serve_uds(h.engine, h.engine_socket):
+                await h.register()
+                for refused_first in (False, True):
+                    for e in (*release.values(), *arrived.values()):
+                        e.clear()
+                    sid = await h.create_session()
+                    load = {"session_id": sid, "model_seq_id": 0}
+                    a = asyncio.create_task(h.post_json("/api/v1/load_weights", {**load, "path": f"tinker://{MODEL}/weights/a"}))
+                    await arrived["a"].wait()   # a's row is written
+                    b = asyncio.create_task(h.post_json("/api/v1/load_weights", {**load, "path": f"tinker://{MODEL}/weights/b"}))
+                    await arrived["b"].wait()
+                    for name, task, status in ([("a", a, 400), ("b", b, 200)] if refused_first else [("b", b, 200), ("a", a, 400)]):
+                        if status == 400:
+                            h.engine.answers["/api/v1/load_weights"] = 400   # the slot is b's
+                        else:
+                            h.engine.answers.pop("/api/v1/load_weights", None)
+                        release[name].set()
+                        assert (await task).status_code == status, (refused_first, name)
+                    runs = (await h.get(f"/api/v1/sessions/{sid}")).json()["training_run_ids"]
+                    assert runs == [f"{sid}:train:0"], (refused_first, runs)
         finally:
             await h.close()
     run(main())
