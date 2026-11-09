@@ -4,12 +4,18 @@ estimation, architecture detection. Miles-specific resolution (torch_dist
 paths, SGLang memory, parallelism auto-detect) lives in
 backends/miles/model_setup.py.
 """
+import asyncio
 import json
 import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+from ..config import get_config
+
+if TYPE_CHECKING:
+    from ..backends.base import TrainingBackend
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +34,74 @@ def read_raw_hf_config(base_model: str) -> Dict[str, Any]:
     from huggingface_hub import hf_hub_download
     with open(hf_hub_download(hf_path, "config.json")) as f:
         return json.load(f)
+
+
+# Where a model repository names code of its own for transformers to import (`auto_map`): its
+# config (AutoConfig, AutoModel*), its tokenizer (AutoTokenizer) and its processor configs
+# (AutoProcessor, AutoImageProcessor, AutoFeatureExtractor, AutoVideoProcessor).
+_CODE_DECLARING_FILES = ("config.json", "tokenizer_config.json", "processor_config.json",
+                         "preprocessor_config.json", "video_preprocessor_config.json")
+
+
+def remote_code_trusted(model: str) -> bool:
+    """True only for a model the operator lists in TINKERCLOUD_TRUST_REMOTE_CODE_MODELS
+    (TrainingConfig.trust_remote_code_models), matched exactly against the id or path being loaded."""
+    return model in get_config().trust_remote_code_models
+
+
+async def check_model_code(backend: "TrainingBackend", base_model: str) -> None:
+    """check_remote_code on each repository `backend` loads for `base_model`, exactly as the backend
+    names them (TrainingBackend.model_repositories): the model service runs it before a create
+    reaches the backend, and the engine before a base-model sampler starts."""
+    for repo in backend.model_repositories(base_model):
+        await asyncio.to_thread(check_remote_code, repo)
+
+
+def check_remote_code(repo: str) -> None:
+    """Raises ValueError when `repo`, a hub id or a local directory, declares custom code (an
+    `auto_map` in its config, tokenizer or processor config, whichever exist) and the operator does
+    not trust it. The server's own loads pass trust_remote_code only for a trusted model, but NeMo
+    RL loads its tokenizer trusting remote code whatever it is given, so the repository is checked
+    before any backend sees it."""
+    if remote_code_trusted(repo):
+        return
+    local = Path(repo)
+    if local.is_dir():
+        declaring = [name for name in _CODE_DECLARING_FILES
+                     if (local / name).is_file() and _declares_code(str(local / name))]
+    else:
+        declaring = _hub_files_declaring_code(repo)
+    if declaring:
+        raise ValueError(
+            f"{repo!r} declares custom code (auto_map in {', '.join(declaring)}); the server runs a model "
+            f"repository's code only for models the operator lists in TINKERCLOUD_TRUST_REMOTE_CODE_MODELS")
+
+
+def _declares_code(path: str) -> bool:
+    with open(path) as f:
+        raw = json.load(f)
+    return isinstance(raw, dict) and bool(raw.get("auto_map"))
+
+
+def _hub_files_declaring_code(repo: str) -> List[str]:
+    """The hub repository's files that declare code; none for an id naming no repository this
+    server can read, since nothing of it can load (the backend reports the model itself). A file
+    the hub cannot answer for (unreachable, or offline mode, and not cached) fails the check."""
+    from huggingface_hub import hf_hub_download
+    from huggingface_hub.utils import EntryNotFoundError, HFValidationError, LocalEntryNotFoundError, RepositoryNotFoundError
+    declaring = []
+    for name in _CODE_DECLARING_FILES:
+        try:
+            path = hf_hub_download(repo, name)
+        except LocalEntryNotFoundError:   # an EntryNotFoundError too, but nothing is known about the file
+            raise
+        except EntryNotFoundError:   # the repository has no such file
+            continue
+        except (RepositoryNotFoundError, HFValidationError):
+            return []
+        if _declares_code(path):
+            declaring.append(name)
+    return declaring
 
 
 _CONTEXT_LENGTH_KEYS = (
@@ -151,7 +225,7 @@ def load_model_config(base_model: str) -> Dict[str, Any]:
     hf_model_path = base_model.replace('_torch_dist', '')
 
     try:
-        config = AutoConfig.from_pretrained(hf_model_path, trust_remote_code=True)
+        config = AutoConfig.from_pretrained(hf_model_path, trust_remote_code=remote_code_trusted(hf_model_path))
 
         return {
             'num_layers': config.num_hidden_layers,

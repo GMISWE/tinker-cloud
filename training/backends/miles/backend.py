@@ -24,7 +24,7 @@ from .config import NO_CLIP_EPS_HIGH, MilesConfig
 from ...core import routing
 from ...core.loss_registry import clip_thresholds
 from ...checkpoints.interchange import export_hf_adapter
-from .model_setup import record_native_checkpoint, resolve_native_checkpoint
+from .model_setup import detect_torch_dist_path, record_native_checkpoint, resolve_native_checkpoint
 from ..http_pool import HttpClientPool
 from .sglang_client import SGLangClient
 
@@ -269,6 +269,10 @@ class MilesBackend(TrainingBackend[MilesHandle]):
         # lock order is always admin -> pool.lock.
         self._pool: Optional[MilesPool] = None
         self._pool_admin = asyncio.Lock()
+
+    def model_repositories(self, base_model: str) -> List[str]:
+        """The Megatron checkpoint and the HF model the builder loads (detect_torch_dist_path)."""
+        return list(dict.fromkeys(detect_torch_dist_path(base_model)))
 
     @property
     def converter(self):

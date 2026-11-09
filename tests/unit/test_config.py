@@ -87,3 +87,11 @@ def test_development_takes_ray_auth_unset(monkeypatch):
     monkeypatch.delenv("ENV", raising=False)
     monkeypatch.delenv("RAY_AUTH_MODE", raising=False)
     assert TrainingConfig().ray.auth_mode is None
+
+
+def test_trusted_remote_code_models_are_read_from_the_environment_at_startup(monkeypatch):
+    from tinkercloud.training.config import TrainingConfig
+    monkeypatch.delenv("TINKERCLOUD_TRUST_REMOTE_CODE_MODELS", raising=False)
+    assert TrainingConfig().trust_remote_code_models == frozenset()
+    monkeypatch.setenv("TINKERCLOUD_TRUST_REMOTE_CODE_MODELS", " org/model , /data/other ,")
+    assert TrainingConfig().trust_remote_code_models == {"org/model", "/data/other"}

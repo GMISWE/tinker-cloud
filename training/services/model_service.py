@@ -18,7 +18,7 @@ from ..checkpoints import CheckpointStore
 from ..core import routing
 from ..storage import MetadataStorage
 from ..storage.sample_futures import SampleFutureStore
-from ..utils.model_config import detect_architecture, detect_num_gpus
+from ..utils.model_config import check_model_code, detect_architecture, detect_num_gpus, remote_code_trusted
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +61,9 @@ class ModelService:
             Dict with model_id, base_model, lora_config, status
         """
         logger.info("[%s] Creating model %s", request_id, model_id)
+
+        # Whichever backend loads the model, its repository's code runs only for a model the operator trusts.
+        await check_model_code(self.backend, base_model)
 
         num_gpus = detect_num_gpus()
         if parallelism_config:
@@ -213,7 +216,7 @@ class ModelService:
 
         from transformers import AutoTokenizer
 
-        tokenizer = AutoTokenizer.from_pretrained(hf_path, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(hf_path, trust_remote_code=remote_code_trusted(hf_path))
 
         return {
             "vocab_size": len(tokenizer),

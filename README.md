@@ -95,6 +95,7 @@ Server-wide settings (`training/config.py`):
 | `ALLOW_PARTIAL_BATCHES` | Pad batches smaller than the DP size | `false` |
 | `KGATEWAY_LOG_LEVEL` / `KGATEWAY_ACCESS_LOG` | Log level / HTTP access log | `INFO` / `false` |
 | `HF_HOME` | HuggingFace model cache | `/data/models` |
+| `TINKERCLOUD_TRUST_REMOTE_CODE_MODELS` | Comma-separated model ids / paths whose repository code transformers may import (`trust_remote_code`), each as the backend loads it (miles and verl may resolve an id to a local directory); a model whose config, tokenizer or processor config declares custom code (`auto_map`) is refused unless listed, as is one the hub cannot answer for | unset (none) |
 
 Per-backend knobs are declared fields with typed defaults in
 `training/backends/miles/config.py` (`SLIME_*`, `TINKERCLOUD_MILES_*`),

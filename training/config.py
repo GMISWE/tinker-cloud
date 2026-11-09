@@ -37,7 +37,8 @@ def is_production() -> bool:
 
 
 def split_api_keys(setting: str) -> FrozenSet[str]:
-    """The keys a TINKER_API_KEY setting names: comma-separated, each stripped, empty ones dropped."""
+    """The entries a comma-separated setting names (the keys of TINKER_API_KEY, the models of
+    TINKERCLOUD_TRUST_REMOTE_CODE_MODELS): each stripped, empty ones dropped."""
     return frozenset(k.strip() for k in setting.split(",") if k.strip())
 
 
@@ -376,6 +377,13 @@ class TrainingConfig(BaseModel):
     supported_models: List[ModelInfo] = Field(
         default_factory=lambda: TrainingConfig._get_default_models(),
         description="List of supported models"
+    )
+    # base_model is the client's choice, so by default no model's repository code runs
+    # (utils/model_config.py: remote_code_trusted, check_remote_code).
+    trust_remote_code_models: FrozenSet[str] = Field(
+        default_factory=lambda: split_api_keys(os.getenv("TINKERCLOUD_TRUST_REMOTE_CODE_MODELS", "")),
+        description="Model ids / paths whose repository code transformers may import, matched exactly "
+                    "(TINKERCLOUD_TRUST_REMOTE_CODE_MODELS, comma-separated)"
     )
     allow_partial_batches: bool = Field(
         default_factory=lambda: os.getenv("ALLOW_PARTIAL_BATCHES", "false").lower() == "true",

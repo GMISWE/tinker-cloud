@@ -112,6 +112,9 @@ class FakeBackend(TrainingBackend[FakeHandle]):
             raise BackendError(f"Model {handle.model_id} not found", backend="fake", operation=op)
         return h
 
+    def model_repositories(self, base_model: str) -> List[str]:
+        return []   # a model directory's config.json is read as JSON; no model loads
+
     # --- lifecycle -------------------------------------------------------
     async def create_model(
         self, model_id: str, request_id: str, base_model: str, num_gpus: int,
