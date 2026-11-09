@@ -38,12 +38,12 @@ need the pod's server and Ray head stopped: they start their own Ray.
 `unit/proto/test_wire_sdk.py` (the codec driven by the SDK's own converters) is
 skipped unless a `tinker >= 0.25` is importable. To run the conformance suite
 under an upstream SDK without touching the pod's install, put one in a scratch
-target and prepend it to `PYTHONPATH` for the test process only:
+target and name it in `SDK_PYTHONPATH`, which `pod_pytest.sh` prepends to the test
+process's `PYTHONPATH` (each run's tree is its own directory, removed afterwards):
 
 ```bash
-kubectl exec tinkercloud-nemorl -- pip install --target /tmp/pytest-$USER/sdk027 "tinker==0.27.0"
-kubectl exec tinkercloud-nemorl -- bash -c "cd /tmp/pytest-$USER/app && \
-  PYTHONPATH=/tmp/pytest-$USER/sdk027:/tmp/pytest-$USER python -m pytest tests/conformance -q"
+kubectl exec tinkercloud-nemorl -- pip install --target /tmp/sdk027 "tinker==0.27.0"
+SDK_PYTHONPATH=/tmp/sdk027 scripts/pod_pytest.sh tinkercloud-nemorl tests/conformance -q
 ```
 
 Tests that only skip on the pod say why in their skip reason (`-rs` lists
