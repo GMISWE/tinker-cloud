@@ -84,29 +84,31 @@ SERVER_BOOT_KEYS=" PYTHONPATH NUM_GPUS RAY_ADDRESS TRAINING_PORT HF_TOKEN HF_HOM
 SERVER_BOOT_TIMEOUT=30
 # server_boot <gpus> <backend> <log> [KEY=VAL ...]: prints the pod command that starts the API
 # server detached, with SERVER_BOOT_KEYS set and then each KEY=VAL quoted with %q, so a value
-# reaches the server unchanged. A KEY=VAL replaces a default (named on stderr) unless the table
-# gives that key another home (set_by); such a key, and an argument that is not a plain
-# KEY=VAL, is refused before anything is printed. An exec whose detached child kept a stream
+# reaches the server unchanged. A KEY=VAL replaces a default (named on stderr), except for
+# NUM_GPUS, TINKERCLOUD_BACKEND, RAY_ADDRESS, TRAINING_PORT and HF_TOKEN, which are set
+# elsewhere. Refused before anything is printed: one of those five, an argument that is not a
+# plain KEY=VAL, and a <log> path that needs quoting (callers read the log unquoted). An exec whose detached child kept a stream
 # open has hung until killed (143), so every fd is redirected; run it under EX_TIMEOUT
 # $SERVER_BOOT_TIMEOUT and judge the launch by a fresh probe, not by the exec's exit.
 server_boot() {
-  local gpus=$1 backend=$2 log=$3 kv key val exports="$HF_TOKEN_CHECK"$'\n'
+  local gpus=$1 backend=$2 log=$3 kv key val cmd="$HF_TOKEN_CHECK"$'\n'
   local -A set_by=()   # key -> where its value is set, for the keys a KEY=VAL may not replace
   shift 3
+  [[ "$log" =~ ^[A-Za-z0-9_./-]+$ ]] || { echo "ERROR: log path '$log' is not plain [A-Za-z0-9_./-]" >&2; return 1; }
   for key in $SERVER_BOOT_KEYS; do
     case "$key" in
       PYTHONPATH) val=/app ;;
-      NUM_GPUS) val=$(printf '%q' "$gpus"); set_by[$key]="server_boot's <gpus> argument" ;;
+      NUM_GPUS) val=$(printf '%q' "$gpus"); set_by[$key]="the GPU count (GPUS in the deploy and the rotate)" ;;
       RAY_ADDRESS) val=$RAY_DRIVER_ADDRESS; set_by[$key]="RAY_DRIVER_ADDRESS in lib/cluster.sh" ;;
       TRAINING_PORT) val=$API_PORT; set_by[$key]="API_PORT in lib/cluster.sh" ;;
       HF_TOKEN) val="\$(cat $HF_TOKEN_POD_FILE)"; set_by[$key]="the pod's $HF_TOKEN_POD_FILE" ;;
       HF_HOME) val=/data/.cache/huggingface ;;
       TINKER_API_KEY) val=tml-dev-key ;;
-      TINKERCLOUD_BACKEND) val=$(printf '%q' "$backend"); set_by[$key]="server_boot's <backend> argument" ;;
+      TINKERCLOUD_BACKEND) val=$(printf '%q' "$backend"); set_by[$key]="the backend (BACKEND in the rotate, the profile in the deploy)" ;;
       ALLOW_PARTIAL_BATCHES) val=true ;;
       *) echo "ERROR: SERVER_BOOT_KEYS names $key, which has no default" >&2; return 1 ;;
     esac
-    exports+="export $key=$val"$'\n'
+    cmd+="export $key=$val"$'\n'
   done
   for kv in "$@"; do
     key=${kv%%=*}
@@ -117,11 +119,11 @@ server_boot() {
       echo "ERROR: '$kv': $key is set by ${set_by[$key]}, not by a KEY=VAL" >&2; return 1
     fi
     [[ "$SERVER_BOOT_KEYS" == *" $key "* ]] && echo "==> $key=... replaces the default $key" >&2
-    exports+="export $key=$(printf '%q' "${kv#*=}")"$'\n'
+    cmd+="export $key=$(printf '%q' "${kv#*=}")"$'\n'
   done
   printf '%s\n' \
-    "$exports" \
-    "cd /app && setsid nohup python3 -m training > $(printf '%q' "$log") 2>&1 < /dev/null &" \
+    "$cmd" \
+    "cd /app && setsid nohup python3 -m training > $log 2>&1 < /dev/null &" \
     "sleep 2; echo LAUNCHED"
 }
 # The pod command that prints the API server's /health status code (curl prints 000 and fails
