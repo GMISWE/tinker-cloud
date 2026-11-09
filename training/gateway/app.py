@@ -189,11 +189,13 @@ class Gateway:
     async def free_model(self, model_id: str, reason: str) -> None:
         """Delete a model on its engine and acknowledge the reap; never raises (FreeFn's contract)."""
         name = engine_name_of(model_id)
-        engine = self.registry.get(name) if name else None
+        # an id in another shape (create-via-load's `{session}:train:{seq}`) names no engine: its delete
+        # goes where every request carrying it went, to the only engine (Decider.decide)
+        engine = self.registry.get(name) if name else self.registry.only()
         logger.info("Freeing model %s (%s)", model_id, reason)
         delete_confirmed = False
         if engine is None:
-            logger.warning("Model %s names no registered engine; its delete will be retried", model_id)
+            logger.warning("Model %s has no registered engine; its delete will be retried", model_id)
         else:
             try:
                 resp = await self.engine_call(engine, "POST", "/api/v1/delete_model", {"model_id": model_id})
