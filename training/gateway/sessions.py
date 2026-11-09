@@ -89,7 +89,10 @@ class SessionStore:
         self._add_missing_columns("sessions", {"finished_at": "TEXT", "finish_reason": "TEXT", "finish_detail": "TEXT",
                                                "display_name": "TEXT"})
         self._add_missing_columns("samplers", {"client_counter": "INTEGER NOT NULL DEFAULT 0", "pinned_version": "INTEGER"})
-        self._add_missing_columns("session_models", {"engine": "TEXT"})
+        # pending: requests that create the model and have no answer yet; confirmed: the engine accepted one
+        # (a row from before these columns is an accepted model)
+        self._add_missing_columns("session_models", {"engine": "TEXT", "pending": "INTEGER NOT NULL DEFAULT 0",
+                                                     "confirmed": "INTEGER NOT NULL DEFAULT 1"})
         c.execute("CREATE INDEX IF NOT EXISTS idx_samplers_session ON samplers(session_id)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_sessions_heartbeat ON sessions(last_heartbeat)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_session_models_seq ON session_models(session_id, model_seq_id)")
@@ -195,11 +198,25 @@ class SessionStore:
     # ------------------------------------------------------------------ models
 
     def add_model(self, session_id: str, model_id: str, model_seq_id: int, base_model: Optional[str], engine: str) -> None:
-        """Record a model at submit. A create the engine then fails is dropped when the engine reports
-        it (a report that itself fails leaves the row to its delete or the reaper); a delete of a model
-        the engine never had gets the engine's 404 and drops the row."""
-        self._write("INSERT OR REPLACE INTO session_models (session_id, model_id, model_seq_id, base_model, created_at, engine) VALUES (?, ?, ?, ?, ?, ?)",
+        """Record a model at submit, with one more request pending for it: a retried create-via-load, or
+        another load racing it, finds the row the first one wrote and leaves it as it is. settle_model
+        ends each request. A create the engine fails later is dropped when the engine reports it (a
+        report that itself fails leaves the row to its delete or the reaper); a delete of a model the
+        engine never had gets the engine's 404 and drops the row."""
+        self._write("INSERT INTO session_models (session_id, model_id, model_seq_id, base_model, created_at, engine, pending, confirmed) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 1, 0) ON CONFLICT (session_id, model_id) DO UPDATE SET pending = pending + 1",
                     (session_id, model_id, model_seq_id, base_model, _now(), engine))
+
+    def settle_model(self, model_id: str, accepted: Optional[bool]) -> None:
+        """A request add_model counted has its answer. True: the engine accepted it, and the row stays.
+        False: the engine refused it, and the row goes unless the engine accepted another request for the
+        model or one is still pending; two loads of one create-via-load id race, and the refused one may
+        answer first or last. None: no answer (the engine unreachable), and the row stays for its delete
+        or the reaper. A row that is gone stays gone: the engine reported the create failed."""
+        self._write("UPDATE session_models SET pending = MAX(pending - 1, 0), confirmed = confirmed OR ? WHERE model_id = ?",
+                    (int(accepted is True), model_id))
+        if accepted is False:
+            self._write("DELETE FROM session_models WHERE model_id = ? AND confirmed = 0 AND pending = 0", (model_id,))
 
     def remove_model(self, model_id: str) -> Optional[str]:
         """Drop the model and pending reap rows; the session that owned it, or None."""

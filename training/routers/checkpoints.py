@@ -17,7 +17,7 @@ Endpoints:
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Dict
+from typing import Dict, Set
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -40,6 +40,7 @@ from ..core.dependencies import (
 )
 from ..checkpoints import CheckpointKind, CheckpointRef, CheckpointStore
 from ..storage import MetadataStorage, FuturesStorage
+from ..storage.futures import DuplicateSeqId
 from ..models.requests import (
     LoadWeightsRequest,
     OptimizerConfig,
@@ -252,8 +253,8 @@ async def load_weights(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     if creates:
-        return _create_via_load(request, http_request, service, model_service, task_manager, metadata_storage,
-                                training_clients, training_runs_metadata, store)
+        return await _create_via_load(request, http_request, service, model_service, task_manager, futures_storage,
+                                      metadata_storage, training_clients, training_runs_metadata, store)
     assert request.model_id is not None  # creates() is False only with model_id set
     if request.model_id not in training_clients:
         raise HTTPException(status_code=404, detail=f"Model {request.model_id} not found")
@@ -288,12 +289,35 @@ async def load_weights(
     return AsyncOperationResponse(request_id=request_id, model_id=request.model_id)
 
 
-def _create_via_load(
+# The seq id a create-via-load's future is filed under: the SDK's own, the load being the model's
+# first request (types/load_weights_request.py). (model_id, seq_id) is unique among futures, so a
+# retried load finds the first one's future, and no second create of the model can be filed while
+# the first waits to run.
+CREATE_VIA_LOAD_SEQ_ID = 0
+# create-via-load models whose create raised in this process, marked as it raises: a retry that
+# arrives while that request's own report is on its way, its future still pending, reports it too
+_FAILED_CREATES: Set[str] = set()
+
+
+async def _no_model(http_request: Request, model_id: str) -> None:
+    """Tell the gateway, which recorded `model_id` at submit, that no such model is coming: its row
+    goes now, not at the next delete. A gateway that does not answer is logged; the request's own
+    answer stands."""
+    gateway = http_request.app.state.gateway_client
+    if gateway is not None:   # None: an engine with no gateway
+        try:
+            await gateway.model_failed(model_id)
+        except httpx.HTTPError:
+            logger.exception("Gateway did not drop the failed model %s", model_id)
+
+
+async def _create_via_load(
     request: LoadWeightsRequest,
     http_request: Request,
     service: CheckpointService,
     model_service: ModelService,
     task_manager: TaskManager,
+    futures_storage: FuturesStorage,
     metadata_storage: MetadataStorage,
     training_clients: Dict,
     training_runs_metadata: Dict,
@@ -302,9 +326,27 @@ def _create_via_load(
     """Create the model `{session_id}:train:{model_seq_id}` from the checkpoint and load
     it, as one future. The SDK derives that id itself and reads no id back. Base model
     and LoRA config are the checkpoint's run's; the optimizer family is the
-    checkpoint's when its state is restored, else the declared one (AdamW by default)."""
+    checkpoint's when its state is restored, else the declared one (AdamW by default).
+    The same request again (the SDK resends one whose answer it lost) is answered with
+    the first one's future, before or after it has run; another load naming the model
+    is refused."""
     assert request.session_id is not None and request.model_seq_id is not None  # creates() checked both
     model_id = f"{request.session_id}:train:{request.model_seq_id}"
+    try:
+        first = futures_storage.filed(model_id, CREATE_VIA_LOAD_SEQ_ID, "load_weights", request.dict())
+    except DuplicateSeqId as e:   # another load took the id first
+        if model_id in training_clients:
+            raise HTTPException(status_code=400, detail=f"Model {model_id} already exists: create-via-load creates it") from None
+        status = (futures_storage.get_future(e.request_id) or {}).get("status")
+        raise HTTPException(status_code=400, detail=f"Model {model_id} is taken by an earlier load_weights with another "
+                                                    f"body ({e.request_id}, {status}): load into a new model_seq_id") from None
+    if first is not None:
+        status = (futures_storage.get_future(first) or {}).get("status")
+        if model_id not in training_clients and (status != "pending" or model_id in _FAILED_CREATES):
+            # no model is coming (its create failed, or it was deleted since), and this retry recorded
+            # it at the gateway again: the row goes again
+            await _no_model(http_request, model_id)
+        return AsyncOperationResponse(request_id=first, model_id=model_id)
     if model_id in training_clients:
         raise HTTPException(status_code=400, detail=f"Model {model_id} already exists: create-via-load creates it")
     ref = CheckpointRef.parse(request.path)           # 400 on a malformed path
@@ -340,21 +382,18 @@ def _create_via_load(
             )
         except Exception:
             # the gateway recorded the model at submit; a create that fails is reported before the future is
-            gateway = http_request.app.state.gateway_client
-            if gateway is not None:   # None: an engine with no gateway
-                try:
-                    await gateway.model_failed(model_id)
-                except httpx.HTTPError:   # the create's own error is the one to report; the row's fate is logged beside it
-                    logger.exception("Gateway did not drop the failed model %s", model_id)
+            _FAILED_CREATES.add(model_id)
+            await _no_model(http_request, model_id)
             raise
         return await service.load_weights(
             model_id=model_id, request_id=request_id, ref=ref, optimizer=request.optimizer,
             training_clients=training_clients, metadata_storage=metadata_storage,
         )
 
+    _FAILED_CREATES.discard(model_id)   # filed again once the first future aged out of the futures table
     request_id = task_manager.create_task(
         request_id=request_id, operation="load_weights", model_id=model_id,
-        payload=request.dict(), task_func=execute,
+        payload=request.dict(), seq_id=CREATE_VIA_LOAD_SEQ_ID, task_func=execute,
     )
     return AsyncOperationResponse(request_id=request_id, model_id=model_id)
 

@@ -159,18 +159,21 @@ class Gateway:
         if decision.record is not None:
             r = decision.record
             self.store.add_model(r.session_id, r.model_id, r.model_seq_id, r.base_model, decision.engine.name)
+        accepted: Optional[bool] = None   # the engine's answer to a create this request recorded; None: none came
         try:
             resp = await forward(self.pool.client_for(decision.engine), method, path, query, headers, decision.add_headers, body)
+            accepted = 200 <= resp.status < 300
         except EngineUnreachable as exc:
             if _caused_by(exc, ClientDisconnect):
                 raise                 # the SDK left mid-body: the engine is fine and nobody is left to answer
             logger.warning("Engine %s unreachable for %s %s: %s", decision.engine.name, method, path, exc)
             self.registry.refresh()   # a replaced or departed engine is seen now, not at the next period
             return _error(503, f"engine {decision.engine.name} unreachable: {exc}", path)
+        finally:
+            if decision.record is not None:   # a refused create drops the row, unless another request made the model
+                self.store.settle_model(decision.record.model_id, accepted)
         if decision.drop_model is not None and (200 <= resp.status < 300 or resp.status == 404):
             self.store.remove_model(decision.drop_model)
-        if decision.record is not None and not 200 <= resp.status < 300:
-            self.store.remove_model(decision.record.model_id)   # the engine refused the create: no model exists
         return Reply(resp.status, resp.headers, resp.body)
 
     # ------------------------------------------------------------ the gateway's own calls
