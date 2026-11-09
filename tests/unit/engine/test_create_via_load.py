@@ -100,7 +100,7 @@ class _GatewayHandler(http.server.BaseHTTPRequestHandler):
     server: _Gateway
 
     def _answer(self) -> None:
-        length = int(self.headers.get("content-length") or 0)
+        length = int(self.headers.get("content-length") or 0)   # a bodiless DELETE carries no content-length
         self.rfile.read(length)
         if self.command == "DELETE" and "/models/" in self.path:
             self.server.reports.append(self.path.rsplit("/", 1)[1])

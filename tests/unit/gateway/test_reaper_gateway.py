@@ -202,8 +202,9 @@ def test_two_workers_free_each_expired_model_once(tmp_path):
 
 
 def test_a_delete_in_progress_409_is_retried(tmp_path):
-    """The engine answers 409 to a delete of a model whose delete is still running: not confirmed, so
-    the claim is released and a later tick deletes again."""
+    """Protocol pin for the engine's 409 "delete in progress": the gateway must read it as not confirmed,
+    release the claim and delete again later. Counting a 409 as confirmed would drop the reap row while
+    the engine's delete can still fail."""
     async def main():
         h = Harness(str(tmp_path))
         h.cfg.session_timeout_s = 0.2

@@ -330,12 +330,13 @@ async def _create_via_load(
     if first is not None:
         if model_id in training_clients or (first.status == "pending" and not first.create_failed):
             return AsyncOperationResponse(request_id=first.request_id, model_id=model_id)   # made, or on its way
-        if first.status == "completed":   # the gateway drops the row this resend recorded on the refusal
-            raise HTTPException(status_code=400, detail=f"Model {model_id} was deleted after {first.request_id} created it: "
-                                                        f"load into a new model_seq_id")
-        # its create failed: this resend recorded the model at the gateway again, so the row goes again
-        await report_model_failed(http_request, model_id)
-        return AsyncOperationResponse(request_id=first.request_id, model_id=model_id)
+        if first.create_failed:
+            # this resend recorded the model at the gateway again, so the row goes again
+            await report_model_failed(http_request, model_id)
+            return AsyncOperationResponse(request_id=first.request_id, model_id=model_id)
+        # created, then deleted: the gateway drops the row this resend recorded on the refusal
+        raise HTTPException(status_code=400, detail=f"Model {model_id} was deleted after {first.request_id} created it: "
+                                                    f"load into a new model_seq_id")
     if model_id in training_clients:
         raise HTTPException(status_code=400, detail=f"Model {model_id} already exists: create-via-load creates it")
     ref = CheckpointRef.parse(request.path)           # 400 on a malformed path

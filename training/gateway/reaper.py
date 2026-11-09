@@ -25,9 +25,8 @@ class ModelReaper:
     def free(self, model_id: str, reason: str) -> asyncio.Task:
         """Free `model_id` in its own task. A model whose free is in flight
         keeps that task; the new reason is dropped."""
-        task = self._frees.get(model_id)
-        if task is not None and not task.done():
-            return task
+        if self._freeing(model_id):
+            return self._frees[model_id]
         task = asyncio.create_task(self._free(model_id, reason), name=f"free:{model_id}")
         self._frees[model_id] = task
         task.add_done_callback(lambda t: self._forget(model_id, t))
@@ -38,7 +37,7 @@ class ModelReaper:
             del self._frees[model_id]
 
     def inflight(self) -> int:
-        return sum(1 for t in self._frees.values() if not t.done())
+        return sum(1 for model_id in self._frees if self._freeing(model_id))
 
     def _freeing(self, model_id: str) -> bool:
         task = self._frees.get(model_id)
