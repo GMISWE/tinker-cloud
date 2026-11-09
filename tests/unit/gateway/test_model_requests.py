@@ -4,7 +4,10 @@ is a real process on the shared session file."""
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+import pytest
 
 from training.gateway.sessions import SessionStore
 
@@ -55,6 +58,31 @@ def test_a_request_of_a_dead_worker_does_not_keep_a_refused_model(tmp_path):
     store.settle_model(MODEL, False)                     # refused
     assert store.session_of_model(MODEL) is None
     store.close()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="reads the zombie state in /proc")
+def test_a_request_of_a_dead_worker_nobody_reaped_does_not_keep_a_refused_model(tmp_path):
+    """A worker that died is a zombie until its parent reaps it (a pod's PID 1 that never reaps keeps
+    it so), and a zombie still has its pid: a liveness check by pid alone read it as running."""
+    path = tmp_path / "sessions.db"
+    store = SessionStore(path)
+    sid = store.create_session([], {}, "t", None)
+    dead = _worker(path, sid)
+    try:
+        _send(dead, "exit")
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            stat = Path(f"/proc/{dead.pid}/stat").read_text()
+            if stat[stat.rindex(")") + 2] == "Z":
+                break
+            time.sleep(0.02)
+        assert stat[stat.rindex(")") + 2] == "Z", stat   # exited, not reaped
+        store.add_model(sid, MODEL, 0, "fake/tiny", "fake")
+        store.settle_model(MODEL, False)
+        assert store.session_of_model(MODEL) is None
+    finally:
+        dead.wait(timeout=30)
+        store.close()
 
 
 def test_a_live_worker_s_request_keeps_the_row_through_another_worker_s_refusal(tmp_path):

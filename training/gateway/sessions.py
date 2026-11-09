@@ -5,10 +5,12 @@ samplers, which never change once written, and the stamps of the reap claims it 
 row is claimed for expiry inside one transaction, so N workers running the reaper free each model
 once; a claim its worker did not settle is taken again once it is CLAIM_LEASE_S old.
 """
+import contextlib
 import json
 import logging
 import os
 import sqlite3
+import sys
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -42,7 +44,9 @@ def _worker() -> str:
 
 def _worker_alive(worker: str) -> bool:
     """Whether the process that recorded `worker` still runs. Every gateway worker runs on one host,
-    so its pid is checked here; a reused pid reads as alive, which keeps a row, never drops one."""
+    so its pid is checked here. A dead process nobody reaped is a zombie and still has its pid (a pod
+    whose PID 1 never reaps keeps every orphan so); on Linux its state says so. A reused pid reads
+    as alive, which keeps a row, never drops one."""
     pid = int(worker.split(":", 1)[0])
     if pid == os.getpid():
         return worker == _worker()
@@ -50,9 +54,20 @@ def _worker_alive(worker: str) -> bool:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    except PermissionError:   # a process of another user holds the pid: it runs
+    except PermissionError:   # a process of another user holds the pid
+        pass
+    return not _zombie(pid)
+
+
+def _zombie(pid: int) -> bool:
+    if sys.platform != "linux":   # no /proc: a zombie reads as alive, which keeps a row, never drops one
+        return False
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            stat = f.read()
+    except FileNotFoundError:   # it exited between the kill and the read
         return True
-    return True
+    return stat[stat.rindex(")") + 2] == "Z"   # the state follows the parenthesised command name
 
 
 def _now() -> str:
@@ -121,7 +136,7 @@ class SessionStore:
             model_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, claimed_at TEXT)""")
         # a model's create requests that have no answer yet, per worker that forwarded them
         c.execute("""CREATE TABLE IF NOT EXISTS model_requests (
-            model_id TEXT NOT NULL, worker TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (model_id, worker))""")
+            model_id TEXT NOT NULL, worker TEXT NOT NULL, pending INTEGER NOT NULL, PRIMARY KEY (model_id, worker))""")
         # columns added after the first release; a pre-existing file lacks them
         self._add_missing_columns("sessions", {"finished_at": "TEXT", "finish_reason": "TEXT", "finish_detail": "TEXT",
                                                "display_name": "TEXT"})
@@ -143,6 +158,17 @@ class SessionStore:
 
     def close(self) -> None:
         self._conn.close()
+
+    @contextlib.contextmanager
+    def _transaction(self):
+        """One write transaction, taken at once (IMMEDIATE), so the other workers wait for it."""
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+            self._conn.execute("COMMIT")
+        except BaseException:   # the transaction's own rollback; the error goes on
+            self._conn.execute("ROLLBACK")
+            raise
 
     def _read(self, sql: str, params: Tuple = ()) -> List[Tuple]:
         self.reads += 1
@@ -209,8 +235,7 @@ class SessionStore:
         cutoff = (now - timedelta(seconds=timeout_s)).isoformat()
         abandoned = (now - timedelta(seconds=lease_s)).isoformat()
         claimed: Dict[str, List[str]] = {}
-        self._conn.execute("BEGIN IMMEDIATE")
-        try:
+        with self._transaction():
             for (session_id,) in self._read("SELECT session_id FROM sessions WHERE last_heartbeat < ?", (cutoff,)):
                 models = [m[0] for m in self._read("SELECT model_id FROM session_models WHERE session_id = ?", (session_id,))]
                 for model_id in models:
@@ -227,10 +252,6 @@ class SessionStore:
                                    "or its delete is stuck); claiming it again", model_id, claimed_at)
                 self._write("UPDATE model_reaps SET claimed_at = ? WHERE model_id = ?", (stamp, model_id))
                 claimed.setdefault(session_id, []).append(model_id)
-            self._conn.execute("COMMIT")
-        except BaseException:   # the transaction's own rollback; the error goes on
-            self._conn.execute("ROLLBACK")
-            raise
         for model_ids in claimed.values():
             self._claims.update(dict.fromkeys(model_ids, stamp))
         return list(claimed.items())
@@ -251,17 +272,12 @@ class SessionStore:
         it is. settle_model ends each request. A create the engine fails later is dropped when the
         engine reports it (a report that itself fails leaves the row to its delete or the reaper); a
         delete of a model the engine never had gets the engine's 404 and drops the row."""
-        self._conn.execute("BEGIN IMMEDIATE")
-        try:
+        with self._transaction():
             self._write("INSERT INTO session_models (session_id, model_id, model_seq_id, base_model, created_at, engine, confirmed) "
                         "VALUES (?, ?, ?, ?, ?, ?, 0) ON CONFLICT (session_id, model_id) DO NOTHING",
                         (session_id, model_id, model_seq_id, base_model, _now(), engine))
-            self._write("INSERT INTO model_requests (model_id, worker, n) VALUES (?, ?, 1) "
-                        "ON CONFLICT (model_id, worker) DO UPDATE SET n = n + 1", (model_id, _worker()))
-            self._conn.execute("COMMIT")
-        except BaseException:   # the transaction's own rollback; the error goes on
-            self._conn.execute("ROLLBACK")
-            raise
+            self._write("INSERT INTO model_requests (model_id, worker, pending) VALUES (?, ?, 1) "
+                        "ON CONFLICT (model_id, worker) DO UPDATE SET pending = pending + 1", (model_id, _worker()))
 
     def settle_model(self, model_id: str, accepted: Optional[bool]) -> None:
         """A request add_model counted has its answer. True: the engine accepted it, and the row stays.
@@ -271,10 +287,9 @@ class SessionStore:
         None: no answer (the engine unreachable), and the row stays for its delete or the reaper. A row
         that is gone stays gone: the engine reported the create failed."""
         worker = _worker()
-        self._conn.execute("BEGIN IMMEDIATE")
-        try:
-            self._write("UPDATE model_requests SET n = n - 1 WHERE model_id = ? AND worker = ?", (model_id, worker))
-            self._write("DELETE FROM model_requests WHERE model_id = ? AND worker = ? AND n <= 0", (model_id, worker))
+        with self._transaction():
+            self._write("UPDATE model_requests SET pending = pending - 1 WHERE model_id = ? AND worker = ?", (model_id, worker))
+            self._write("DELETE FROM model_requests WHERE model_id = ? AND worker = ? AND pending <= 0", (model_id, worker))
             if accepted is True:
                 self._write("UPDATE session_models SET confirmed = 1 WHERE model_id = ?", (model_id,))
             elif accepted is False:
@@ -284,10 +299,6 @@ class SessionStore:
                     holders.remove(gone)
                 if not holders:
                     self._write("DELETE FROM session_models WHERE model_id = ? AND confirmed = 0", (model_id,))
-            self._conn.execute("COMMIT")
-        except BaseException:   # the transaction's own rollback; the error goes on
-            self._conn.execute("ROLLBACK")
-            raise
 
     def remove_model(self, model_id: str) -> Optional[str]:
         """Drop the model and pending reap rows; the session that owned it, or None."""
@@ -321,16 +332,10 @@ class SessionStore:
 
     def join(self, sampler_id: str) -> Optional[int]:
         """The next client id of a sampler (the creator is 0); None when the sampler is unknown."""
-        self._conn.execute("BEGIN IMMEDIATE")
-        try:
+        with self._transaction():
             if not self._write("UPDATE samplers SET client_counter = client_counter + 1 WHERE sampler_id = ?", (sampler_id,)):
-                self._conn.execute("COMMIT")
                 return None
             counter = self._read("SELECT client_counter FROM samplers WHERE sampler_id = ?", (sampler_id,))[0][0]
-            self._conn.execute("COMMIT")
-        except BaseException:   # the transaction's own rollback; the error goes on
-            self._conn.execute("ROLLBACK")
-            raise
         return int(counter)
 
 

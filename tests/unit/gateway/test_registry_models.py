@@ -194,9 +194,9 @@ def test_a_refused_load_racing_an_accepted_one_leaves_the_row(tmp_path):
 
 
 def test_a_resend_after_delete_of_the_model_leaves_no_row(tmp_path):
-    """The model a create-via-load made was deleted; the SDK resends the load, the gateway records the
-    model again at submit, and the engine refuses it ("was deleted"). No row is left for a model that
-    does not exist."""
+    """The gateway half of a resend after delete (the engine's "was deleted" 400 is pinned in
+    tests/unit/engine/test_create_via_load.py): the gateway records the model again at submit, and the
+    refusal must drop that row although a model of that id was accepted once before."""
     async def main():
         h = Harness(str(tmp_path))
         try:

@@ -96,7 +96,8 @@ def test_cleanup_ages_out_finished_futures_and_keeps_pending_ones(store):
 
 
 def test_purge_all_deletes_pending_futures_too(store):
-    """At a server start no earlier operation runs: a pending future left behind would never settle."""
+    """The server start's purge is the one call that removes pending futures (cleanup keeps them): no
+    earlier operation runs after a restart, and a pending future left behind would never settle."""
     store.save_future("running", "forward", {}, model_id="m")
     assert store.purge_all() == 1
     assert store.get_future("running") is None
