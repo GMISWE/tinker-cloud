@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
+from ..utils.helpers import engine_name_of
 from .dbfile import opened_alone
 
 logger = logging.getLogger(__name__)
@@ -152,3 +153,10 @@ class Registry:
         """The engine a request without an id goes to; None while no engine is registered."""
         rows = list(self._rows.values())
         return rows[0] if rows else None
+
+    def engine_for(self, id_: Optional[str]) -> Optional[EngineRow]:
+        """The engine a request carrying `id_` goes to, and a model's delete with it: the engine the id
+        names, or the only engine for no id or an id in another shape (create-via-load's
+        `{session}:train:{seq}`). None while that engine is not registered."""
+        name = engine_name_of(id_) if id_ is not None else None
+        return self._rows.get(name) if name else self.only()
