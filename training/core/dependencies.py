@@ -83,9 +83,10 @@ async def verify_api_key_dep(
     """Dependency to verify API key"""
     auth.verify(x_api_key)
 
-def known_project(project_id: Optional[str] = None) -> Optional[str]:
+def known_project(project_id: Optional[str] = None, _: None = Depends(verify_api_key_dep)) -> Optional[str]:
     """The `project_id` query parameter: absent, or the server's one project. Any other
-    project is a 404, as session search answers it."""
+    project is a 404, as session search answers it; the key is checked first, so a caller
+    without one learns nothing about the projects."""
     if project_id is not None:
         try:
             require_known_projects([project_id])

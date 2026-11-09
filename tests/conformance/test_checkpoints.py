@@ -247,7 +247,7 @@ def test_every_route_reports_one_checkpoint_shape(service_client, server, rest):
     assert own == every == last   # one model: status and size on the run's last_checkpoint too
     assert own["status"] == "completed" and own["size_bytes"] and own["time"]
     [typed] = [c for c in rest.list_checkpoints(tc.model_id).result().checkpoints if c.tinker_path == p]
-    assert isinstance(typed.time, datetime)
+    assert typed.time.tzinfo is not None   # the CLI compares it with aware dates
 
 
 def test_checkpoint_schema_is_one_model_with_a_required_time():

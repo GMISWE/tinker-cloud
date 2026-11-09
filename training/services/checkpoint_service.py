@@ -16,13 +16,13 @@ from typing import Dict, Any, List, Optional, Tuple
 from ..backends.base import TrainingBackend
 from ..checkpoints import CheckpointKind, CheckpointRef, CheckpointStatus, CheckpointStore, is_expired
 from ..models.requests import OptimizerConfig
-from ..models.responses import Checkpoint
+from ..models.responses import Checkpoint, CheckpointType
 from ..storage import MetadataStorage
 
 logger = logging.getLogger(__name__)
 
 # store kind -> the SDK's CheckpointType
-CHECKPOINT_TYPES = {
+CHECKPOINT_TYPES: Dict[CheckpointKind, CheckpointType] = {
     CheckpointKind.WEIGHTS: "training",
     CheckpointKind.SAMPLER_WEIGHTS: "sampler",
     CheckpointKind.EXTERNAL_WEIGHTS: "external",

@@ -336,13 +336,16 @@ class UnloadModelResponse(_Result):
 
 # ============= Training Run Responses =============
 
+# The SDK's CheckpointType (types/checkpoint.py)
+CheckpointType = Literal["training", "sampler", "external"]
+
 class Checkpoint(BaseModel):
     """A checkpoint in the SDK's Checkpoint shape, plus `status` (an extension: the SDK
     ignores it). Every route that reports a checkpoint returns this model. Nothing is
     published and checkpoints carry no user metadata here, so `public` and `user_metadata`
     always hold the SDK's own defaults."""
     checkpoint_id: str = Field(..., description="<kind>/<name>")
-    checkpoint_type: Literal["training", "sampler", "external"] = Field(..., description="The SDK's CheckpointType")
+    checkpoint_type: CheckpointType = Field(..., description="The SDK's CheckpointType")
     time: str = Field(..., description="Creation timestamp (ISO 8601)")
     tinker_path: str = Field(..., description="tinker:// path of the checkpoint")
     size_bytes: Optional[int] = Field(..., description="Bytes under the checkpoint's root; None when the root is gone")
