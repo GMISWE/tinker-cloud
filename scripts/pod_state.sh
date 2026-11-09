@@ -8,7 +8,7 @@
 #   scripts/pod_state.sh <pod>...   # these pods only
 set -uo pipefail
 # shellcheck source=scripts/lib/cluster.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, kx, pod_cmd, ray_head, SERVER_PATTERN
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, kx, pod_cmd, ray_head, SERVER_PATTERN, API_PORT
 require_tunnel
 export KX_TIMEOUT="${KX_TIMEOUT:-60}"
 
@@ -33,7 +33,7 @@ for pod in "${PODS[@]}"; do
   # shellcheck disable=SC2016  # the string runs on the pod; its $ expand there
   kx exec "$pod" -- bash -c "$(pod_cmd '
     echo "  gpu MiB: $(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | tr "\n" " ")"
-    echo "  server:  $(curl -s -m 5 localhost:8000/health || echo DOWN)"
+    echo "  server:  $(curl -s -m 5 localhost:'"$API_PORT"'/health || echo DOWN)"
     ps -o pid=,etime=,args= -p "$(pgrep -d, -f "'"$SERVER_PATTERN"'")" 2>/dev/null | sed "s/^/  proc:    /"
     echo "  ray:     $(ray status 2>/dev/null | grep -Eo "[0-9.]+/[0-9.]+ GPU" | head -1 || echo "no head")"
     echo "  actors:  $(ray list actors --filter state=ALIVE 2>/dev/null | grep -c ALIVE) alive"

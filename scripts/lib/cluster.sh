@@ -1,6 +1,7 @@
 # shellcheck shell=bash
 # Cluster defaults shared by every script that drives a pod. One place to
-# change when the cluster moves; each value is overridable from the env.
+# change when the cluster moves. KUBECONFIG, NS and DEFAULT_NODE are overridable from
+# the env; every other value is fixed here.
 export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/h1.config}"
 NS="${NS:-tinkercloud-nemorl}"
 DEFAULT_NODE="${DEFAULT_NODE:-hgxcn13}"
@@ -54,6 +55,10 @@ RAY_CLIENT_PORT=10001
 # The RAY_ADDRESS every backend's server takes: a driver on the pod's node, never a Ray Client.
 # shellcheck disable=SC2034  # read by the scripts that source this file
 RAY_DRIVER_ADDRESS=auto
+# The API server's port: each boot exports it as TRAINING_PORT; the container, the NetworkPolicy
+# and the health checks read it here.
+# shellcheck disable=SC2034  # read by the scripts that source this file
+API_PORT=8000
 # The API server's process as `pgrep -f`/`pkill -f` (ERE) match it: a command line that starts with
 # a python of any name or path, with single-token interpreter flags (`-u`, `-Xdev`), running
 # `-m training` with or without arguments. The anchor leaves out the `bash -c "... python3 -m
