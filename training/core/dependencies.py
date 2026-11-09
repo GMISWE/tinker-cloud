@@ -6,11 +6,12 @@ route is served, so each accessor reads the attribute directly: a missing
 one is a wiring bug (AttributeError), not a request-time condition.
 """
 from typing import Any, Dict, Optional
-from fastapi import Depends, Header, Request
+from fastapi import Depends, Header, HTTPException, Request
 
 from .runtime_state import TrainingRuntimeState
 from ..checkpoints import CheckpointStore
 from ..config import TrainingConfig
+from ..models.requests import UnknownProject, require_known_projects
 from ..services.checkpoint_service import CheckpointService
 from ..services.model_service import ModelService
 from ..services.sampling_service import SamplingService
@@ -81,3 +82,13 @@ async def verify_api_key_dep(
 ):
     """Dependency to verify API key"""
     auth.verify(x_api_key)
+
+def known_project(project_id: Optional[str] = None) -> Optional[str]:
+    """The `project_id` query parameter: absent, or the server's one project. Any other
+    project is a 404, as session search answers it."""
+    if project_id is not None:
+        try:
+            require_known_projects([project_id])
+        except UnknownProject as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+    return project_id

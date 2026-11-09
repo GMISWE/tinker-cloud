@@ -115,14 +115,16 @@ def test_checkpoint_storage_usage_aggregates_completed_saves(service_client, ser
     tc = service_client.create_lora_training_client(base_model="fake/tiny", rank=2)
     tc.save_state("u1").result()
     tc.save_weights_for_sampler("u2").result()
-    after = rest.get_current_checkpoint_storage_usage(project_id="proj-x").result()
+    after = rest.get_current_checkpoint_storage_usage(project_id="default").result()
     row = after.data[0]
     assert row.checkpoint_count == before.data[0].checkpoint_count + 2
     assert row.size_bytes > before.data[0].size_bytes
     assert row.size_gigabytes == row.size_bytes / 2 ** 30
-    assert row.project_id == "proj-x" and row.estimated_monthly_cost_usd is None
+    assert row.project_id == "default" and row.estimated_monthly_cost_usd is None
     raw = _get(server, "/api/v1/billing/usage/checkpoints/current")
     assert raw.status_code == 200 and raw.json()["data"][0]["project_id"] is None
+    other = _get(server, "/api/v1/billing/usage/checkpoints/current?project_id=proj-x")
+    assert other.status_code == 404 and "proj-x" in other.json()["error"]   # as training_runs answers
 
 
 def test_copy_weights_is_not_served(server):

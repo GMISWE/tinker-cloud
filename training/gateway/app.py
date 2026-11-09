@@ -28,6 +28,7 @@ from ..models.requests import (
     DEFAULT_PROJECT,
     SessionHeartbeatRequest,
     SessionSearchRequest,
+    UnknownProject,
 )
 from ..models.responses import (
     CreateSamplingSessionResponse,
@@ -48,7 +49,7 @@ from . import routing
 from .decide import Decider, Headers, Reject
 from .forward import EngineResponse, EngineUnreachable, Pool, forward
 from .reaper import ModelReaper
-from .search import UnknownProject, search, status_of, str_metadata
+from .search import search, status_of, str_metadata
 from .registry import EngineRow, Registry, RegistryConflict, RegistryUnavailable
 from .sessions import SamplerCache, SessionStore
 

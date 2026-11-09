@@ -10,7 +10,7 @@ All model lifecycle operations delegate to the TrainingBackend instance.
 """
 import logging
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 from ..backends.base import TrainingBackend
 from ..models.requests import OptimizerConfig
@@ -229,6 +229,15 @@ class ModelService:
             },
             "hf_checkpoint": hf_path,
         }
+
+    def list_training_runs(
+        self, limit: int, offset: int, metadata_storage: MetadataStorage,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """One page of every recorded run, live or deleted, newest first by creation (so
+        offsets stay stable while runs train), and the total."""
+        runs = metadata_storage.list_training_runs(limit=None)
+        runs.sort(key=lambda m: (m["created_at"], m["training_run_id"]), reverse=True)
+        return runs[offset:offset + limit], len(runs)
 
     def get_training_run_metadata(
         self,

@@ -39,7 +39,7 @@ against its response model before it is stored.
 | Area | Endpoints |
 |---|---|
 | Sessions | `POST create_session`, `POST session_heartbeat`, `GET sessions`, `GET sessions/{id}`, `POST create_sampling_session`, `GET samplers/{id}` |
-| Models | `POST create_model` (async), `POST get_info`, `GET get_tokenizer`, `POST unload_model` (async), `POST delete_model`, `GET training_runs` (paged, newest first), `GET training_runs/{model_id}` (both report each run's newest loadable training and sampler checkpoint) |
+| Models | `POST create_model` (async), `POST get_info`, `GET get_tokenizer`, `POST unload_model` (async), `POST delete_model`, `GET training_runs` (paged, newest first; one project, `default`: another `project_id` is 404), `GET training_runs/{model_id}` (both report each run's newest loadable training and sampler checkpoint) |
 | Training | `POST forward` / `forward_backward` / `optim_step` (async; per-model program order, `seq_id` retries idempotent) |
 | Checkpoints | `POST save_weights`, `POST save_weights_for_sampler`, `POST load_weights` (first request only), `POST weights_info`, `GET training_runs/{id}/checkpoints`, `GET checkpoints` (every run's, paged), `PUT training_runs/{id}/checkpoints/{kind}/{ckpt}/ttl` (set or clear expiry; the background sweep deletes expired checkpoints), `DELETE training_runs/{id}/checkpoints/{weights\|sampler_weights\|external_weights}/{ckpt}`, `POST save_weights_external`, `GET training_runs/{id}/checkpoints/external_weights/{name}/external_weights_urls`, `GET external_weights/{id}/{name}/{file}?exp&sig` (signed, no API key) |
 | Sampling | `POST create_sampling_client`, `POST sample`, `POST asample` (async) — a request resolves strictly to its sampler's model; bare `base_model` sampling is 400 |
