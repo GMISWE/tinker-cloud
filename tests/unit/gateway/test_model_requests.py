@@ -7,8 +7,6 @@ import sys
 import time
 from pathlib import Path
 
-import pytest
-
 from training.gateway.sessions import SessionStore
 
 REPO = Path(__file__).resolve().parents[3]
@@ -60,10 +58,9 @@ def test_a_request_of_a_dead_worker_does_not_keep_a_refused_model(tmp_path):
     store.close()
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="reads the zombie state in /proc")
 def test_a_request_of_a_dead_worker_nobody_reaped_does_not_keep_a_refused_model(tmp_path):
-    """A worker that died is a zombie until its parent reaps it (a pod's PID 1 that never reaps keeps
-    it so), and a zombie still has its pid: a liveness check by pid alone read it as running."""
+    """A worker that died is a zombie until its parent reaps it, and a zombie still has its pid: a
+    liveness check by pid alone read it as running."""
     path = tmp_path / "sessions.db"
     store = SessionStore(path)
     sid = store.create_session([], {}, "t", None)

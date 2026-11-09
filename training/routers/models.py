@@ -116,7 +116,7 @@ async def create_model(
             )
         except Exception:
             # the gateway recorded the model at submit; a create that fails is reported before the future is
-            await report_model_failed(http_request, model_id)
+            await report_create_failed(http_request, model_id)
             raise
 
     # Create async task
@@ -134,7 +134,7 @@ async def create_model(
     )
 
 
-async def report_model_failed(http_request: Request, model_id: str) -> None:
+async def report_create_failed(http_request: Request, model_id: str) -> None:
     """Tell the gateway, which recorded `model_id` at submit, that no such model is coming: its row
     goes now, not at the next delete. A gateway that does not answer is logged beside the create's
     own error, which is the one the request reports."""
