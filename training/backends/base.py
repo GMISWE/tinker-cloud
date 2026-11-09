@@ -101,6 +101,12 @@ class TrainingBackend(ABC, Generic[H]):
     # backends refuse it with 400 before any of the two methods below is called.
     serves_base_model_sampling: bool = False
 
+    def model_repositories(self, base_model: str) -> List[str]:
+        """The model repositories, hub ids or local directories, this backend loads for `base_model`,
+        exactly as it resolves them; [] for a backend that loads no model. The server checks each for
+        code it declares before the backend sees the model (utils.model_config.check_model_code)."""
+        return [base_model]
+
     async def check_base_model(self, base_model: str) -> None:
         """Raises ValueError naming `base_model` when this backend cannot serve it as a
         base-model sampler. Cheap: no engine starts here."""

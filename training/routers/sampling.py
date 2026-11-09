@@ -40,6 +40,7 @@ from ..models.responses import (
 )
 from ..utils import generate_request_id
 from ..utils.helpers import BASE_MODEL_HEADER, BASE_MODEL_SAMPLING_UNSUPPORTED, MODEL_ID_HEADER, PINNED_VERSION_HEADER
+from ..utils.model_config import check_model_code
 
 logger = logging.getLogger(__name__)
 
@@ -326,6 +327,7 @@ async def resolve_sampler_target(
         if not backend.serves_base_model_sampling:
             raise HTTPException(status_code=400, detail=BASE_MODEL_SAMPLING_UNSUPPORTED)
         try:
+            await check_model_code(backend, request.base_model)   # the sampler's engine starts on it, as a create's would
             await backend.check_base_model(request.base_model)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e

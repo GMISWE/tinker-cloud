@@ -53,3 +53,26 @@ def test_a_base_model_the_engine_does_not_serve_is_its_400(tmp_path):
         finally:
             await h.close()
     run(main())
+
+
+def test_an_sdks_own_base_model_header_never_reaches_the_engine(tmp_path):
+    async def main():
+        h = Harness(str(tmp_path))
+        try:
+            async with serve_uds(h.engine, h.engine_socket):
+                await h.register(base_model_sampling=True)
+                sid = await h.create_session()
+                h.engine.target = {"model_id": None, "pinned_version": None, "base_model": "fake/tiny"}
+                r = await h.post_json("/api/v1/create_sampling_session",
+                                      {"session_id": sid, "sampling_session_seq_id": 0, "base_model": "fake/tiny"})
+                sampler = r.json()["sampling_session_id"]
+                h.engine.requests.clear()
+                # the engine reads the first X-Base-Model it gets: a forged one ahead of the gateway's would win
+                r = await h.post("/api/v1/asample", orjson.dumps({**PROMPT, "sampling_session_id": sampler}),
+                                 **{"content-type": "application/json", "X-Base-Model": "other/model"})
+                assert r.status_code == 200, r.text
+                (q,) = h.engine.requests
+                assert [v for k, v in q["raw_headers"] if k == "x-base-model"] == ["fake/tiny"]
+        finally:
+            await h.close()
+    run(main())

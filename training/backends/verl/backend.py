@@ -99,6 +99,11 @@ class VerlBackend(TrainingBackend[VerlHandle]):
             self._builder = VerlArgumentBuilder(overrides=self.overrides)
         return self._builder
 
+    def model_repositories(self, base_model: str) -> List[str]:
+        """The model directory or hub id the builder loads (VerlArgumentBuilder._resolve_hf_path)."""
+        from .builder import VerlArgumentBuilder
+        return [VerlArgumentBuilder._resolve_hf_path(base_model)]
+
     # ---------------------------------------------------------------- create
 
     async def create_model(
