@@ -445,7 +445,7 @@ if [ "$RUN_SERVER" = 1 ]; then
     echo "ERROR: no HF token in target (or the exec failed); pass HF_TOKEN_FILE=<path>"; exit 1; }
 else
   # bionemo: the Evo2 checkpoint (arcinstitute) is public; token optional.
-  EX "$HF_TOKEN_CHECK" > /dev/null || echo "    note: no HF token, or the exec failed (fine for public weights)"
+  EX "$HF_TOKEN_CHECK" > /dev/null || echo "    note: no HF token (fine for public weights)"
 fi
 
 # --- 4. in-container setup ---------------------------------------------------
