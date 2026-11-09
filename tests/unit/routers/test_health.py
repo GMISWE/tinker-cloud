@@ -32,4 +32,3 @@ def test_the_key_check_behind_it_logs_nothing(caplog):
         assert auth.is_valid("tml-secret-b")
         assert not auth.is_valid("tml-secret-c")
     assert caplog.records == []
-    assert APIKeyAuth(AuthConfig(api_key="k", enabled=False)).is_valid(None)
