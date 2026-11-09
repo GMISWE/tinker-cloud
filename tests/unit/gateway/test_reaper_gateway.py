@@ -4,7 +4,7 @@ import asyncio
 
 import orjson
 
-from .support import Harness, run, serve_uds
+from .support import MODEL, Harness, run, serve_uds
 
 
 def _create(session_id: str) -> dict:
@@ -34,6 +34,40 @@ def test_an_expired_session_has_its_models_deleted_on_the_engine(tmp_path):
                 await h.gateway.stop()
                 assert [q for q in h.engine.requests if q["path"] == "/api/v1/delete_model"] and len(
                     [q for q in h.engine.requests if q["path"] == "/api/v1/delete_model"]) == 1
+        finally:
+            await h.close()
+    run(main())
+
+
+def test_a_model_created_by_load_is_deleted_with_its_session(tmp_path):
+    """create-via-load's id is the SDK's `{session}:train:{seq}`, which names no engine: the delete goes to
+    the only engine, as the load that created the model did, and is sent once."""
+    async def main():
+        h = Harness(str(tmp_path))
+        h.cfg.session_timeout_s = 0.2
+        h.cfg.session_reap_interval_s = 0.05
+        deleted = asyncio.Event()
+
+        def on_delete(request):
+            if request["path"] == "/api/v1/delete_model":
+                deleted.set()
+
+        h.engine.on_request = on_delete
+        try:
+            async with serve_uds(h.engine, h.engine_socket):
+                await h.register()
+                sid = await h.create_session()
+                r = await h.post_json("/api/v1/load_weights", {"session_id": sid, "model_seq_id": 0,
+                                                               "path": f"tinker://{MODEL}/weights/s"})
+                assert r.status_code == 200, r.text
+                model_id = f"{sid}:train:0"
+                assert h.store.model_ids() == [model_id]
+                await h.gateway.start()
+                await asyncio.wait_for(deleted.wait(), timeout=2)
+                await asyncio.sleep(0.2)   # more ticks: a confirmed delete is not sent again
+                deletes = [orjson.loads(q["body"])["model_id"] for q in h.engine.requests if q["path"] == "/api/v1/delete_model"]
+                assert deletes == [model_id], deletes
+                assert h.store.get_session(sid) is None and h.store.claim_expired(-1) == []
         finally:
             await h.close()
     run(main())
