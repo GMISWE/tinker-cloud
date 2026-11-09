@@ -25,7 +25,8 @@ SESSION_COLUMNS = ("session_id, sdk_version, tags, user_metadata, created_at, la
 SAMPLER_COLUMNS = "sampler_id, session_id, model_id, base_model, model_path, pinned_version, client_counter"
 # A model claimed for deletion is its worker's until the delete settles the claim (acknowledged, or
 # released for a retry). A worker killed mid-free settles nothing, so a claim this old is taken again;
-# so is one whose delete is still running, and the engine then runs that teardown a second time.
+# so is one whose delete is still running, and the engine answers that second delete 409 (one delete
+# per model at a time), which releases the claim for a later tick.
 CLAIM_LEASE_S = 600.0
 
 
