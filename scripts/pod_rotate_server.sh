@@ -24,7 +24,7 @@ fi
 EXTRA_ENV+=("$@")
 
 # shellcheck source=scripts/lib/cluster.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE, EX, EX_TIMEOUT, ray_head, RAY_DRIVER_ADDRESS, SERVER_STOP
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE, EX, EX_TIMEOUT, ray_head, RAY_DRIVER_ADDRESS, SERVER_STOP, API_PORT
 require_tunnel
 # no defaults: a default pod or backend boots the wrong server on the right pod
 POD="${POD:?set POD (scripts/pod_state.sh lists the pods)}"
@@ -75,27 +75,30 @@ ENV_LINES=""
 for kv in "${EXTRA_ENV[@]:-}"; do
   [ -n "$kv" ] || continue
   case "$kv" in *=*) ;; *) echo "ERROR: '$kv' is not KEY=VAL"; exit 1 ;; esac
+  [[ "${kv%%=*}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { echo "ERROR: '$kv' does not start with a plain KEY="; exit 1; }
+  # the port is API_PORT in lib/cluster.sh; the deploy's NetworkPolicy and the health check below read it
+  [ "${kv%%=*}" = TRAINING_PORT ] && { echo "ERROR: set the port as API_PORT in lib/cluster.sh, not TRAINING_PORT"; exit 1; }
   [[ "$DEFAULT_KEYS" == *" ${kv%%=*} "* ]] && echo "==> $kv replaces the default ${kv%%=*}"
   ENV_LINES+="export ${kv%%=*}=$(printf '%q' "${kv#*=}")"$'\n'
 done
 EX "rm -f $SERVER_LOG"
 EX_TIMEOUT 30 "
-export PYTHONPATH=/app NUM_GPUS=$GPUS RAY_ADDRESS=$RAY_DRIVER_ADDRESS
+export PYTHONPATH=/app NUM_GPUS=$GPUS RAY_ADDRESS=$RAY_DRIVER_ADDRESS TRAINING_PORT=$API_PORT
 export HF_TOKEN=\$(cat /tmp/hf_token.txt) HF_HOME=/data/.cache/huggingface
 export TINKER_API_KEY=tml-dev-key TINKERCLOUD_BACKEND=$BACKEND ALLOW_PARTIAL_BATCHES=true
 $ENV_LINES
 cd /app && setsid nohup python3 -m training > $SERVER_LOG 2>&1 < /dev/null &
 sleep 2; echo LAUNCHED"
 
-# 5. verify in the NEW log (a curl-200 alone can be a zombie on :8000)
+# 5. verify in the NEW log (a curl-200 alone can be a zombie on :$API_PORT)
 echo "==> verifying bind"
 for _ in $(seq 1 20); do
-  if EX "grep -q 'error while attempting to bind' $SERVER_LOG 2>/dev/null"; then
-    echo "ERROR: bind failed — a zombie server still owns :8000"; EX "tail -5 $SERVER_LOG"; exit 1
+  if EX "grep -qE 'Address already in use|error while attempting to bind' $SERVER_LOG 2>/dev/null"; then
+    echo "ERROR: bind failed — a zombie server still owns :$API_PORT"; EX "tail -5 $SERVER_LOG"; exit 1
   fi
   # the server's log carries "Application startup complete" but no "Uvicorn running" line
   if EX "grep -q 'Application startup complete' $SERVER_LOG 2>/dev/null"; then
-    CODE=$(EX "curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://localhost:8000/health" || echo 000)
+    CODE=$(EX "curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://localhost:$API_PORT/health" || echo 000)
     if [ "$CODE" = 200 ]; then echo "==> server healthy ($SERVER_LOG)"; exit 0; fi
   fi
   sleep 5

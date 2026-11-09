@@ -7,7 +7,7 @@
 # Profiles (cased by BASE IMAGE — the images ship incompatible stacks)
 #   nemo_rl  (default) NeMo RL server backend. Image nvcr.io/nvidia/nemo-rl:*.
 #            Overlays RL/nemo_rl, starts a Ray head + `python3 -m training`
-#            (TINKERCLOUD_BACKEND=nemo_rl), health-checks :8000. GPUS=4.
+#            (TINKERCLOUD_BACKEND=nemo_rl), health-checks the API port (API_PORT). GPUS=4.
 #   bionemo  cu12 NeMo2 exploration env (feature 004 P5). Image
 #            nvcr.io/nvidia/clara/bionemo-framework:* — hyena Megatron-LM + TE +
 #            bionemo.evo2 + NeMo2. Env only (code + scripts/evo2 helpers, no server).
@@ -19,7 +19,7 @@
 #   miles    Miles/Slime backend. Image is the private GMI GAR build of
 #            github.com/GavinZhu-GMI/miles (miles + Megatron/SGLang/TE pre-installed);
 #            overlays only the server code, starts Ray head + `python3 -m training`
-#            (TINKERCLOUD_BACKEND=miles), health-checks :8000. GPUS=4.
+#            (TINKERCLOUD_BACKEND=miles), health-checks the API port (API_PORT). GPUS=4.
 #            Needs a pull secret for the private image: IMAGE_PULL_SECRET (default
 #            gcp-secret) must exist in namespace $NS.
 #   automodel  Automodel backend env (specs/027). Image built from
@@ -27,7 +27,7 @@
 #            NGC vLLM env in /opt/vllm-env (the backend starts it per base model).
 #            Private registry image (pull secret gar-secret). Installs the server,
 #            SDK and cookbook into /opt/venv, starts Ray head + `python3 -m training`
-#            (TINKERCLOUD_BACKEND=automodel), health-checks :8000. GPUS=4.
+#            (TINKERCLOUD_BACKEND=automodel), health-checks the API port (API_PORT). GPUS=4.
 #            The backend's required knobs default here and are overridable:
 #            AUTOMODEL_TRAIN_GPUS=2 AUTOMODEL_MAX_LORAS=4 AUTOMODEL_MAX_LORA_RANK=64
 #            AUTOMODEL_MAX_CPU_LORAS=8 AUTOMODEL_MICRO_BATCH_ROWS=4 AUTOMODEL_ACTIVATION_CHECKPOINTING=0.
@@ -78,7 +78,7 @@ done
 # Sets per-profile DEFAULTS; every one is overridable by the same-named env var.
 # shellcheck source=scripts/lib/cluster.sh
 # shellcheck disable=SC1091  # sourced by path at run time: KUBECONFIG, NS, DEFAULT_NODE
-. "$SCRIPT_DIR/lib/cluster.sh"   # KUBECONFIG, NS, kx, EX, EX_TIMEOUT, pod_cmd, ray_head, RAY_DRIVER_ADDRESS, TRUST_DOMAIN_LABEL, SERVER_PATTERN, SERVER_STOP
+. "$SCRIPT_DIR/lib/cluster.sh"   # KUBECONFIG, NS, kx, EX, EX_TIMEOUT, pod_cmd, ray_head, RAY_DRIVER_ADDRESS, TRUST_DOMAIN_LABEL, SERVER_PATTERN, SERVER_STOP, API_PORT
 BACKEND_ENV=""   # backend knobs exported to the server process (step 6)
 case "$PROFILE" in
   nemo_rl)
@@ -351,7 +351,7 @@ EOF
   else
     echo "==> [1/6] starting container $CONTAINER (data: $DATA_DIR)"
     # only the API port leaves the container: Ray's ports and the vLLM servers stay inside it
-    $DOCKER run -d --name "$CONTAINER" --init --gpus all -p 8000:8000 \
+    $DOCKER run -d --name "$CONTAINER" --init --gpus all -p "$API_PORT:$API_PORT" \
       --shm-size=32g -v "$DATA_DIR:/data" \
       -e PYTHONUNBUFFERED=1 -e TOKENIZERS_PARALLELISM=false \
       -e TINKER_API_KEY=tml-dev-key -e TINKERCLOUD_BACKEND="$BACKEND" \
@@ -382,10 +382,10 @@ spec:
   policyTypes: [Ingress]
   ingress:
   - from: [{podSelector: {matchLabels: {$TRUST_DOMAIN_LABEL: $POD}}}]
-  - ports: [{port: 8000, protocol: TCP}]
+  - ports: [{port: $API_PORT, protocol: TCP}]
 EOF
   kx apply -f "$TMP/netpol.yaml" > /dev/null
-  echo "    NetworkPolicy $POD-trust-domain: pods labelled $TRUST_DOMAIN_LABEL=$POD on every port, anyone on :8000 (if the CNI enforces it)"
+  echo "    NetworkPolicy $POD-trust-domain: pods labelled $TRUST_DOMAIN_LABEL=$POD on every port, anyone on :$API_PORT (if the CNI enforces it)"
 fi
 
 # the megatron_bridge profile also bundles the bionemo-recipes evo2 recipe (built
@@ -478,7 +478,7 @@ echo "==> [6/6] starting API server (log: $SERVER_LOG)"
 # NB: the detached child must have ALL fds redirected or the exec hangs (143);
 # even then the launch usually succeeded — verified below with a fresh probe.
 EX_TIMEOUT 30 "
-export PYTHONPATH=/app NUM_GPUS=$GPUS RAY_ADDRESS=$RAY_DRIVER_ADDRESS
+export PYTHONPATH=/app NUM_GPUS=$GPUS RAY_ADDRESS=$RAY_DRIVER_ADDRESS TRAINING_PORT=$API_PORT
 export HF_TOKEN=\$(cat /tmp/hf_token.txt) HF_HOME=/data/.cache/huggingface \
        TINKER_API_KEY=tml-dev-key TINKERCLOUD_BACKEND=$BACKEND ALLOW_PARTIAL_BATCHES=true $BACKEND_ENV
 cd /app && setsid nohup python3 -m training > $SERVER_LOG 2>&1 < /dev/null &
@@ -486,7 +486,7 @@ sleep 2; echo LAUNCHED"
 
 CODE=000
 for _ in $(seq 1 20); do
-  CODE=$(EX "curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://localhost:8000/health" || echo 000)
+  CODE=$(EX "curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://localhost:$API_PORT/health" || echo 000)
   [ "$CODE" = 200 ] && break
   sleep 5
 done
