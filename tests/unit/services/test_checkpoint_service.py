@@ -4,11 +4,12 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from tinkercloud.training.checkpoints import CheckpointKind, CheckpointStore
+from tinkercloud.training.checkpoints import CheckpointKind, CheckpointSaveOptions, CheckpointStore
 from tinkercloud.training.services.checkpoint_service import CheckpointService
 from tinkercloud.training.storage.metadata import MetadataStorage
 
 ADAMW = {"type": "adamw"}
+SAVE_OPTIONS = CheckpointSaveOptions(ttl_seconds=None, overwrite=True, user_metadata=None)
 W, S, E = CheckpointKind.WEIGHTS, CheckpointKind.SAMPLER_WEIGHTS, CheckpointKind.EXTERNAL_WEIGHTS
 
 
@@ -23,7 +24,7 @@ def service(store):
 
 
 def _save(store, model_id, kind, name, created_at, payload=b"", complete=True, persist=True):
-    t = store.begin_save(model_id, kind, name, persist=persist, optimizer_config=ADAMW)
+    t = store.begin_save(model_id, kind, name, options=SAVE_OPTIONS, persist=persist, optimizer_config=ADAMW)
     if persist and payload:
         (t.root / "w.bin").write_bytes(payload)
     if complete:

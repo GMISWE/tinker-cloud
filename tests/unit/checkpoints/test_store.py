@@ -9,18 +9,23 @@ import pytest
 
 from tinkercloud.training.checkpoints import (
     CheckpointDeleteFailed,
+    CheckpointExists,
     CheckpointFailed,
     CheckpointKind,
     CheckpointKindMismatch,
     CheckpointNotFound,
     CheckpointPending,
     CheckpointRef,
+    CheckpointSaveOptions,
     CheckpointStore,
     InvalidCheckpointPath,
 )
 from tinkercloud.training.storage.metadata import MetadataStorage
 
 ADAMW = {"type": "adamw"}   # the family record every save carries
+SAVE_OPTIONS = CheckpointSaveOptions(ttl_seconds=None, overwrite=True, user_metadata=None)
+NO_OVERWRITE = CheckpointSaveOptions(ttl_seconds=None, overwrite=False, user_metadata=None)
+TTL_OPTIONS = CheckpointSaveOptions(ttl_seconds=0, overwrite=True, user_metadata=None)
 
 W, S = CheckpointKind.WEIGHTS, CheckpointKind.SAMPLER_WEIGHTS
 
@@ -72,11 +77,11 @@ class TestRef:
     def test_long_name_does_not_remove_existing_checkpoint(self, store):
         # The bug: begin_save removed the old directory before the write failed.
         ok = CheckpointRef.make("m", W, "ok-name")
-        store.begin_save("m", W, "ok-name", optimizer_config=ADAMW)
+        store.begin_save("m", W, "ok-name", options=SAVE_OPTIONS, optimizer_config=ADAMW)
         store.complete(ok)
         assert store.require(ok).is_dir()
         with pytest.raises(InvalidCheckpointPath):
-            store.begin_save("m", W, "x" * 256, optimizer_config=ADAMW)
+            store.begin_save("m", W, "x" * 256, options=SAVE_OPTIONS, optimizer_config=ADAMW)
         assert store.require(ok).is_dir()  # old checkpoint still there
 
     def test_make_refuses_name_measured_in_bytes_not_characters(self):
@@ -97,7 +102,7 @@ class TestLayout:
 
 class TestSaveLifecycle:
     def test_begin_creates_an_empty_root_and_a_pending_record(self, store):
-        t = store.begin_save("m", W, "c1", weight_version=4, optimizer_config=ADAMW)
+        t = store.begin_save("m", W, "c1", options=SAVE_OPTIONS, weight_version=4, optimizer_config=ADAMW)
         assert t.root.is_dir() and not any(t.root.iterdir()) and t.step == 1
         rec = store.get(t.ref)
         assert rec["status"] == "pending" and rec["weight_version"] == 4 and rec["ephemeral"] is False
@@ -108,33 +113,60 @@ class TestSaveLifecycle:
         assert store.get(t.ref)["completed_at"]
 
     def test_failed_save_is_visible_as_failed(self, store):
-        t = store.begin_save("m", W, "c1", optimizer_config=ADAMW)
+        t = store.begin_save("m", W, "c1", options=SAVE_OPTIONS, optimizer_config=ADAMW)
         store.fail(t.ref, "disk full")
         with pytest.raises(CheckpointFailed, match="disk full"):
             store.require(t.ref)
 
     def test_counter_is_monotonic_across_failures_deletes_and_overwrites(self, store):
-        a = store.begin_save("m", W, "a", optimizer_config=ADAMW); store.complete(a.ref)
-        b = store.begin_save("m", W, "b", optimizer_config=ADAMW); store.fail(b.ref, "x")
+        a = store.begin_save("m", W, "a", options=SAVE_OPTIONS, optimizer_config=ADAMW); store.complete(a.ref)
+        b = store.begin_save("m", W, "b", options=SAVE_OPTIONS, optimizer_config=ADAMW); store.fail(b.ref, "x")
         assert (a.step, b.step) == (1, 2)
         store.delete(a.ref)
-        c = store.begin_save("m", W, "c", optimizer_config=ADAMW); store.complete(c.ref)
+        c = store.begin_save("m", W, "c", options=SAVE_OPTIONS, optimizer_config=ADAMW); store.complete(c.ref)
         assert c.step == 3                      # deleted a's 1 and failed b's 2 are never reused
-        again = store.begin_save("m", W, "c", optimizer_config=ADAMW)   # same name saved twice: new counter, old bytes gone
+        again = store.begin_save("m", W, "c", options=SAVE_OPTIONS, optimizer_config=ADAMW)   # same name saved twice: new counter, old bytes gone
         assert again.step == 4 and again.root == c.root and not any(again.root.iterdir())
-        s = store.begin_save("m", S, "c", optimizer_config=ADAMW); store.complete(s.ref)
+        s = store.begin_save("m", S, "c", options=SAVE_OPTIONS, optimizer_config=ADAMW); store.complete(s.ref)
         assert s.step == 5                      # one counter per model, both kinds
         assert store.next_step("other") == 1    # per model
 
     def test_begin_replaces_stale_bytes_under_the_same_name(self, store):
-        t = store.begin_save("m", W, "c1", optimizer_config=ADAMW)
+        t = store.begin_save("m", W, "c1", options=SAVE_OPTIONS, optimizer_config=ADAMW)
         (t.root / "old").write_text("x")
         store.complete(t.ref)
-        t2 = store.begin_save("m", W, "c1", optimizer_config=ADAMW)
+        t2 = store.begin_save("m", W, "c1", options=SAVE_OPTIONS, optimizer_config=ADAMW)
         assert not (t2.root / "old").exists()
 
+    def test_begin_refuses_an_existing_name_without_overwrite(self, store):
+        options = CheckpointSaveOptions(ttl_seconds=None, overwrite=True, user_metadata={"run": "first"})
+        t = store.begin_save("m", W, "c1", options=options, optimizer_config=ADAMW)
+        (t.root / "weights").write_text("old")
+        store.complete(t.ref)
+        with pytest.raises(CheckpointExists, match="already exists"):
+            store.begin_save("m", W, "c1", options=NO_OVERWRITE, optimizer_config=ADAMW)
+        assert (t.root / "weights").read_text() == "old"
+        assert store.get(t.ref)["user_metadata"] == {"run": "first"}
+
+        pending = store.begin_save("m", W, "c2", options=SAVE_OPTIONS, optimizer_config=ADAMW)
+        with pytest.raises(CheckpointExists, match="already exists"):
+            store.begin_save("m", W, "c2", options=NO_OVERWRITE, optimizer_config=ADAMW)
+        assert store.get(pending.ref)["status"] == "pending"
+
+    def test_begin_reuses_failed_and_expired_names_without_overwrite(self, store):
+        failed = store.begin_save("m", W, "failed", options=SAVE_OPTIONS, optimizer_config=ADAMW)
+        store.fail(failed.ref, "disk full")
+        retry = store.begin_save("m", W, "failed", options=NO_OVERWRITE, optimizer_config=ADAMW)
+        assert store.get(retry.ref)["status"] == "pending"
+
+        expired = store.begin_save("m", W, "expired", options=SAVE_OPTIONS, optimizer_config=ADAMW)
+        store.complete(expired.ref)
+        assert store.set_ttl(expired.ref, 0)
+        retry = store.begin_save("m", W, "expired", options=NO_OVERWRITE, optimizer_config=ADAMW)
+        assert store.get(retry.ref)["status"] == "pending"
+
     def test_ephemeral_save_has_no_step_no_root_and_is_not_listed(self, store):
-        t = store.begin_save("m", S, "m_1_abcd", persist=False, weight_version=2, optimizer_config=ADAMW)
+        t = store.begin_save("m", S, "m_1_abcd", options=SAVE_OPTIONS, persist=False, weight_version=2, optimizer_config=ADAMW)
         assert t.step is None and not t.root.exists()
         store.complete(t.ref)
         assert store.get(t.ref)["ephemeral"] is True
@@ -144,7 +176,7 @@ class TestSaveLifecycle:
 
 class TestReads:
     def test_require_checks_kind(self, store):
-        t = store.begin_save("m", S, "s1", optimizer_config=ADAMW); store.complete(t.ref)
+        t = store.begin_save("m", S, "s1", options=SAVE_OPTIONS, optimizer_config=ADAMW); store.complete(t.ref)
         with pytest.raises(CheckpointKindMismatch):
             store.require(t.ref, kind=W)
         with pytest.raises(CheckpointKindMismatch):
@@ -157,10 +189,10 @@ class TestReads:
         assert store.delete(CheckpointRef.make("m", W, "nope")) is False
 
     def test_list_reports_uri_status_and_size(self, store):
-        t = store.begin_save("m", W, "c1", optimizer_config=ADAMW)
+        t = store.begin_save("m", W, "c1", options=SAVE_OPTIONS, optimizer_config=ADAMW)
         (t.root / "blob").write_bytes(b"12345")
         store.complete(t.ref)
-        p = store.begin_save("m", W, "c2", optimizer_config=ADAMW)      # still pending: listed, marked
+        p = store.begin_save("m", W, "c2", options=SAVE_OPTIONS, optimizer_config=ADAMW)      # still pending: listed, marked
         [c2, c1] = store.list("m")
         assert c1["uri"] == t.ref.uri and c1["size_bytes"] == 5 and c1["status"] == "completed"
         assert c2["uri"] == p.ref.uri and c2["status"] == "pending"
@@ -170,7 +202,7 @@ class TestDeletion:
     def test_delete_removes_record_and_bytes_but_not_native(self, store):
         native = store.native_root("m")
         (native / "iter_0000001").mkdir()
-        t = store.begin_save("m", W, "c1", optimizer_config=ADAMW)
+        t = store.begin_save("m", W, "c1", options=SAVE_OPTIONS, optimizer_config=ADAMW)
         (t.root / "blob").write_text("x")
         store.complete(t.ref)
         assert store.delete(t.ref) is True
@@ -178,7 +210,7 @@ class TestDeletion:
         assert (native / "iter_0000001").is_dir()
 
     def test_a_delete_that_cannot_remove_the_bytes_keeps_the_record_and_says_why(self, store, monkeypatch):
-        t = store.begin_save("m", W, "c1", optimizer_config=ADAMW)
+        t = store.begin_save("m", W, "c1", options=SAVE_OPTIONS, optimizer_config=ADAMW)
         (t.root / "blob").write_text("x")
         store.complete(t.ref)
         completed_at = store.get(t.ref)["completed_at"]
@@ -197,7 +229,7 @@ class TestDeletion:
         assert not t.root.exists() and store.get(t.ref) is None
 
     def test_a_checkpoint_still_being_saved_is_not_deleted(self, store):
-        t = store.begin_save("m", W, "c1", optimizer_config=ADAMW)
+        t = store.begin_save("m", W, "c1", options=SAVE_OPTIONS, optimizer_config=ADAMW)
         (t.root / "blob").write_text("half")
         with pytest.raises(CheckpointPending, match="cannot be deleted yet"):
             store.delete(t.ref)
@@ -207,9 +239,9 @@ class TestDeletion:
         assert store.delete(t.ref) is True
 
     def test_the_expiry_sweep_survives_a_checkpoint_it_cannot_delete(self, store, monkeypatch):
-        stuck = store.begin_save("m", W, "stuck", ttl_seconds=0, optimizer_config=ADAMW)
+        stuck = store.begin_save("m", W, "stuck", options=TTL_OPTIONS, optimizer_config=ADAMW)
         store.complete(stuck.ref)
-        fine = store.begin_save("m", W, "fine", ttl_seconds=0, optimizer_config=ADAMW)
+        fine = store.begin_save("m", W, "fine", options=TTL_OPTIONS, optimizer_config=ADAMW)
         store.complete(fine.ref)
         monkeypatch.setattr(shutil, "rmtree", _rmtree_stuck_on("stuck"))
         assert store.sweep_expired() == 1   # "fine" went; "stuck" is logged and left for the next sweep
@@ -219,7 +251,7 @@ class TestDeletion:
 
     def test_a_failing_metadata_volume_is_reported_as_a_failed_delete_not_a_raw_oserror(self, store, monkeypatch):
         """The volume that holds the records can be the thing that fails (read-only remount, I/O error)."""
-        t = store.begin_save("m", W, "c1", optimizer_config=ADAMW)
+        t = store.begin_save("m", W, "c1", options=SAVE_OPTIONS, optimizer_config=ADAMW)
         (t.root / "blob").write_text("x")
         store.complete(t.ref)
 
@@ -232,7 +264,7 @@ class TestDeletion:
             store.delete(t.ref)
 
     def test_a_record_that_cannot_be_removed_after_the_bytes_went_is_a_failed_delete(self, store, monkeypatch):
-        t = store.begin_save("m", W, "c1", optimizer_config=ADAMW)
+        t = store.begin_save("m", W, "c1", options=SAVE_OPTIONS, optimizer_config=ADAMW)
         store.complete(t.ref)
 
         def broken(*_a, **_k):
@@ -246,7 +278,7 @@ class TestDeletion:
         assert store.delete(t.ref) is True and store.get(t.ref) is None
 
     def test_the_expiry_sweep_survives_a_metadata_volume_that_is_failing(self, store, monkeypatch):
-        t = store.begin_save("m", W, "c1", ttl_seconds=0, optimizer_config=ADAMW)
+        t = store.begin_save("m", W, "c1", options=TTL_OPTIONS, optimizer_config=ADAMW)
         store.complete(t.ref)
 
         def broken(*_a, **_k):
@@ -256,7 +288,7 @@ class TestDeletion:
         assert store.sweep_expired() == 0   # logged, not raised: sweep_forever has no try and would end for good
 
     def test_the_stored_error_and_the_response_do_not_carry_a_server_path(self, store, monkeypatch):
-        t = store.begin_save("m", W, "c1", optimizer_config=ADAMW)
+        t = store.begin_save("m", W, "c1", options=SAVE_OPTIONS, optimizer_config=ADAMW)
         (t.root / "blob").write_text("x")
         store.complete(t.ref)
         monkeypatch.setattr(shutil, "rmtree", _rmtree_stuck_on("c1"))
@@ -266,7 +298,7 @@ class TestDeletion:
             assert str(store.base) not in text and "Permission denied" in text
 
     def test_a_checkpoint_that_stays_stuck_logs_one_line_per_sweep_not_a_traceback(self, store, monkeypatch, caplog):
-        t = store.begin_save("m", W, "stuck", ttl_seconds=0, optimizer_config=ADAMW)
+        t = store.begin_save("m", W, "stuck", options=TTL_OPTIONS, optimizer_config=ADAMW)
         store.complete(t.ref)
         monkeypatch.setattr(shutil, "rmtree", _rmtree_stuck_on("stuck"))
         with caplog.at_level("WARNING"):
@@ -276,8 +308,8 @@ class TestDeletion:
         assert any("Could not delete expired checkpoint" in r.getMessage() for r in caplog.records)
 
     def test_release_model_drops_only_ephemeral_records(self, store):
-        keep = store.begin_save("m", W, "c1", optimizer_config=ADAMW); store.complete(keep.ref)
-        eph = store.begin_save("m", S, "m_1_x", persist=False, optimizer_config=ADAMW); store.complete(eph.ref)
+        keep = store.begin_save("m", W, "c1", options=SAVE_OPTIONS, optimizer_config=ADAMW); store.complete(keep.ref)
+        eph = store.begin_save("m", S, "m_1_x", options=SAVE_OPTIONS, persist=False, optimizer_config=ADAMW); store.complete(eph.ref)
         assert store.release_model("m") == 1
         assert store.get(keep.ref) and store.get(eph.ref) is None
         assert store.native_root("m").is_dir()
@@ -285,8 +317,8 @@ class TestDeletion:
 
 class TestBootSweep:
     def test_pending_rows_become_failed(self, store, tmp_path):
-        t = store.begin_save("m", W, "c1", optimizer_config=ADAMW)
-        done = store.begin_save("m", W, "c2", optimizer_config=ADAMW); store.complete(done.ref)
+        t = store.begin_save("m", W, "c1", options=SAVE_OPTIONS, optimizer_config=ADAMW)
+        done = store.begin_save("m", W, "c2", options=SAVE_OPTIONS, optimizer_config=ADAMW); store.complete(done.ref)
         fresh = CheckpointStore(store.base, MetadataStorage(tmp_path / "meta"))  # a restart
         assert fresh.sweep_pending() == 1
         with pytest.raises(CheckpointFailed, match="restarted"):

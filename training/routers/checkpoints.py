@@ -38,7 +38,7 @@ from ..core.dependencies import (
     get_futures_storage, 
     get_training_clients,
 )
-from ..checkpoints import CheckpointKind, CheckpointRef, CheckpointStore
+from ..checkpoints import CheckpointKind, CheckpointRef, CheckpointSaveOptions, CheckpointStore
 from ..storage import MetadataStorage, FuturesStorage
 from ..storage.futures import DuplicateSeqId
 from ..models.requests import (
@@ -96,11 +96,18 @@ async def save_weights(
     if request.model_id not in training_clients:
         raise HTTPException(status_code=404, detail=f"Model {request.model_id} not found")
 
+    options = CheckpointSaveOptions(
+        ttl_seconds=request.ttl_seconds,
+        overwrite=request.overwrite,
+        user_metadata=request.user_metadata,
+    )
+
     async def execute():
         return await service.save_weights(
             model_id=request.model_id,
             request_id=request_id,
             path=request.path,
+            options=options,
             training_clients=training_clients,
         )
 
@@ -151,15 +158,21 @@ async def save_weights_for_sampler(
     # Get base_model from training client (use None if missing, not empty string)
     client_info = training_clients[request.model_id]
     base_model = client_info.get("base_model") or None
+    options = CheckpointSaveOptions(
+        ttl_seconds=request.ttl_seconds,
+        overwrite=True,  # the sampler API has no overwrite control
+        user_metadata=request.user_metadata,
+    )
 
     async def execute():
         result = await service.save_weights_for_sampler(
             model_id=request.model_id,
             request_id=request_id,
             name=request.name,
+            options=options,
             training_clients=training_clients,
             path=request.path,
-            sampling_session_seq_id=request.sampling_session_seq_id
+            sampling_session_seq_id=request.sampling_session_seq_id,
         )
 
         # An ephemeral sampler is the gateway's to route: it learns of it before the SDK does.
@@ -214,11 +227,16 @@ async def save_weights_external(
     if request.model_id not in training_clients:
         raise HTTPException(status_code=404, detail=f"Model {request.model_id} not found")
     request_id = generate_request_id()
+    options = CheckpointSaveOptions(
+        ttl_seconds=request.ttl_seconds,
+        overwrite=True,  # the external export API has no overwrite control
+        user_metadata=None,
+    )
 
     async def execute():
         return await service.save_weights_external(
             model_id=request.model_id, request_id=request_id, name=request.path,
-            ttl_seconds=request.ttl_seconds, training_clients=training_clients,
+            options=options, training_clients=training_clients,
         )
 
     request_id = task_manager.create_task(

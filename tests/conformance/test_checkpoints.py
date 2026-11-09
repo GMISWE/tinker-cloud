@@ -3,6 +3,7 @@ import json
 import time
 from datetime import datetime, timedelta, timezone
 
+import pytest
 import requests
 from fastapi import FastAPI
 from tinker import types
@@ -42,6 +43,27 @@ def test_list_and_delete(service_client, server):
     assert _delete(server, tc.model_id, "c1", checkpoint_type="training").status_code == 204
     assert rest.list_checkpoints(tc.model_id).result().checkpoints == []
     assert _delete(server, tc.model_id, "weights/c1").status_code == 404
+
+
+def test_save_options(service_client):
+    tc = service_client.create_lora_training_client(base_model="fake/tiny", rank=2)
+    path = tc.save_state("latest", ttl_seconds=3600, user_metadata={"run": "first"}).result().path
+    rest = service_client.create_rest_client()
+    saved = next(c for c in rest.list_checkpoints(tc.model_id).result().checkpoints if c.tinker_path == path)
+    assert saved.user_metadata == {"run": "first"}
+    assert 3500 < saved.expires_at.timestamp() - time.time() <= 3600
+
+    with pytest.raises(ValueError, match="already exists"):
+        tc.save_state("latest").result()
+    assert tc.save_state("latest", overwrite=True, user_metadata={"run": "second"}).result().path == path
+    saved = next(c for c in rest.list_checkpoints(tc.model_id).result().checkpoints if c.tinker_path == path)
+    assert saved.user_metadata == {"run": "second"} and saved.expires_at is None
+
+    sampler = tc.save_weights_for_sampler(
+        "eval", ttl_seconds=3600, user_metadata={"split": "test"}).result().path
+    saved = next(c for c in rest.list_checkpoints(tc.model_id).result().checkpoints if c.tinker_path == sampler)
+    assert saved.user_metadata == {"split": "test"}
+    assert 3500 < saved.expires_at.timestamp() - time.time() <= 3600
 
 
 def test_load_weights_first_request_rule(service_client, server):

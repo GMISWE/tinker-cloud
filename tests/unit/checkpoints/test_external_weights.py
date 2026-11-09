@@ -13,6 +13,7 @@ from tinkercloud.training.checkpoints import (
     CheckpointKind,
     CheckpointNotFound,
     CheckpointRef,
+    CheckpointSaveOptions,
     InvalidCheckpointPath,
 )
 from tinkercloud.training.checkpoints import store as store_module
@@ -20,6 +21,8 @@ from tinkercloud.training.checkpoints.store import is_expired
 from tinkercloud.training.utils import signed_urls
 
 ADAMW = {"type": "adamw"}   # the family record every save carries
+SAVE_OPTIONS = CheckpointSaveOptions(ttl_seconds=None, overwrite=True, user_metadata=None)
+TTL_OPTIONS = CheckpointSaveOptions(ttl_seconds=3600, overwrite=True, user_metadata=None)
 
 E = CheckpointKind.EXTERNAL_WEIGHTS
 
@@ -33,7 +36,7 @@ class TestStoreKind:
             CheckpointRef.parse("tinker://m/external/hf1")  # the SDK type name is not a kind
 
     def test_files_lists_regular_files_relative_to_root(self, store):
-        t = store.begin_save("m", E, "hf1", optimizer_config=ADAMW)
+        t = store.begin_save("m", E, "hf1", options=SAVE_OPTIONS, optimizer_config=ADAMW)
         (t.root / "a.json").write_text("{}")
         (t.root / "sub").mkdir()
         (t.root / "sub" / "b.bin").write_bytes(b"xy")
@@ -46,16 +49,16 @@ class TestStoreKind:
 
 class TestTtl:
     def test_ttl_is_recorded_and_listed(self, store):
-        t = store.begin_save("m", E, "hf1", ttl_seconds=3600, optimizer_config=ADAMW)
+        t = store.begin_save("m", E, "hf1", options=TTL_OPTIONS, optimizer_config=ADAMW)
         store.complete(t.ref)
         rec = store.get(t.ref)
         delta = datetime.fromisoformat(rec["expires_at"]) - datetime.now(timezone.utc)
         assert timedelta(minutes=59) < delta <= timedelta(hours=1)
         assert store.list("m")[0]["expires_at"] == rec["expires_at"]
-        assert store.begin_save("m", E, "forever", optimizer_config=ADAMW).ref and store.get(CheckpointRef.make("m", E, "forever"))["expires_at"] is None
+        assert store.begin_save("m", E, "forever", options=SAVE_OPTIONS, optimizer_config=ADAMW).ref and store.get(CheckpointRef.make("m", E, "forever"))["expires_at"] is None
 
     def test_expired_reads_as_not_found_and_is_swept(self, store):
-        t = store.begin_save("m", E, "hf1", ttl_seconds=3600, optimizer_config=ADAMW)
+        t = store.begin_save("m", E, "hf1", options=TTL_OPTIONS, optimizer_config=ADAMW)
         (t.root / "weights.bin").write_bytes(b"weights")
         store.complete(t.ref)
         rec = store.get(t.ref)
@@ -72,7 +75,7 @@ class TestTtl:
         assert not is_expired({"status": "completed"})  # pre-ttl record: never expires
 
     def test_set_ttl_moves_or_clears_expiry_of_a_persistent_checkpoint(self, store):
-        w = store.begin_save("m", CheckpointKind.WEIGHTS, "w1", optimizer_config=ADAMW)
+        w = store.begin_save("m", CheckpointKind.WEIGHTS, "w1", options=SAVE_OPTIONS, optimizer_config=ADAMW)
         store.complete(w.ref)
         assert store.get(w.ref)["expires_at"] is None
         assert store.set_ttl(w.ref, 7200)
@@ -85,9 +88,9 @@ class TestTtl:
 
     def test_set_ttl_refuses_unknown_ephemeral_and_already_expired(self, store):
         assert not store.set_ttl(CheckpointRef.make("m", E, "nope"), 3600)
-        eph = store.begin_save("m", CheckpointKind.SAMPLER_WEIGHTS, "s", persist=False, optimizer_config=ADAMW)
+        eph = store.begin_save("m", CheckpointKind.SAMPLER_WEIGHTS, "s", options=SAVE_OPTIONS, persist=False, optimizer_config=ADAMW)
         assert not store.set_ttl(eph.ref, 3600)
-        t = store.begin_save("m", E, "hf1", ttl_seconds=3600, optimizer_config=ADAMW)
+        t = store.begin_save("m", E, "hf1", options=TTL_OPTIONS, optimizer_config=ADAMW)
         store.complete(t.ref)
         rec = store.get(t.ref)
         rec["expires_at"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
@@ -96,7 +99,7 @@ class TestTtl:
         assert store.sweep_expired() == 1
 
     def test_a_shortened_ttl_is_swept_once_it_has_passed(self, store, monkeypatch):
-        t = store.begin_save("m", E, "hf1", optimizer_config=ADAMW)
+        t = store.begin_save("m", E, "hf1", options=SAVE_OPTIONS, optimizer_config=ADAMW)
         (t.root / "weights.bin").write_bytes(b"weights")
         store.complete(t.ref)
         assert store.set_ttl(t.ref, 3600) and store.sweep_expired() == 0

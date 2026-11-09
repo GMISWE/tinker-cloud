@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple
 
 from ..backends.base import TrainingBackend
-from ..checkpoints import CheckpointKind, CheckpointRef, CheckpointStatus, CheckpointStore, is_expired
+from ..checkpoints import CheckpointKind, CheckpointRef, CheckpointSaveOptions, CheckpointStatus, CheckpointStore, is_expired
 from ..models.requests import OptimizerConfig
 from ..models.responses import Checkpoint, CheckpointType
 from ..storage import MetadataStorage
@@ -57,6 +57,7 @@ class CheckpointService:
         model_id: str,
         request_id: str,
         path: Optional[str],
+        options: CheckpointSaveOptions,
         training_clients: Dict[str, Dict[str, Any]],
     ) -> Dict[str, Any]:
         """Save a training checkpoint (weights + whatever optimizer state the
@@ -66,7 +67,8 @@ class CheckpointService:
         name = path or f"checkpoint_{int(time.time())}"
         ticket = self.store.begin_save(
             model_id, CheckpointKind.WEIGHTS, name,
-            weight_version=handle.weight_version, optimizer_config=client_info["optimizer_config"],
+            options=options, weight_version=handle.weight_version,
+            optimizer_config=client_info["optimizer_config"],
         )
         logger.info("[%s] Saving weights for %s to %s (step %s)", request_id, model_id, ticket.ref.uri, ticket.step)
         await self._save(handle, ticket)
@@ -78,7 +80,7 @@ class CheckpointService:
         model_id: str,
         request_id: str,
         name: str,
-        ttl_seconds: Optional[int],
+        options: CheckpointSaveOptions,
         training_clients: Dict[str, Dict[str, Any]],
     ) -> Dict[str, Any]:
         """Export the weights in HF format under an external_weights checkpoint;
@@ -87,7 +89,7 @@ class CheckpointService:
         handle = client_info["backend_handle"]
         ticket = self.store.begin_save(
             model_id, CheckpointKind.EXTERNAL_WEIGHTS, name,
-            weight_version=handle.weight_version, ttl_seconds=ttl_seconds,
+            options=options, weight_version=handle.weight_version,
             optimizer_config=client_info["optimizer_config"],
         )
         logger.info("[%s] Exporting external weights for %s to %s (step %s)", request_id, model_id, ticket.ref.uri, ticket.step)
@@ -154,6 +156,7 @@ class CheckpointService:
             size_bytes=self.store.size_bytes(CheckpointRef.parse(rec["uri"])),
             status=rec["status"],
             expires_at=rec.get("expires_at"),  # absent on records older than ttl support
+            user_metadata=rec.get("user_metadata"),  # absent on records older than user_metadata support
         )
 
     def list_checkpoints(self, model_id: str) -> List[Checkpoint]:
@@ -186,6 +189,7 @@ class CheckpointService:
         model_id: str,
         request_id: str,
         name: Optional[str],
+        options: CheckpointSaveOptions,
         training_clients: Dict[str, Dict[str, Any]],
         path: Optional[str] = None,
         sampling_session_seq_id: Optional[int] = None,
@@ -203,6 +207,7 @@ class CheckpointService:
             name = f"{model_id}_{sampling_session_seq_id}_{uuid.uuid4().hex[:8]}"
             ticket = self.store.begin_save(
                 model_id, CheckpointKind.SAMPLER_WEIGHTS, name, persist=False, weight_version=weight_version,
+                options=options,
                 optimizer_config=client_info["optimizer_config"],
             )
             logger.info("[%s] Ephemeral sampler save for %s: %s", request_id, model_id, ticket.ref.uri)
@@ -215,6 +220,7 @@ class CheckpointService:
         name = path or name or f"sampler_{int(time.time())}"
         ticket = self.store.begin_save(
             model_id, CheckpointKind.SAMPLER_WEIGHTS, name, weight_version=weight_version,
+            options=options,
             optimizer_config=client_info["optimizer_config"],
         )
         logger.info("[%s] Saving sampler weights for %s to %s (step %s)", request_id, model_id, ticket.ref.uri, ticket.step)
