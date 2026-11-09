@@ -56,12 +56,16 @@ RAY_CLIENT_PORT=10001
 RAY_DRIVER_ADDRESS=auto
 # The API server's process as `pgrep -f`/`pkill -f` (ERE) match it: a command line that starts with
 # a python of any name or path, with single-token interpreter flags (`-u`, `-Xdev`), running
-# `-m training` with or without arguments. The anchor leaves out the `bash -c "... python3 -m training ..."` launcher, which stays
-# alive as the server's parent, and every pgrep, pkill or shell whose command line holds the pattern.
+# `-m training` with or without arguments. The anchor leaves out the `bash -c "... python3 -m
+# training ..."` launcher, which stays alive as the server's parent, and every pgrep, pkill or
+# shell whose command line holds the pattern.
 SERVER_PATTERN='^([^ ]*/)?python[0-9.]*( -[^ ]+)* -m training( |$)'
-# The pod command that stops the API server, if one runs.
+# The pod command that stops the API server, if one runs, and fails unless none runs after it.
+# pkill's exit cannot tell the cases apart (1 is both "nothing matched" and "a match could not be
+# signalled"), so the check is pgrep after the wait: 1 (nothing matches) passes; 0 (a server
+# outlived the TERM) or 2 (a bad pattern) fails.
 # shellcheck disable=SC2034  # read by the scripts that source this file
-SERVER_STOP="pkill -f '$SERVER_PATTERN' || true; sleep 8"
+SERVER_STOP="pkill -f '$SERVER_PATTERN'; sleep 8; pgrep -f '$SERVER_PATTERN' > /dev/null; [ \$? -eq 1 ] || { echo 'ERROR: an API server still runs after pkill, or pgrep failed'; exit 1; }"
 
 # The pod side of this pod's Ray head: `ray_head state`, `ray_head ensure <gpus>` or
 # `ray_head recycle <gpus>`.

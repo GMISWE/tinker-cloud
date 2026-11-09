@@ -58,7 +58,7 @@ if [ "$GPU_RUN" = 1 ]; then
     "") echo "ERROR: could not read the Ray head's state on $POD (the exec gave no output)" >&2; exit 1 ;;
     *)
       echo "the Ray head on $POD is '$HEAD_STATE'; GPU suites start their own. Stop the server and the head first:" >&2
-      echo "  kubectl -n $NS exec $POD -- bash -c \"$SERVER_STOP; ray stop --force\"" >&2
+      printf '  kubectl -n %s exec %s -- bash -c %q\n' "$NS" "$POD" "$SERVER_STOP; ray stop --force" >&2
       exit 1 ;;
   esac
 fi
