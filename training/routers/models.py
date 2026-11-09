@@ -266,7 +266,7 @@ def _training_run(metadata: Dict, checkpoints: CheckpointService) -> TrainingRun
 async def list_training_runs(
     limit: int = Query(20, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    access_scope: Literal["owned", "accessible"] = "owned",
+    access_scope: Literal["owned", "accessible"] = "owned",   # the SDK's own default; one owner here, so no filter
     _: None = Depends(verify_api_key_dep),
     _project: Optional[str] = Depends(known_project),
     service: ModelService = Depends(get_model_service),
