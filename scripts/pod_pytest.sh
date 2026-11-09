@@ -7,7 +7,8 @@
 #   scripts/pod_pytest.sh tinkercloud-nemorl tests/conformance tests/unit/core -q
 #
 # The tree is tarred (training/ tests/ gates/ pyproject.toml, and the rotate script a test reads), pushed with
-# sha256 verified on both sides, unpacked under /tmp/pytest-<user>/app and
+# sha256 verified on both sides, unpacked under /tmp/pytest-<user>-<run>/app (one directory
+# per run, removed after it, so two runs on one pod never share a tree) and
 # aliased as the `tinkercloud` package the tests import. Default args run
 # the suites that need no GPU.
 #
@@ -36,15 +37,18 @@ esac
 # kubectl calls time out at KX_TIMEOUT seconds; a GPU suite needs the long default
 KX_TIMEOUT="${KX_TIMEOUT:-$([ "$GPU_RUN" = 1 ] && echo 1800 || echo 600)}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-REMOTE="/tmp/pytest-${USER:-u}"
 LOG="$HOME/.cache/tinkercloud/pod_pytest.log"; mkdir -p "$(dirname "$LOG")"
 LOGGED=0; ARGS="$*"   # the trap may run inside a function, where $* is that function's
 TMP="$(mktemp -d)"
+REMOTE="/tmp/pytest-${USER:-u}-${TMP##*.}"   # mktemp's random suffix names this run
+PUSHED=0
 # every invocation leaves one log line, also one that dies before pytest (tunnel down, push failed, Ray guard)
 # shellcheck disable=SC2329  # invoked by the trap below
 on_exit() {
   local rc=$?
   rm -rf "$TMP"
+  # a pod we never reached has nothing to remove; a failed removal leaves one tree in /tmp
+  [ "$PUSHED" = 0 ] || kx exec "$POD" -- rm -rf "$REMOTE" "$REMOTE.tgz" || echo "  could not remove $POD:$REMOTE" >&2
   [ "$LOGGED" = 1 ] || printf '%s %s %s | no run (exit %s before pytest)\n' "$(date -u +%FT%TZ)" "$POD" "$ARGS" "$rc" >> "$LOG"
 }
 trap on_exit EXIT
@@ -66,6 +70,7 @@ fi
 tar -C "$ROOT" -czf "$TMP/code.tgz" --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
     training tests gates pyproject.toml scripts/pod_rotate_server.sh
 SHA="$(sha256sum "$TMP/code.tgz" | cut -d' ' -f1)"
+PUSHED=1
 for try in 1 2 3; do
   kx cp "$TMP/code.tgz" "$POD:$REMOTE.tgz"
   RSHA="$(kx exec "$POD" -- sha256sum "$REMOTE.tgz" | cut -d' ' -f1)"
