@@ -10,7 +10,7 @@ from tinkercloud.training.backends.base import BackendError
 from tinkercloud.training.backends.nemo_rl import backend as nb
 from tinkercloud.training.models.requests import AdamParams
 from tinkercloud.training.backends.nemo_rl.backend import NemoRLHandle
-from tests.datums import make_synthetic_batch
+from tests.datums import ce_datum, make_synthetic_batch
 
 HAS_NEMO_RL = importlib.util.find_spec("nemo_rl") is not None
 
@@ -254,6 +254,21 @@ def test_create_time_split_sync_tolerates_a_busy_prefix_cache(monkeypatch):
     assert log == ["nccl-send", "nccl-recv", "invalidate"]
     with pytest.raises(RuntimeError, match="drain violated"):
         nb._refit_policy_generation(policy, gen, colocated_inference=True)
+
+
+@pytest.mark.parametrize("field", ["target_tokens", "weights"])
+def test_invalid_sft_does_not_change_the_buffer(field):
+    backend = nb.NemoRLBackend()
+    buffered = {"existing": "batch"}
+    loss_fn_config = {}
+    handle = make_handle([], data_buffer=[buffered], loss_fn_name="cross_entropy",
+                         loss_fn_config=loss_fn_config)
+    datum = ce_datum([10, 20, 30], [20, 30, 40], [1.0, 1.0, 1.0])
+    datum.loss_fn_inputs[field].data = [1]
+    with pytest.raises(BackendError, match=f"datum 1: {field} has 1 entries for 3 tokens"):
+        asyncio.run(backend.forward_backward(handle, [ce_datum([1]), datum], "cross_entropy"))
+    assert len(handle.data_buffer) == 1 and handle.data_buffer[0] is buffered
+    assert handle.loss_fn_name == "cross_entropy" and handle.loss_fn_config is loss_fn_config
 
 
 @pytest.mark.skipif(not HAS_NEMO_RL, reason="NeMo RL not installed")
