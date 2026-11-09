@@ -1,6 +1,7 @@
 """The session reaper runs in the gateway: a session silent past the timeout has its models deleted on
 the engine, and failed deletes remain queued for another tick."""
 import asyncio
+import logging
 
 import orjson
 
@@ -197,4 +198,68 @@ def test_two_workers_free_each_expired_model_once(tmp_path):
         finally:
             await a.close()
             await b.close()
+    run(main())
+
+
+def test_a_delete_in_progress_409_is_retried(tmp_path):
+    """The engine answers 409 to a delete of a model whose delete is still running: not confirmed, so
+    the claim is released and a later tick deletes again."""
+    async def main():
+        h = Harness(str(tmp_path))
+        h.cfg.session_timeout_s = 0.2
+        h.cfg.session_reap_interval_s = 0.05
+        deletes = []
+        retried = asyncio.Event()
+
+        def busy_first_delete(request):
+            if request["path"] != "/api/v1/delete_model":
+                return
+            deletes.append(orjson.loads(request["body"])["model_id"])
+            if len(deletes) == 1:
+                h.engine.answers[request["path"]] = 409
+            else:
+                h.engine.answers.pop(request["path"], None)
+                retried.set()
+
+        h.engine.on_request = busy_first_delete
+        try:
+            async with serve_uds(h.engine, h.engine_socket):
+                await h.register()
+                session_id = await h.create_session()
+                model_id = (await h.post_json("/api/v1/create_model", _create(session_id))).json()["model_id"]
+                await h.gateway.start()
+                await asyncio.wait_for(retried.wait(), timeout=2)
+                await asyncio.sleep(0.1)
+                assert deletes == [model_id, model_id]
+                assert h.store.claim_expired(-1) == []   # the second delete settled it
+        finally:
+            await h.close()
+    run(main())
+
+
+def test_a_tick_logs_only_the_frees_it_starts(caplog):
+    """A claim re-taken while its free is still in flight starts no free; the tick used to log
+    "freeing 1 model(s)" for it all the same."""
+    from training.gateway.reaper import ModelReaper
+
+    async def main():
+        stuck = asyncio.Event()
+        calls = []
+
+        async def free(model_id: str, reason: str) -> None:
+            calls.append(model_id)
+            await stuck.wait()
+
+        reaper = ModelReaper(free)
+        with caplog.at_level(logging.WARNING, logger="training.gateway.reaper"):
+            assert reaper.tick([("s", ["m"])], live={"m"}) == 1
+            await asyncio.sleep(0)
+            assert [r.getMessage() for r in caplog.records] == ["Session s expired: freeing 1 model(s)"]
+            caplog.clear()
+            assert reaper.tick([("s", ["m"])], live={"m"}) == 0   # the lease ran out; the free still runs
+            await asyncio.sleep(0)
+            assert caplog.records == []
+        assert calls == ["m"]
+        stuck.set()
+        await asyncio.sleep(0)
     run(main())

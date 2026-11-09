@@ -191,3 +191,26 @@ def test_a_refused_load_racing_an_accepted_one_leaves_the_row(tmp_path):
         finally:
             await h.close()
     run(main())
+
+
+def test_a_resend_after_delete_of_the_model_leaves_no_row(tmp_path):
+    """The model a create-via-load made was deleted; the SDK resends the load, the gateway records the
+    model again at submit, and the engine refuses it ("was deleted"). No row is left for a model that
+    does not exist."""
+    async def main():
+        h = Harness(str(tmp_path))
+        try:
+            async with serve_uds(h.engine, h.engine_socket):
+                await h.register()
+                sid = await h.create_session()
+                model_id = f"{sid}:train:0"
+                load = {"session_id": sid, "model_seq_id": 0, "path": f"tinker://{MODEL}/weights/w"}
+                assert (await h.post_json("/api/v1/load_weights", load)).status_code == 200
+                assert (await h.post_json("/api/v1/delete_model", {"model_id": model_id})).status_code == 200
+                assert (await h.get(f"/api/v1/sessions/{sid}")).json()["training_run_ids"] == []
+                h.engine.answers["/api/v1/load_weights"] = 400   # "was deleted"
+                assert (await h.post_json("/api/v1/load_weights", load)).status_code == 400
+                assert (await h.get(f"/api/v1/sessions/{sid}")).json()["training_run_ids"] == []
+        finally:
+            await h.close()
+    run(main())

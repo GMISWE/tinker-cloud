@@ -40,16 +40,21 @@ class ModelReaper:
     def inflight(self) -> int:
         return sum(1 for t in self._frees.values() if not t.done())
 
+    def _freeing(self, model_id: str) -> bool:
+        task = self._frees.get(model_id)
+        return task is not None and not task.done()
+
     def tick(self, expired: Expired, live: Collection[str]) -> int:
-        """Schedule a free for every live model of an expired session and
-        return at once. Returns how many frees were scheduled."""
+        """Schedule a free for every live model of an expired session that is not already being
+        freed, and return at once. Returns, and logs, how many frees it started."""
         n = 0
         for session_id, model_ids in expired:
-            logger.warning("Session %s expired: freeing %d model(s)", session_id, len(model_ids))
-            for model_id in model_ids:
-                if model_id in live:
-                    self.free(model_id, f"session {session_id} expired")
-                    n += 1
+            starting = [m for m in model_ids if m in live and not self._freeing(m)]
+            if starting:
+                logger.warning("Session %s expired: freeing %d model(s)", session_id, len(starting))
+            for model_id in starting:
+                self.free(model_id, f"session {session_id} expired")
+            n += len(starting)
         return n
 
     async def run_forever(self, interval_s: float, expired: Callable[[], Expired],

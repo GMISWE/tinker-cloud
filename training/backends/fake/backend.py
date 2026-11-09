@@ -17,7 +17,8 @@ function of the inputs:
 Set FAKE_BACKEND_TRACE=<path> to append one JSON line per backend call
 ({"op", "model_id", ...args}) — tests read this instead of poking internals.
 Set FAKE_BACKEND_GATE=<dir> to hold a model's create while <dir>/<model_id>.hold
-exists, and fail it when <dir>/<model_id>.fail exists.
+exists, fail it when <dir>/<model_id>.fail exists, and hold its delete while
+<dir>/<model_id>.delete.hold exists.
 """
 import asyncio
 import json
@@ -147,6 +148,9 @@ class FakeBackend(TrainingBackend[FakeHandle]):
         return h
 
     async def delete_model(self, handle: FakeHandle) -> None:
+        if self._gate:
+            while (Path(self._gate) / f"{handle.model_id}.delete.hold").exists():
+                await asyncio.sleep(0.02)
         self._models.pop(handle.model_id, None)
         self._trace("delete_model", handle.model_id)
 

@@ -105,7 +105,7 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
         logger.info("Initialized storage modules - DB: %s", config_obj.storage.futures_db_path)
 
         # Clean up stale futures from previous runs (all async tasks are lost on restart)
-        removed_count = futures_storage.cleanup_old_futures(max_age_hours=0)
+        removed_count = futures_storage.purge_all()
         logger.info("Cleaned up %s stale futures from previous runs", removed_count)
 
         # Sample futures are in memory only (storage.sample_futures): rollout
