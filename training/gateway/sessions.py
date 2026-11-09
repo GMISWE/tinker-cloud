@@ -1,8 +1,9 @@
 """Sessions, samplers and the model registry: one SQLite file under METADATA_DIR shared by every gateway worker.
 
 The workers are processes, so the file is the source of truth and each worker caches only
-samplers, which never change once written. A session row is claimed for expiry inside one
-transaction, so N workers running the reaper free each model once.
+samplers, which never change once written, and the stamps of the reap claims it took. A session
+row is claimed for expiry inside one transaction, so N workers running the reaper free each model
+once; a claim its worker did not settle is taken again once it is CLAIM_LEASE_S old.
 """
 import json
 import logging
@@ -20,6 +21,10 @@ logger = logging.getLogger(__name__)
 SESSION_COLUMNS = ("session_id, sdk_version, tags, user_metadata, created_at, last_heartbeat, finished_at, finish_reason, "
                    "finish_detail, display_name")
 SAMPLER_COLUMNS = "sampler_id, session_id, model_id, base_model, model_path, pinned_version, client_counter"
+# A model claimed for deletion is its worker's until the delete settles the claim (acknowledged, or
+# released for a retry). A worker killed mid-free settles nothing, so a claim this old is taken again;
+# so is one whose delete is still running, and the engine then runs that teardown a second time.
+CLAIM_LEASE_S = 600.0
 
 
 def _now() -> str:
@@ -62,6 +67,7 @@ class SessionStore:
         self._conn.execute("PRAGMA busy_timeout=10000")
         self.reads = 0    # statements that read; tests/unit/gateway/test_hot_path.py pins the warm path at zero
         self.writes = 0
+        self._claims: Dict[str, str] = {}   # model_id -> claimed_at of this store's claim; retry_reap releases only that
         if path is None:
             self._init()
         else:
@@ -161,11 +167,14 @@ class SessionStore:
                     (_now(), reason, detail, session_id))
         return self.get_session(session_id)
 
-    def claim_expired(self, timeout_s: float) -> List[Tuple[str, List[str]]]:
+    def claim_expired(self, timeout_s: float, lease_s: float = CLAIM_LEASE_S) -> List[Tuple[str, List[str]]]:
         """Drop sessions silent for longer than `timeout_s` and claim their models for deletion.
-        An active model claim stays hidden from the other workers until a failed delete releases it."""
+        An active model claim stays hidden from the other workers until a failed delete releases it,
+        or until it is `lease_s` old (its worker died or its delete is stuck): the model is claimed again."""
         now = datetime.now(timezone.utc)
+        stamp = now.isoformat()
         cutoff = (now - timedelta(seconds=timeout_s)).isoformat()
+        abandoned = (now - timedelta(seconds=lease_s)).isoformat()
         claimed: Dict[str, List[str]] = {}
         self._conn.execute("BEGIN IMMEDIATE")
         try:
@@ -177,20 +186,29 @@ class SessionStore:
                 self._write("DELETE FROM samplers WHERE session_id = ?", (session_id,))
                 self._write("DELETE FROM session_models WHERE session_id = ?", (session_id,))
                 self._write("DELETE FROM sessions WHERE session_id = ?", (session_id,))
-            rows = self._read("SELECT session_id, model_id FROM model_reaps "
-                              "WHERE claimed_at IS NULL ORDER BY session_id, model_id")
-            for session_id, model_id in rows:
-                self._write("UPDATE model_reaps SET claimed_at = ? WHERE model_id = ?", (now.isoformat(), model_id))
+            rows = self._read("SELECT session_id, model_id, claimed_at FROM model_reaps "
+                              "WHERE claimed_at IS NULL OR claimed_at < ? ORDER BY session_id, model_id", (abandoned,))
+            for session_id, model_id, claimed_at in rows:
+                if claimed_at is not None:
+                    logger.warning("Model %s was claimed for deletion at %s and never settled (its worker died "
+                                   "or its delete is stuck); claiming it again", model_id, claimed_at)
+                self._write("UPDATE model_reaps SET claimed_at = ? WHERE model_id = ?", (stamp, model_id))
                 claimed.setdefault(session_id, []).append(model_id)
             self._conn.execute("COMMIT")
         except BaseException:   # the transaction's own rollback; the error goes on
             self._conn.execute("ROLLBACK")
             raise
+        for model_ids in claimed.values():
+            self._claims.update(dict.fromkeys(model_ids, stamp))
         return list(claimed.items())
 
     def retry_reap(self, model_id: str) -> None:
-        """Make a failed model delete claimable again."""
-        self._write("UPDATE model_reaps SET claimed_at = NULL WHERE model_id = ?", (model_id,))
+        """Make a failed model delete claimable again. Only this store's own claim is released: once
+        the lease ran out another worker may have claimed the model, and that claim stands."""
+        claimed_at = self._claims.pop(model_id, None)
+        if claimed_at is not None:
+            self._write("UPDATE model_reaps SET claimed_at = NULL WHERE model_id = ? AND claimed_at = ?",
+                        (model_id, claimed_at))
 
     # ------------------------------------------------------------------ models
 
@@ -205,6 +223,7 @@ class SessionStore:
         """Drop the model and pending reap rows; the session that owned it, or None."""
         rows = self._read("SELECT session_id FROM session_models WHERE model_id = ?", (model_id,))
         self._write("DELETE FROM model_reaps WHERE model_id = ?", (model_id,))
+        self._claims.pop(model_id, None)
         if not rows:
             return None
         self._write("DELETE FROM session_models WHERE model_id = ?", (model_id,))

@@ -127,6 +127,49 @@ def test_a_failed_reap_is_durable_and_not_claimed_twice(tmp_path):
     reopened.close()
 
 
+def test_a_claim_its_worker_never_settled_is_taken_again_once_stale(tmp_path):
+    """A worker killed mid-free neither acknowledges nor releases its claim: the claim stands for the
+    lease, then the model is claimed again, and that claim stands in turn."""
+    from training.gateway.sessions import SessionStore
+
+    path = tmp_path / "sessions.db"
+    killed = SessionStore(path)
+    session_id = killed.create_session([], {}, "t", None)
+    model_id = "model_fake_0123456789abcdef"
+    killed.add_model(session_id, model_id, 0, "fake/tiny", "fake")
+    claimed = [(session_id, [model_id])]
+    assert killed.claim_expired(-1) == claimed
+    killed.close()   # no remove_model, no retry_reap: the worker is gone
+    survivor = SessionStore(path)
+    assert survivor.claim_expired(-1) == []
+    assert survivor.claim_expired(-1, lease_s=0) == claimed   # the lease runs out
+    assert survivor.claim_expired(-1) == []
+    survivor.remove_model(model_id)
+    survivor.close()
+
+
+def test_a_late_failure_releases_only_its_own_claim(tmp_path):
+    """Worker A's delete outlives the lease and worker B claims the model again. A's failure, when it
+    comes, leaves B's claim standing, so no third delete goes out; B's own failure releases it."""
+    from training.gateway.sessions import SessionStore
+
+    path = tmp_path / "sessions.db"
+    a, b = SessionStore(path), SessionStore(path)
+    session_id = a.create_session([], {}, "t", None)
+    model_id = "model_fake_0123456789abcdef"
+    a.add_model(session_id, model_id, 0, "fake/tiny", "fake")
+    claimed = [(session_id, [model_id])]
+    assert a.claim_expired(-1) == claimed
+    assert b.claim_expired(-1, lease_s=0) == claimed   # A's delete is still running when the lease runs out
+    a.retry_reap(model_id)
+    assert a.claim_expired(-1) == [] and b.claim_expired(-1) == []
+    b.retry_reap(model_id)
+    assert a.claim_expired(-1) == claimed
+    a.remove_model(model_id)
+    a.close()
+    b.close()
+
+
 def test_two_workers_free_each_expired_model_once(tmp_path):
     """Two gateways over one store file stand in for two workers; a claim is one transaction."""
     from training.gateway.sessions import SessionStore
