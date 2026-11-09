@@ -33,43 +33,36 @@ _process: Tuple[int, str] = (0, "")
 
 
 def _worker() -> str:
-    """This process as a holder of pending create requests: its pid and a nonce drawn once per
-    process, so a later process that is given the same pid is a different worker."""
+    """This process as a holder of pending create requests: its pid and its start time, so a later
+    process that is given the same pid is a different worker."""
     global _process
     if _process[0] != os.getpid():   # first call, or the first after a fork
-        _process = (os.getpid(), uuid.uuid4().hex[:8])
+        stat = _stat(os.getpid())
+        if stat is None:
+            raise RuntimeError("/proc/self/stat is unreadable; worker identity reads the host's /proc")
+        _process = (os.getpid(), stat[1])
     return f"{_process[0]}:{_process[1]}"
 
 
-def _worker_alive(worker: str) -> bool:
-    """Whether the process that recorded `worker` still runs. Every gateway worker runs on one Linux
-    host, so its pid is checked there: a dead process its parent has not reaped yet is a zombie and
-    still has its pid, and /proc says so. A reused pid reads as alive, which keeps a row, never drops one."""
-    pid = int(worker.split(":", 1)[0])
-    if pid == os.getpid():
-        return worker == _worker()
-    if not _pid_exists(pid):
-        return False
+def _stat(pid: int) -> Optional[Tuple[str, str]]:
+    """(state, start time) of `pid` from /proc, or None when no process this one can see holds it."""
     try:
         with open(f"/proc/{pid}/stat") as f:
             stat = f.read()
-    except FileNotFoundError:
-        if _pid_exists(pid):   # a running pid with no /proc entry: /proc is not this host's
-            raise RuntimeError(f"/proc/{pid} is missing for a running pid; worker liveness needs the host's /proc") from None
-        return False   # it exited between the two reads
-    except PermissionError:   # /proc hides another user's process: it runs
-        return True
-    return stat[stat.rindex(")") + 2] != "Z"   # the state follows the parenthesised command name
+    except (FileNotFoundError, PermissionError):   # gone, or another user's process that /proc hides
+        return None
+    fields = stat[stat.rindex(")") + 2:].split()   # after the parenthesised command name: field 3 on
+    return fields[0], fields[19]                   # state (field 3), start time in clock ticks (field 22)
 
 
-def _pid_exists(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:   # another user's process holds the pid
-        return True
-    return True
+def _worker_alive(worker: str) -> bool:
+    """Whether the process that recorded `worker` still runs. Every worker of one gateway is a fork of
+    one supervisor, so all share one pid namespace and one /proc: the worker runs when its pid is held
+    by a process with its start time that is not a zombie (a dead process its parent has not reaped
+    yet still holds its pid). A pid reused by any other process has another start time."""
+    pid, started = worker.split(":", 1)
+    stat = _stat(int(pid))
+    return stat is not None and stat[1] == started and stat[0] != "Z"
 
 
 def _now() -> str:

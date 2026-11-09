@@ -226,3 +226,4 @@ def test_a_resend_after_delete_of_a_model_whose_load_failed_is_refused_naming_th
         assert c.post("/api/v1/delete_model", json={"model_id": "s:train:1"}).status_code == 200
         retry = c.post("/api/v1/load_weights", json=load)
         assert retry.status_code == 400 and "was deleted" in retry.json()["error"], retry.text
+    assert _creates(tmp_path) == [SOURCE, "s:train:1"]
