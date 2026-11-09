@@ -10,7 +10,6 @@ import json
 import logging
 import os
 import sqlite3
-import sys
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -43,31 +42,34 @@ def _worker() -> str:
 
 
 def _worker_alive(worker: str) -> bool:
-    """Whether the process that recorded `worker` still runs. Every gateway worker runs on one host,
-    so its pid is checked here. A dead process nobody reaped is a zombie and still has its pid (a pod
-    whose PID 1 never reaps keeps every orphan so); on Linux its state says so. A reused pid reads
-    as alive, which keeps a row, never drops one."""
+    """Whether the process that recorded `worker` still runs. Every gateway worker runs on one Linux
+    host, so its pid is checked there: a dead process its parent has not reaped yet is a zombie and
+    still has its pid, and /proc says so. A reused pid reads as alive, which keeps a row, never drops one."""
     pid = int(worker.split(":", 1)[0])
     if pid == os.getpid():
         return worker == _worker()
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:   # a process of another user holds the pid
-        pass
-    return not _zombie(pid)
-
-
-def _zombie(pid: int) -> bool:
-    if sys.platform != "linux":   # no /proc: a zombie reads as alive, which keeps a row, never drops one
+    if not _pid_exists(pid):
         return False
     try:
         with open(f"/proc/{pid}/stat") as f:
             stat = f.read()
-    except FileNotFoundError:   # it exited between the kill and the read
+    except FileNotFoundError:
+        if _pid_exists(pid):   # a running pid with no /proc entry: /proc is not this host's
+            raise RuntimeError(f"/proc/{pid} is missing for a running pid; worker liveness needs the host's /proc") from None
+        return False   # it exited between the two reads
+    except PermissionError:   # /proc hides another user's process: it runs
         return True
-    return stat[stat.rindex(")") + 2] == "Z"   # the state follows the parenthesised command name
+    return stat[stat.rindex(")") + 2] != "Z"   # the state follows the parenthesised command name
+
+
+def _pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:   # another user's process holds the pid
+        return True
+    return True
 
 
 def _now() -> str:

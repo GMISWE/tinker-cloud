@@ -209,3 +209,20 @@ def test_a_resend_after_delete_of_the_model_is_refused_naming_the_deletion(tmp_p
         retry = c.post("/api/v1/load_weights", json=load)
         assert retry.status_code == 400 and "was deleted" in retry.json()["error"], retry.text
     assert _creates(tmp_path) == [SOURCE, "s:train:1"]
+
+
+def test_a_resend_after_delete_of_a_model_whose_load_failed_is_refused_naming_the_deletion(tmp_path):
+    """The create worked and the load into it failed, so the future is failed but no create failed;
+    the model is then deleted. The resend is refused like any resend after a delete, not reported as
+    a failed create and answered with the failed future."""
+    with _engine(tmp_path) as (c, path):
+        load = {"session_id": "s", "model_seq_id": 1, "path": path, "optimizer": False}
+        (tmp_path / "gate" / "s:train:1.load.fail").touch()
+        first = c.post("/api/v1/load_weights", json=load)
+        assert first.status_code == 200, first.text
+        rid = first.json()["request_id"]
+        failed = c.post(f"/api/v1/retrieve_future/{rid}", json={"request_id": rid})
+        assert failed.status_code == 400 and "load into s:train:1 failed" in failed.text, failed.text
+        assert c.post("/api/v1/delete_model", json={"model_id": "s:train:1"}).status_code == 200
+        retry = c.post("/api/v1/load_weights", json=load)
+        assert retry.status_code == 400 and "was deleted" in retry.json()["error"], retry.text

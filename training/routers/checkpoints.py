@@ -24,7 +24,7 @@ from fastapi.responses import FileResponse
 
 from ..services.checkpoint_service import CheckpointService
 from ..services.model_service import ModelService
-from .models import report_model_failed
+from .models import report_create_failed
 from ..core.task_manager import TaskManager
 from ..config import TrainingConfig
 from ..core.dependencies import (
@@ -332,7 +332,7 @@ async def _create_via_load(
             return AsyncOperationResponse(request_id=first.request_id, model_id=model_id)   # made, or on its way
         if first.create_failed:
             # this resend recorded the model at the gateway again, so the row goes again
-            await report_model_failed(http_request, model_id)
+            await report_create_failed(http_request, model_id)
             return AsyncOperationResponse(request_id=first.request_id, model_id=model_id)
         # created, then deleted: the gateway drops the row this resend recorded on the refusal
         raise HTTPException(status_code=400, detail=f"Model {model_id} was deleted after {first.request_id} created it: "
@@ -374,7 +374,7 @@ async def _create_via_load(
             # the gateway recorded the model at submit; a create that fails is reported before the future
             # is, and marked first, so a resend that arrives while the report is on its way reports too
             futures_storage.mark_create_failed(request_id)
-            await report_model_failed(http_request, model_id)
+            await report_create_failed(http_request, model_id)
             raise
         return await service.load_weights(
             model_id=model_id, request_id=request_id, ref=ref, optimizer=request.optimizer,
