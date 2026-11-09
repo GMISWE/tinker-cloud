@@ -6,8 +6,9 @@
 #
 # Only add packages NOT in the base image:
 
-# Ray - pinned version for compatibility
-ray==2.52.0
+# Ray - the version the automodel image runs; 2.52.0 predates the fixes for
+# GHSA-mw35-8rx3-xf9r, GHSA-hhrp-gw25-jr43 and GHSA-q5fh-2hc8-f6rq
+ray==2.56.1
 
 # FastAPI server
 fastapi[standard]
