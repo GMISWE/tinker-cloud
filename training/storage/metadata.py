@@ -6,12 +6,22 @@ ensuring that training state survives even after training clients are deleted.
 """
 import json
 import logging
-import shutil
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _contained(base: Path, *parts: str) -> Path:
+    """base/parts, refused unless the normalised path stays under base. The parts are ids and
+    names that arrive in requests, so every path built from them goes through here."""
+    root = os.path.normpath(base)
+    path = os.path.normpath(os.path.join(root, *parts))
+    if not path.startswith(root + os.sep):
+        raise ValueError(f"{'/'.join(parts)!r} leaves {root}")
+    return Path(path)
 
 
 class MetadataStorage:
@@ -73,7 +83,7 @@ class MetadataStorage:
         metadata["updated_at"] = datetime.utcnow().isoformat()
 
         # Save to JSON file
-        metadata_path = self.training_runs_dir / f"{training_run_id}.json"
+        metadata_path = _contained(self.training_runs_dir, f"{training_run_id}.json")
         try:
             with open(metadata_path, "w") as f:
                 json.dump(metadata, f, indent=2, sort_keys=True)
@@ -96,7 +106,7 @@ class MetadataStorage:
         Returns:
             Training run metadata dict or None if not found
         """
-        metadata_path = self.training_runs_dir / f"{training_run_id}.json"
+        metadata_path = _contained(self.training_runs_dir, f"{training_run_id}.json")
 
         if not metadata_path.exists():
             logger.warning(f"Training run {training_run_id} not found")
@@ -199,7 +209,7 @@ class MetadataStorage:
             Path to checkpoint metadata file
         """
         # Create model checkpoint directory
-        model_checkpoints_dir = self.checkpoints_dir / model_id
+        model_checkpoints_dir = _contained(self.checkpoints_dir, model_id)
         model_checkpoints_dir.mkdir(parents=True, exist_ok=True)
 
         # Add metadata
@@ -208,7 +218,7 @@ class MetadataStorage:
         checkpoint_data.setdefault("created_at", datetime.utcnow().isoformat())
 
         # Save checkpoint metadata
-        checkpoint_path = model_checkpoints_dir / f"{checkpoint_name}.json"
+        checkpoint_path = _contained(model_checkpoints_dir, f"{checkpoint_name}.json")
         try:
             with open(checkpoint_path, "w") as f:
                 json.dump(checkpoint_data, f, indent=2, sort_keys=True)
@@ -233,7 +243,7 @@ class MetadataStorage:
         Returns:
             Checkpoint metadata dict or None if not found
         """
-        checkpoint_path = self.checkpoints_dir / model_id / f"{checkpoint_name}.json"
+        checkpoint_path = _contained(self.checkpoints_dir, model_id, f"{checkpoint_name}.json")
 
         if not checkpoint_path.exists():
             logger.warning(f"Checkpoint {checkpoint_name} not found for model {model_id}")
@@ -261,7 +271,7 @@ class MetadataStorage:
         Returns:
             List of checkpoint metadata dicts
         """
-        model_checkpoints_dir = self.checkpoints_dir / model_id
+        model_checkpoints_dir = _contained(self.checkpoints_dir, model_id)
 
         if not model_checkpoints_dir.exists():
             return []
@@ -299,7 +309,7 @@ class MetadataStorage:
         Returns:
             True if deleted, False if not found
         """
-        checkpoint_path = self.checkpoints_dir / model_id / f"{checkpoint_name}.json"
+        checkpoint_path = _contained(self.checkpoints_dir, model_id, f"{checkpoint_name}.json")
 
         if not checkpoint_path.exists():
             logger.warning(f"Checkpoint {checkpoint_name} not found for deletion")
@@ -310,7 +320,7 @@ class MetadataStorage:
             logger.info(f"Deleted checkpoint {checkpoint_name} for model {model_id}")
 
             # Clean up empty directory
-            model_checkpoints_dir = self.checkpoints_dir / model_id
+            model_checkpoints_dir = checkpoint_path.parent
             if model_checkpoints_dir.exists() and not any(model_checkpoints_dir.iterdir()):
                 model_checkpoints_dir.rmdir()
 
@@ -318,43 +328,6 @@ class MetadataStorage:
         except Exception as e:
             logger.error(f"Failed to delete checkpoint {checkpoint_name}: {e}")
             raise
-
-    def cleanup_model_data(self, model_id: str) -> bool:
-        """
-        Clean up all data for a model.
-
-        Args:
-            model_id: Model identifier
-
-        Returns:
-            True if any data was cleaned up
-        """
-        cleaned = False
-
-        # Clean checkpoints
-        model_checkpoints_dir = self.checkpoints_dir / model_id
-        if model_checkpoints_dir.exists():
-            try:
-                shutil.rmtree(model_checkpoints_dir)
-                logger.info(f"Cleaned up checkpoints for model {model_id}")
-                cleaned = True
-            except Exception as e:
-                logger.error(f"Failed to clean checkpoints for {model_id}: {e}")
-
-        # Clean training runs associated with this model
-        for metadata_path in self.training_runs_dir.glob("*.json"):
-            try:
-                with open(metadata_path, "r") as f:
-                    metadata = json.load(f)
-                if metadata.get("model_id") == model_id:
-                    metadata_path.unlink()
-                    logger.info(f"Cleaned up training run {metadata_path.stem}")
-                    cleaned = True
-            except Exception as e:
-                logger.error(f"Failed to process {metadata_path}: {e}")
-                continue
-
-        return cleaned
 
     def get_stats(self) -> Dict[str, int]:
         """
