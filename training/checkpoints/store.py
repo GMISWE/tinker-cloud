@@ -265,8 +265,7 @@ class CheckpointStore:
         (None). False when there is nothing to set it on: no record, an
         ephemeral one, or one already past its expires_at (it reads as gone)."""
         rec = self.get(ref)
-        # records written before da5dcbe carry no "ephemeral": they are persistent
-        if rec is None or rec.get("ephemeral") or is_expired(rec):
+        if rec is None or rec["ephemeral"] or is_expired(rec):
             return False
         rec["expires_at"] = _expires_at(ttl_seconds)
         self._write(ref, rec)
@@ -348,7 +347,7 @@ class CheckpointStore:
         (optionally) the bytes under its root."""
         out = []
         for rec in self.records(model_id):
-            if rec.get("ephemeral"):
+            if rec["ephemeral"]:
                 continue
             ref = CheckpointRef.make(rec["model_id"], rec["kind"], rec["name"])
             item = dict(rec, uri=ref.uri)
@@ -402,7 +401,7 @@ class CheckpointStore:
         after its training client is deleted."""
         n = 0
         for rec in self.records(model_id):
-            if rec.get("ephemeral"):
+            if rec["ephemeral"]:
                 ref = CheckpointRef.make(rec["model_id"], rec["kind"], rec["name"])
                 self.metadata.delete_checkpoint(ref.model_id, ref.record_key)
                 n += 1

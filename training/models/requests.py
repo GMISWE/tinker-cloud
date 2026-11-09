@@ -536,6 +536,11 @@ LOCAL_OWNER = "urn:tinkercloud:owner:local"
 DEFAULT_PROJECT = "default"
 
 
+# The largest page the offset-paged list routes (training runs, checkpoints) return: the
+# SDK CLI's `checkpoint list` asks for pages of 1000 (tinker cli/commands/checkpoint.py).
+MAX_PAGE_LIMIT = 1000
+
+
 class UnknownProject(ValueError):
     """A project id other than the one this server has (a 404, as Tinker answers an unknown project)."""
 

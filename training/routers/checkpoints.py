@@ -41,6 +41,7 @@ from ..core.dependencies import (
 from ..checkpoints import CheckpointKind, CheckpointRef, CheckpointStore
 from ..storage import MetadataStorage, FuturesStorage
 from ..models.requests import (
+    MAX_PAGE_LIMIT,
     LoadWeightsRequest,
     OptimizerConfig,
     SaveWeightsExternalRequest,
@@ -376,7 +377,7 @@ async def list_checkpoints(
 
 @router.get("/api/v1/checkpoints", response_model=CheckpointsListResponse)
 async def list_user_checkpoints(
-    limit: int = Query(100, ge=1, le=1000),
+    limit: int = Query(100, ge=1, le=MAX_PAGE_LIMIT),
     offset: int = Query(0, ge=0),
     _: None = Depends(verify_api_key_dep),
     service: CheckpointService = Depends(get_checkpoint_service),
@@ -402,8 +403,9 @@ def _typed_ref(model_id: str, kind: str, checkpoint_id: str) -> CheckpointRef:
     return CheckpointRef.make(model_id, CheckpointKind(kind), checkpoint_id)
 
 
-def _delete(service: CheckpointService, ref: CheckpointRef) -> Response:
-    if not service.delete_checkpoint(ref):
+def _done_or_404(done: bool, ref: CheckpointRef) -> Response:
+    """204 when the store changed the checkpoint, 404 when it names none."""
+    if not done:
         raise HTTPException(status_code=404, detail=f"Checkpoint not found: {ref.uri}")
     return Response(status_code=204)
 
@@ -412,33 +414,30 @@ def _delete(service: CheckpointService, ref: CheckpointRef) -> Response:
 async def delete_checkpoint_typed(
     model_id: str, kind: str, checkpoint_id: str,
     _: None = Depends(verify_api_key_dep),
-    service: CheckpointService = Depends(get_checkpoint_service),
-    metadata_storage: MetadataStorage = Depends(get_metadata_storage),
+    store: CheckpointStore = Depends(get_checkpoint_store),
 ):
     """DELETE .../checkpoints/<kind>/<id>, kind in weights|sampler_weights|external_weights."""
-    return _delete(service, _typed_ref(model_id, kind, checkpoint_id))
+    ref = _typed_ref(model_id, kind, checkpoint_id)
+    return _done_or_404(store.delete(ref), ref)
 
 
 @router.put("/api/v1/training_runs/{model_id}/checkpoints/{kind}/{checkpoint_id}/ttl", status_code=204)
 async def set_checkpoint_ttl(
     model_id: str, kind: str, checkpoint_id: str, request: SetCheckpointTTLRequest,
     _: None = Depends(verify_api_key_dep),
-    service: CheckpointService = Depends(get_checkpoint_service),
+    store: CheckpointStore = Depends(get_checkpoint_store),
 ):
     """Expire a checkpoint ttl_seconds from now, or never (null); the background sweep
     deletes it once expired. The SDK sends the checkpoint id `<kind>/<name>` unencoded."""
     ref = _typed_ref(model_id, kind, checkpoint_id)
-    if not service.set_ttl(ref, request.ttl_seconds):
-        raise HTTPException(status_code=404, detail=f"Checkpoint not found: {ref.uri}")
-    return Response(status_code=204)
+    return _done_or_404(store.set_ttl(ref, request.ttl_seconds), ref)
 
 
 @router.delete("/api/v1/training_runs/{model_id}/checkpoints/{checkpoint_id}")
 async def delete_checkpoint_bare(
     model_id: str, checkpoint_id: str, checkpoint_type: str = None,
     _: None = Depends(verify_api_key_dep),
-    service: CheckpointService = Depends(get_checkpoint_service),
-    metadata_storage: MetadataStorage = Depends(get_metadata_storage),
+    store: CheckpointStore = Depends(get_checkpoint_store),
 ):
     """A bare id needs ?checkpoint_type=<type>: the kinds can share an id."""
     if not checkpoint_type:
@@ -446,7 +445,8 @@ async def delete_checkpoint_bare(
                             f"or ?checkpoint_type=<{_TYPES_HELP}>")
     if checkpoint_type not in _KIND_OF_TYPE:
         raise HTTPException(status_code=400, detail=f"checkpoint_type must be one of {_TYPES_HELP}")
-    return _delete(service, CheckpointRef.make(model_id, _KIND_OF_TYPE[checkpoint_type], checkpoint_id))
+    ref = CheckpointRef.make(model_id, _KIND_OF_TYPE[checkpoint_type], checkpoint_id)
+    return _done_or_404(store.delete(ref), ref)
 
 
 # ============================================================================
