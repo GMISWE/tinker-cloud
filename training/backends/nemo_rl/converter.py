@@ -186,8 +186,13 @@ class NemoRLDataConverter(DataConverter):
             return _extract_tokens(datum)
 
         max_seq_len = 0
-        for datum in data:
-            max_seq_len = max(max_seq_len, len(_full_input_tokens(datum)) + 1)
+        for i, datum in enumerate(data):
+            num_tokens = len(_full_input_tokens(datum))
+            for key in ("target_tokens", "weights"):
+                tensor = datum.loss_fn_inputs.get(key)
+                if tensor is not None and len(tensor.data) != num_tokens:
+                    raise ValueError(f"datum {i}: {key} has {len(tensor.data)} entries for {num_tokens} tokens")
+            max_seq_len = max(max_seq_len, num_tokens + 1)
 
         input_ids = torch.zeros(batch_size, max_seq_len, dtype=torch.long)
         input_lengths = torch.zeros(batch_size, dtype=torch.long)
