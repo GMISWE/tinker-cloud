@@ -22,7 +22,7 @@
 # also one that stops before pytest (tunnel down, push failed, Ray head up).
 set -euo pipefail
 # shellcheck source=scripts/lib/cluster.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, kx, require_tunnel, refuse_if_gpus_busy, EX_TIMEOUT, ray_head
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, kx, require_tunnel, refuse_if_gpus_busy, EX_TIMEOUT, ray_head, SERVER_STOP
 POD="${1:-tinkercloud-nemorl}"; shift || true
 if [ $# -eq 0 ]; then
   set -- tests/unit tests/conformance -q -p no:cacheprovider
@@ -58,7 +58,7 @@ if [ "$GPU_RUN" = 1 ]; then
     "") echo "ERROR: could not read the Ray head's state on $POD (the exec gave no output)" >&2; exit 1 ;;
     *)
       echo "the Ray head on $POD is '$HEAD_STATE'; GPU suites start their own. Stop the server and the head first:" >&2
-      echo "  kubectl -n $NS exec $POD -- bash -c \"pkill -TERM -f 'python3 -m trainin[g]'; sleep 6; ray stop --force\"" >&2
+      echo "  kubectl -n $NS exec $POD -- bash -c \"$SERVER_STOP; ray stop --force\"" >&2
       exit 1 ;;
   esac
 fi

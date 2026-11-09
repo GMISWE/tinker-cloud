@@ -8,7 +8,7 @@
 # e.g. pod_rotate_server.sh q4b_S_guard_server \
 #        TINKERCLOUD_MILES_MULTILORA_SLOTS=8 TINKERCLOUD_MILES_COBATCH_MAX_SAMPLES=2048
 #
-# Hard-won rotation rules encoded: bracketed launch-flag-agnostic pkill in
+# Hard-won rotation rules encoded: the shared SERVER_STOP pkill (lib/cluster.sh) in
 # its own exec, server killed before Ray is touched, sglang stragglers
 # killed explicitly, bind verified in the NEW server's own log (never by
 # curl alone). Env: KUBECONFIG, NS, POD, GPUS overridable.
@@ -24,7 +24,7 @@ fi
 EXTRA_ENV+=("$@")
 
 # shellcheck source=scripts/lib/cluster.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE, EX, EX_TIMEOUT, ray_head, RAY_DRIVER_ADDRESS
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE, EX, EX_TIMEOUT, ray_head, RAY_DRIVER_ADDRESS, SERVER_STOP
 require_tunnel
 # no defaults: a default pod or backend boots the wrong server on the right pod
 POD="${POD:?set POD (scripts/pod_state.sh lists the pods)}"
@@ -35,9 +35,9 @@ GPUS="${GPUS:-4}"
 SERVER_LOG="/data/${LOG_NAME}.log"
 
 
-# 1. kill the server (own exec; launch-flag-agnostic bracketed pattern)
+# 1. kill the server (own exec)
 echo "==> killing server"
-EX "pkill -f 'm trainin[g]' || true; sleep 8"
+EX "$SERVER_STOP"
 
 # 2. drain GPUs; after 60s kill sglang stragglers (they survive server death
 #    holding ~24GB and wedge the next create_model)

@@ -8,7 +8,7 @@
 #   scripts/pod_state.sh <pod>...   # these pods only
 set -uo pipefail
 # shellcheck source=scripts/lib/cluster.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, kx, pod_cmd, ray_head
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, kx, pod_cmd, ray_head, SERVER_PATTERN
 require_tunnel
 export KX_TIMEOUT="${KX_TIMEOUT:-60}"
 
@@ -34,7 +34,7 @@ for pod in "${PODS[@]}"; do
   kx exec "$pod" -- bash -c "$(pod_cmd '
     echo "  gpu MiB: $(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | tr "\n" " ")"
     echo "  server:  $(curl -s -m 5 localhost:8000/health || echo DOWN)"
-    ps -eo pid,etime,args | grep "m trainin[g]$" | sed "s/^/  proc:    /"
+    ps -o pid=,etime=,args= -p "$(pgrep -d, -f "'"$SERVER_PATTERN"'")" 2>/dev/null | sed "s/^/  proc:    /"
     echo "  ray:     $(ray status 2>/dev/null | grep -Eo "[0-9.]+/[0-9.]+ GPU" | head -1 || echo "no head")"
     echo "  actors:  $(ray list actors --filter state=ALIVE 2>/dev/null | grep -c ALIVE) alive"
     echo "  pypi:    $(python3 -c "import importlib.metadata as m,sys; print(*(p+\"=\"+m.version(p) for p in sys.argv[1:]))" uvicorn fastapi pydantic httpx 2>/dev/null)"
