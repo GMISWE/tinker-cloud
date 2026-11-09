@@ -265,6 +265,7 @@ class CheckpointStore:
         (None). False when there is nothing to set it on: no record, an
         ephemeral one, or one already past its expires_at (it reads as gone)."""
         rec = self.get(ref)
+        # records written before da5dcbe carry no "ephemeral": they are persistent
         if rec is None or rec.get("ephemeral") or is_expired(rec):
             return False
         rec["expires_at"] = _expires_at(ttl_seconds)
