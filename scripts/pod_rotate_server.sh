@@ -24,7 +24,7 @@ fi
 EXTRA_ENV+=("$@")
 
 # shellcheck source=scripts/lib/cluster.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE, EX, EX_TIMEOUT, ray_head, RAY_DRIVER_ADDRESS, SERVER_STOP, API_PORT
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE, EX, EX_TIMEOUT, ray_head, SERVER_STOP, API_PORT, HF_TOKEN_POD_FILE, HF_TOKEN_CHECK, server_boot, SERVER_BOOT_TIMEOUT, SERVER_HEALTH
 require_tunnel
 # no defaults: a default pod or backend boots the wrong server on the right pod
 POD="${POD:?set POD (scripts/pod_state.sh lists the pods)}"
@@ -34,6 +34,9 @@ GPUS="${GPUS:-4}"
 # no Ray Client server (lib/cluster.sh RAY_HEAD_SH). miles, verl and megatron_bridge are untested so.
 SERVER_LOG="/data/${LOG_NAME}.log"
 
+# 0. refuse bad input while the running server still serves
+BOOT_CMD=$(server_boot "$GPUS" "$BACKEND" "$SERVER_LOG" "${EXTRA_ENV[@]}")
+EX "$HF_TOKEN_CHECK" || { echo "ERROR: no boot without a non-empty $HF_TOKEN_POD_FILE on $POD (or the exec failed)"; exit 1; }
 
 # 1. kill the server (own exec)
 echo "==> killing server"
@@ -66,29 +69,10 @@ if [ "$RAY_GPUS" != "0.0/$GPUS.0 GPU" ]; then
   EX "$(ray_head recycle "$GPUS")"
 fi
 
-# 4. boot the new server (detached; all fds redirected; timeout-wrapped exec)
+# 4. boot the new server
 echo "==> booting server ($SERVER_LOG)"
-# Each KEY=VAL is exported after the defaults below, so it wins; quoted (%q) so a value
-# with spaces or "$" reaches the server unchanged. A replaced default is named, not silent.
-DEFAULT_KEYS=" PYTHONPATH NUM_GPUS RAY_ADDRESS HF_TOKEN HF_HOME TINKER_API_KEY TINKERCLOUD_BACKEND ALLOW_PARTIAL_BATCHES "
-ENV_LINES=""
-for kv in "${EXTRA_ENV[@]:-}"; do
-  [ -n "$kv" ] || continue
-  case "$kv" in *=*) ;; *) echo "ERROR: '$kv' is not KEY=VAL"; exit 1 ;; esac
-  [[ "${kv%%=*}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { echo "ERROR: '$kv' does not start with a plain KEY="; exit 1; }
-  # the port is API_PORT in lib/cluster.sh; the deploy's NetworkPolicy and the health check below read it
-  [ "${kv%%=*}" = TRAINING_PORT ] && { echo "ERROR: set the port as API_PORT in lib/cluster.sh, not TRAINING_PORT"; exit 1; }
-  [[ "$DEFAULT_KEYS" == *" ${kv%%=*} "* ]] && echo "==> $kv replaces the default ${kv%%=*}"
-  ENV_LINES+="export ${kv%%=*}=$(printf '%q' "${kv#*=}")"$'\n'
-done
 EX "rm -f $SERVER_LOG"
-EX_TIMEOUT 30 "
-export PYTHONPATH=/app NUM_GPUS=$GPUS RAY_ADDRESS=$RAY_DRIVER_ADDRESS TRAINING_PORT=$API_PORT
-export HF_TOKEN=\$(cat /tmp/hf_token.txt) HF_HOME=/data/.cache/huggingface
-export TINKER_API_KEY=tml-dev-key TINKERCLOUD_BACKEND=$BACKEND ALLOW_PARTIAL_BATCHES=true
-$ENV_LINES
-cd /app && setsid nohup python3 -m training > $SERVER_LOG 2>&1 < /dev/null &
-sleep 2; echo LAUNCHED"
+EX_TIMEOUT "$SERVER_BOOT_TIMEOUT" "$BOOT_CMD"
 
 # 5. verify in the NEW log (a curl-200 alone can be a zombie on :$API_PORT)
 echo "==> verifying bind"
@@ -98,7 +82,7 @@ for _ in $(seq 1 20); do
   fi
   # the server's log carries "Application startup complete" but no "Uvicorn running" line
   if EX "grep -q 'Application startup complete' $SERVER_LOG 2>/dev/null"; then
-    CODE=$(EX "curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://localhost:$API_PORT/health" || echo 000)
+    CODE=$(EX "$SERVER_HEALTH") || true
     if [ "$CODE" = 200 ]; then echo "==> server healthy ($SERVER_LOG)"; exit 0; fi
   fi
   sleep 5

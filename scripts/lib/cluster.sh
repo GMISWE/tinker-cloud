@@ -53,7 +53,6 @@ pod_cmd() { printf '%s %s' "$RAY_AUTH_PRELUDE" "$1"; }
 # The port `ray start` gives its Ray Client server when none is named.
 RAY_CLIENT_PORT=10001
 # The RAY_ADDRESS every backend's server takes: a driver on the pod's node, never a Ray Client.
-# shellcheck disable=SC2034  # read by the scripts that source this file
 RAY_DRIVER_ADDRESS=auto
 # The API server's port: each boot exports it as TRAINING_PORT; the container, the NetworkPolicy
 # and the health checks read it here.
@@ -71,6 +70,64 @@ SERVER_PATTERN='^([^ ]*/)?python[0-9.]*( -[^ ]+)* -m training( |$)'
 # outlived the TERM) or 2 (a bad pattern) fails.
 # shellcheck disable=SC2034  # read by the scripts that source this file
 SERVER_STOP="pkill -f '$SERVER_PATTERN'; sleep 8; pgrep -f '$SERVER_PATTERN' > /dev/null; [ \$? -eq 1 ] || { echo 'ERROR: an API server still runs after pkill, or pgrep failed'; exit 1; }"
+# The HF token file on a pod, and the pod command that fails unless it is non-empty. The deploy
+# and the rotate run it before they stop the running server, since a refusal inside the boot exec
+# cannot fail its caller (EX_TIMEOUT). The boot command runs it again: the deploy's setup runs
+# between that check and the boot, and a server must not start without a token.
+HF_TOKEN_POD_FILE=/tmp/hf_token.txt
+HF_TOKEN_CHECK="[ -s $HF_TOKEN_POD_FILE ] || { echo 'ERROR: $HF_TOKEN_POD_FILE is empty or missing'; exit 1; }"
+# The variables every server boot exports, in order (server_boot's case table holds each one's
+# value and, for a key a KEY=VAL may not replace, where its value is set instead).
+SERVER_BOOT_KEYS=" PYTHONPATH NUM_GPUS RAY_ADDRESS TRAINING_PORT HF_TOKEN HF_HOME TINKER_API_KEY TINKERCLOUD_BACKEND ALLOW_PARTIAL_BATCHES "
+# The bound on the boot's exec: the command detaches the server and returns after `sleep 2`.
+# shellcheck disable=SC2034  # read by the scripts that source this file
+SERVER_BOOT_TIMEOUT=30
+# server_boot <gpus> <backend> <log> [KEY=VAL ...]: prints the pod command that starts the API
+# server detached, with SERVER_BOOT_KEYS set and then each KEY=VAL quoted with %q, so a value
+# reaches the server unchanged. A KEY=VAL replaces a default (named on stderr) unless the table
+# gives that key another home (set_by); such a key, and an argument that is not a plain
+# KEY=VAL, is refused before anything is printed. An exec whose detached child kept a stream
+# open has hung until killed (143), so every fd is redirected; run it under EX_TIMEOUT
+# $SERVER_BOOT_TIMEOUT and judge the launch by a fresh probe, not by the exec's exit.
+server_boot() {
+  local gpus=$1 backend=$2 log=$3 kv key val exports="$HF_TOKEN_CHECK"$'\n'
+  local -A set_by=()   # key -> where its value is set, for the keys a KEY=VAL may not replace
+  shift 3
+  for key in $SERVER_BOOT_KEYS; do
+    case "$key" in
+      PYTHONPATH) val=/app ;;
+      NUM_GPUS) val=$(printf '%q' "$gpus"); set_by[$key]="server_boot's <gpus> argument" ;;
+      RAY_ADDRESS) val=$RAY_DRIVER_ADDRESS; set_by[$key]="RAY_DRIVER_ADDRESS in lib/cluster.sh" ;;
+      TRAINING_PORT) val=$API_PORT; set_by[$key]="API_PORT in lib/cluster.sh" ;;
+      HF_TOKEN) val="\$(cat $HF_TOKEN_POD_FILE)"; set_by[$key]="the pod's $HF_TOKEN_POD_FILE" ;;
+      HF_HOME) val=/data/.cache/huggingface ;;
+      TINKER_API_KEY) val=tml-dev-key ;;
+      TINKERCLOUD_BACKEND) val=$(printf '%q' "$backend"); set_by[$key]="server_boot's <backend> argument" ;;
+      ALLOW_PARTIAL_BATCHES) val=true ;;
+      *) echo "ERROR: SERVER_BOOT_KEYS names $key, which has no default" >&2; return 1 ;;
+    esac
+    exports+="export $key=$val"$'\n'
+  done
+  for kv in "$@"; do
+    key=${kv%%=*}
+    if [[ "$kv" != *=* || ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      echo "ERROR: '$kv' is not a plain KEY=VAL" >&2; return 1
+    fi
+    if [ -n "${set_by[$key]:-}" ]; then
+      echo "ERROR: '$kv': $key is set by ${set_by[$key]}, not by a KEY=VAL" >&2; return 1
+    fi
+    [[ "$SERVER_BOOT_KEYS" == *" $key "* ]] && echo "==> $key=... replaces the default $key" >&2
+    exports+="export $key=$(printf '%q' "${kv#*=}")"$'\n'
+  done
+  printf '%s\n' \
+    "$exports" \
+    "cd /app && setsid nohup python3 -m training > $(printf '%q' "$log") 2>&1 < /dev/null &" \
+    "sleep 2; echo LAUNCHED"
+}
+# The pod command that prints the API server's /health status code (curl prints 000 and fails
+# when nothing answers).
+# shellcheck disable=SC2034  # read by the scripts that source this file
+SERVER_HEALTH="curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://localhost:$API_PORT/health"
 
 # The pod side of this pod's Ray head: `ray_head state`, `ray_head ensure <gpus>` or
 # `ray_head recycle <gpus>`.

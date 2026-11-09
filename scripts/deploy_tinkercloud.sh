@@ -51,9 +51,9 @@
 #
 # --code-only  Skip pod/container creation; redeploy code + restart server.
 #
-# HF token: HF_TOKEN_FILE=<path> (copied to /tmp/hf_token.txt in the target).
-# Unset, it is huggingface_hub's own token file when one exists; otherwise an
-# existing /tmp/hf_token.txt inside the target is reused (--code-only only).
+# HF token: HF_TOKEN_FILE=<path>, copied into the target as HF_TOKEN_POD_FILE (lib/cluster.sh).
+# Unset, it is huggingface_hub's own token file when one exists; otherwise the
+# target's existing HF_TOKEN_POD_FILE is reused (--code-only only).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -78,8 +78,8 @@ done
 # Sets per-profile DEFAULTS; every one is overridable by the same-named env var.
 # shellcheck source=scripts/lib/cluster.sh
 # shellcheck disable=SC1091  # sourced by path at run time: KUBECONFIG, NS, DEFAULT_NODE
-. "$SCRIPT_DIR/lib/cluster.sh"   # KUBECONFIG, NS, kx, EX, EX_TIMEOUT, pod_cmd, ray_head, RAY_DRIVER_ADDRESS, TRUST_DOMAIN_LABEL, SERVER_PATTERN, SERVER_STOP, API_PORT
-BACKEND_ENV=""   # backend knobs exported to the server process (step 6)
+. "$SCRIPT_DIR/lib/cluster.sh"   # KUBECONFIG, NS, kx, EX, EX_TIMEOUT, pod_cmd, ray_head, TRUST_DOMAIN_LABEL, SERVER_PATTERN, SERVER_STOP, API_PORT, HF_TOKEN_POD_FILE, HF_TOKEN_CHECK, server_boot, SERVER_BOOT_TIMEOUT, SERVER_HEALTH
+BACKEND_ENV=()   # backend knobs as KEY=VAL, exported to the server process (step 6)
 case "$PROFILE" in
   nemo_rl)
     IMAGE="${IMAGE:-nvcr.io/nvidia/nemo-rl:v0.5.0}"
@@ -136,10 +136,10 @@ case "$PROFILE" in
     # GPUS serve one vLLM per base model. MAX_LORAS: adapters resident on a
     # vLLM's GPU; a tenant holds two across an optimizer step (D20), so 4 is
     # two tenants. MAX_LORA_RANK: the largest LoRA rank create_model accepts.
-    BACKEND_ENV="AUTOMODEL_TRAIN_GPUS=${AUTOMODEL_TRAIN_GPUS:-2} AUTOMODEL_MAX_LORAS=${AUTOMODEL_MAX_LORAS:-4} \
-AUTOMODEL_MAX_LORA_RANK=${AUTOMODEL_MAX_LORA_RANK:-64} AUTOMODEL_MAX_CPU_LORAS=${AUTOMODEL_MAX_CPU_LORAS:-8} \
-AUTOMODEL_MICRO_BATCH_ROWS=${AUTOMODEL_MICRO_BATCH_ROWS:-4} \
-AUTOMODEL_ACTIVATION_CHECKPOINTING=${AUTOMODEL_ACTIVATION_CHECKPOINTING:-0}"
+    BACKEND_ENV=("AUTOMODEL_TRAIN_GPUS=${AUTOMODEL_TRAIN_GPUS:-2}" "AUTOMODEL_MAX_LORAS=${AUTOMODEL_MAX_LORAS:-4}"
+      "AUTOMODEL_MAX_LORA_RANK=${AUTOMODEL_MAX_LORA_RANK:-64}" "AUTOMODEL_MAX_CPU_LORAS=${AUTOMODEL_MAX_CPU_LORAS:-8}"
+      "AUTOMODEL_MICRO_BATCH_ROWS=${AUTOMODEL_MICRO_BATCH_ROWS:-4}"
+      "AUTOMODEL_ACTIVATION_CHECKPOINTING=${AUTOMODEL_ACTIVATION_CHECKPOINTING:-0}")
     RUN_SERVER=1 ;;   # Ray head + `python3 -m training` (TINKERCLOUD_BACKEND=automodel)
   *) echo "unknown --profile $PROFILE (want: nemo_rl | bionemo | megatron_bridge | miles | automodel)"; exit 1 ;;
 esac
@@ -241,11 +241,11 @@ if [ "$CODE_ONLY" = 1 ] && [ "$RUN_SERVER" = 1 ]; then
       fi
     }
     GPUS=$(keep GPUS NUM_GPUS "$GPUS")
-    kept=""
-    for kv in $BACKEND_ENV; do
-      kept="$kept ${kv%%=*}=$(keep "${kv%%=*}" "${kv%%=*}" "${kv#*=}")"
+    kept=()
+    for kv in "${BACKEND_ENV[@]}"; do
+      kept+=("${kv%%=*}=$(keep "${kv%%=*}" "${kv%%=*}" "${kv#*=}")")
     done
-    BACKEND_ENV="${kept# }"
+    BACKEND_ENV=("${kept[@]}")
   fi
 fi
 
@@ -436,21 +436,25 @@ echo "==> [3/6] copying code + token into target"
 CP "$TMP/code.tar.gz" /tmp/code.tar.gz
 CP "$SCRIPT_DIR/lib/setup_container.sh" /tmp/setup_container.sh
 if [ -n "$HF_TOKEN_FILE" ]; then
-  CP "$HF_TOKEN_FILE" /tmp/hf_token.txt
+  CP "$HF_TOKEN_FILE" "$HF_TOKEN_POD_FILE"
 fi
 if [ "$RUN_SERVER" = 1 ]; then
-  EX "test -s /tmp/hf_token.txt" || {
+  EX "$HF_TOKEN_CHECK" || {
     echo "ERROR: no HF token in target; pass HF_TOKEN_FILE=<path>"; exit 1; }
 else
   # bionemo: the Evo2 checkpoint (arcinstitute) is public; token optional.
-  EX "test -s /tmp/hf_token.txt" || echo "    note: no HF token (fine for public weights)"
+  EX "$HF_TOKEN_CHECK" > /dev/null || echo "    note: no HF token (fine for public weights)"
 fi
 
 # --- 4. in-container setup ---------------------------------------------------
 # A running server stops here, once: after every step that can fail without touching the target,
 # before setup replaces its code and packages and step 5 its Ray head. A RUN_SERVER=0 profile runs
 # no server.
-if [ "$RUN_SERVER" = 1 ]; then EX "$SERVER_STOP"; fi
+if [ "$RUN_SERVER" = 1 ]; then
+  # refuse bad input while the running server still serves
+  BOOT_CMD=$(server_boot "$GPUS" "$BACKEND" "$SERVER_LOG" "${BACKEND_ENV[@]}")
+  EX "$SERVER_STOP"
+fi
 echo "==> [4/6] running in-container setup (profile=$PROFILE)"
 EX "PROFILE=$PROFILE MILES_REPO='${MILES_REPO:-}' MILES_REF='${MILES_REF:-}' bash /tmp/setup_container.sh"
 
@@ -475,18 +479,12 @@ EX "ray status 2>/dev/null | grep GPU || true"
 
 # --- 6. server ---------------------------------------------------------------
 echo "==> [6/6] starting API server (log: $SERVER_LOG)"
-# NB: the detached child must have ALL fds redirected or the exec hangs (143);
-# even then the launch usually succeeded — verified below with a fresh probe.
-EX_TIMEOUT 30 "
-export PYTHONPATH=/app NUM_GPUS=$GPUS RAY_ADDRESS=$RAY_DRIVER_ADDRESS TRAINING_PORT=$API_PORT
-export HF_TOKEN=\$(cat /tmp/hf_token.txt) HF_HOME=/data/.cache/huggingface \
-       TINKER_API_KEY=tml-dev-key TINKERCLOUD_BACKEND=$BACKEND ALLOW_PARTIAL_BATCHES=true $BACKEND_ENV
-cd /app && setsid nohup python3 -m training > $SERVER_LOG 2>&1 < /dev/null &
-sleep 2; echo LAUNCHED"
+# the exec's exit is no verdict (server_boot); the health probe below is
+EX_TIMEOUT "$SERVER_BOOT_TIMEOUT" "$BOOT_CMD"
 
 CODE=000
 for _ in $(seq 1 20); do
-  CODE=$(EX "curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://localhost:$API_PORT/health" || echo 000)
+  CODE=$(EX "$SERVER_HEALTH") || true
   [ "$CODE" = 200 ] && break
   sleep 5
 done
