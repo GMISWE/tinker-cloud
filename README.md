@@ -84,6 +84,8 @@ Server-wide settings (`training/config.py`):
 | `TRAINING_HOST` / `TRAINING_PORT` | Bind address | `0.0.0.0` / `8000` |
 | `TINKER_API_KEY` | API auth key (comma-separated for several); `ENV=production` refuses to start when the list is empty or holds `tml-dev-key` | `tml-dev-key` |
 | `RAY_ADDRESS` / `RAY_NAMESPACE` | Ray cluster endpoint / namespace | auto (local head) / `default` |
+| `RAY_AUTH_MODE` | `token`: every Ray process must hold the deployment's token; `ENV=production` refuses to start with anything else. The deploy and rotate scripts set it | unset |
+| `RAY_AUTH_TOKEN_PATH` | The token file Ray reads in token mode (read by Ray and the deploy scripts, not by `config.py`); the deploy writes one per pod at `/data/ray_auth_token` (mode 600) | unset |
 | `METADATA_DIR` | Futures DB, sessions DB, checkpoint metadata | `/data/metadata` |
 | `TINKERCLOUD_CHECKPOINT_BASE` | Root of every model's checkpoints (`<model>/{weights,sampler_weights,external_weights}/<name>/`) and native area (`<model>/native/`) | `/data/checkpoints` |
 | `TINKERCLOUD_URL_SIGNING_KEY` | HMAC key for the signed per-file download URLs of `save_weights_external` exports; unset = random per process (URLs die with it); required when `ENV=production` | unset |

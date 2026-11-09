@@ -4,6 +4,10 @@
 export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/h1.config}"
 NS="${NS:-tinkercloud-nemorl}"
 DEFAULT_NODE="${DEFAULT_NODE:-hgxcn13}"
+# Pod label naming a pod's trust domain: its NetworkPolicy admits, on every port, the pods
+# that carry the same value. A single-pod deploy gives it the pod's own name.
+# shellcheck disable=SC2034  # read by the scripts that source this file
+TRUST_DOMAIN_LABEL=tinkercloud.trust-domain
 
 # The API server sits behind an ssh tunnel. A refused connection means the
 # tunnel is down and no retry can help; any other failure (TLS or i/o timeout)
@@ -28,8 +32,102 @@ kx() {
     echo "  kubectl retry $i" >&2; sleep 5
   done; return 1
 }
-EX() { kubectl -n "$NS" exec "$POD" -- bash -c "$1"; }
-EX_TIMEOUT() { timeout "$1" kubectl -n "$NS" exec "$POD" -- bash -c "$2" || true; }
+EX() { kubectl -n "$NS" exec "$POD" -- bash -c "$(pod_cmd "$1")"; }
+EX_TIMEOUT() { timeout "$1" kubectl -n "$NS" exec "$POD" -- bash -c "$(pod_cmd "$2")" || true; }
+
+# Ray is members-only: every Ray process of a deployment runs in token mode with the one
+# token file below (owner-only, never on a command line). This block is the one place that
+# knows the file, the mode, how an exec helper's command gets them and how a head starts.
+RAY_AUTH_TOKEN_FILE=/data/ray_auth_token
+RAY_AUTH_EXPORT="export RAY_AUTH_MODE=token RAY_AUTH_TOKEN_PATH=$RAY_AUTH_TOKEN_FILE"
+# Prefixed to every command the exec helpers here and in the deploy run: a pod that holds the
+# token runs its Ray clients (ray status, the server, drivers) in token mode. Without the file
+# they run without a token, which is right only while the head is absent or open (an earlier
+# deploy's); a token-mode head without its file reads as `unusable` below and stops the deploy.
+# pod_pytest.sh's runs carry no token: the CPU suites start no Ray, and the GPU suites run with
+# the deployed head stopped.
+RAY_AUTH_PRELUDE="[ -s $RAY_AUTH_TOKEN_FILE ] && $RAY_AUTH_EXPORT;"
+# pod_cmd <command>: the command as every exec helper runs it on a pod.
+pod_cmd() { printf '%s %s' "$RAY_AUTH_PRELUDE" "$1"; }
+# The port `ray start` gives its Ray Client server when none is named.
+RAY_CLIENT_PORT=10001
+# The RAY_ADDRESS every backend's server takes: a driver on the pod's node, never a Ray Client.
+# shellcheck disable=SC2034  # read by the scripts that source this file
+RAY_DRIVER_ADDRESS=auto
+
+# The pod side of this pod's Ray head: `ray_head state`, `ray_head ensure <gpus>` or
+# `ray_head recycle <gpus>`.
+# state prints one word: none (no live raylet), open (a head answers a client holding no token: an
+# earlier deploy's), token (it refuses that client and answers one holding the token file), or a
+# sentence starting `unusable` (a head runs that neither answers).
+# ensure leaves a token head as it is, starts one where there is none, replaces an open one, and
+# fails on anything else. recycle stops whatever head runs and starts a new one. Both fail
+# unless the old head is gone after the stop.
+# Starting makes the token when the pod has none, starts a token-mode head and stops its Ray
+# Client server: `ray start` starts one whenever grpc imports, on port 10001 unless named, and
+# refuses a port outside 1024-65535 (ray/scripts/scripts.py, `start`), while the head starts it
+# only for a non-zero port (ray/_private/node.py, `start_head_processes`). The deploy and rotate
+# scripts make every backend's server a driver (RAY_DRIVER_ADDRESS), so none uses it (miles, verl
+# and megatron_bridge are untested as drivers). A start fails unless the head started, the port is then
+# closed, and the head answers a client holding the token.
+read -r -d '' RAY_HEAD_SH <<'EOF' || true
+set -uo pipefail
+token_file=$1; auth_export=$2; client_port=$3; cmd=$4
+with_token() ( eval "$auth_export"; "$@" )
+fail() { echo "ERROR: $*"; exit 1; }
+# only a raylet not in state Z counts: after `ray stop` on a pod whose PID 1 is `sleep infinity`,
+# `ps -eo stat,comm` showed the stopped heads' raylet and gcs_server processes in state Z
+live_raylet() { ps -C raylet -o stat= | grep -q '^[^Z]'; }
+head_state() {
+  local out
+  if ! live_raylet; then echo none; return; fi
+  if out=$(env -u RAY_AUTH_MODE -u RAY_AUTH_TOKEN_PATH -u RAY_AUTH_TOKEN ray status 2>&1); then echo open; return; fi
+  if ! grep -qiE 'InvalidAuthToken|authentication token' <<< "$out"; then
+    echo "unusable: ray status without the token failed for a reason other than auth: $(tail -1 <<< "$out")"; return
+  fi
+  if [ -s "$token_file" ] && with_token ray status > /dev/null 2>&1; then echo token
+  else echo "unusable: a Ray head runs that refuses a client without the token, and $token_file does not open it"
+  fi
+}
+stop_head() {
+  local out
+  out=$(ray stop --force 2>&1)
+  for _ in 1 2 3 4 5 6 7 8 9 10; do live_raylet || { rm -rf /tmp/ray; return; }; sleep 1; done
+  echo "$out" | tail -5; fail "a raylet still runs 10 s after ray stop"
+}
+start_head() {   # <gpus>
+  local listen
+  if [ ! -s "$token_file" ]; then
+    (umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$token_file") || fail "could not write $token_file"
+    [ -s "$token_file" ] || fail "$token_file is empty after writing it"
+  fi
+  chmod 600 "$token_file" || fail "could not make $token_file owner-only"
+  with_token ray start --head --num-gpus "$1" --disable-usage-stats > /tmp/ray_start.log 2>&1 < /dev/null \
+    || { tail -20 /tmp/ray_start.log; fail "ray start failed"; }
+  sleep 5
+  pkill -f 'ray.util.client.serve[r]'
+  sleep 1
+  listen=$(ss -ltnH) || fail "ss failed, so the Ray Client port cannot be checked"
+  if grep -qE ":${client_port}[[:space:]]" <<< "$listen"; then fail "the Ray Client server still listens on :$client_port"; fi
+  with_token ray status > /dev/null 2>&1 || fail "the new head does not answer a client holding the token"
+  echo started
+}
+case $cmd in
+  state) head_state ;;
+  ensure)
+    state=$(head_state)
+    case $state in
+      token) echo "the head runs with token auth" ;;
+      none) start_head "$5" ;;
+      open) echo "replacing a Ray head that runs without token auth"; stop_head; start_head "$5" ;;
+      *) fail "$state" ;;
+    esac ;;
+  recycle) stop_head; start_head "$5" ;;
+  *) fail "ray_head takes state, ensure <gpus> or recycle <gpus>, not '$cmd'" ;;
+esac
+EOF
+# ray_head <command> [gpus]: the pod-side command line that runs RAY_HEAD_SH.
+ray_head() { printf 'bash -c %q ray_head %q %q %q' "$RAY_HEAD_SH" "$RAY_AUTH_TOKEN_FILE" "$RAY_AUTH_EXPORT" "$RAY_CLIENT_PORT"; printf ' %q' "$@"; }
 
 # require_server_env KEY=VAL ...: refuse unless the running API server on $POD has every
 # KEY=VAL in its own environment (read from /proc, not from the boot command).

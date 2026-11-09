@@ -24,19 +24,14 @@ fi
 EXTRA_ENV+=("$@")
 
 # shellcheck source=scripts/lib/cluster.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE, EX, EX_TIMEOUT
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE, EX, EX_TIMEOUT, ray_head, RAY_DRIVER_ADDRESS
 require_tunnel
 # no defaults: a default pod or backend boots the wrong server on the right pod
 POD="${POD:?set POD (scripts/pod_state.sh lists the pods)}"
 BACKEND="${BACKEND:?set BACKEND (the backend this pod serves, e.g. nemo_rl)}"
 GPUS="${GPUS:-4}"
-# nemo_rl's server shares the Ray head's pod and versions, so it connects as a driver. Through
-# the client proxy its start failed intermittently: the per-client server aborted with
-# ev_epoll1_linux.cc "Check failed: next_worker->state == KICKED" (ray_client_server.err,
-# observed 2026-11-06, twice through one proxy). The cause, a fork while the proxy's threads
-# are inside gRPC, is a hypothesis.
-RAY_ADDR="ray://localhost:10001"
-[ "$BACKEND" = nemo_rl ] && RAY_ADDR=auto
+# Every backend's server boots as a Ray driver on the pod's node (RAY_DRIVER_ADDRESS); the head runs
+# no Ray Client server (lib/cluster.sh RAY_HEAD_SH). miles, verl and megatron_bridge are untested so.
 SERVER_LOG="/data/${LOG_NAME}.log"
 
 
@@ -62,13 +57,14 @@ fi
 # 3. Ray head must show 0 GPU in use (leaked PGs = footgun 12) out of $GPUS
 #    (a head started with another --num-gpus gives the server the wrong
 #    layout with no error) — else recycle it
-RAY_OK=$(EX "ray status 2>/dev/null | grep -Eo '[0-9.]+/[0-9.]+ GPU' | head -1" || true)
-case "$RAY_OK" in
-  "0.0/$GPUS.0 GPU") : ;;
-  *)
-    echo "==> Ray head unhealthy or not $GPUS GPUs ($RAY_OK); recycling"
-    EX "ray stop --force >/dev/null 2>&1 || true; rm -rf /tmp/ray; ray start --head --num-gpus $GPUS --disable-usage-stats > /tmp/ray_start.log 2>&1 < /dev/null; sleep 5" ;;
-esac
+#    `ray_head ensure` keeps a token head, starts or replaces the others and fails otherwise.
+EX "$(ray_head ensure "$GPUS")"
+RAY_GPUS=$(EX "ray status 2>/dev/null | grep -Eo '[0-9.]+/[0-9.]+ GPU' | head -1") \
+  || { echo "ERROR: could not read the Ray head's GPUs on $POD"; exit 1; }
+if [ "$RAY_GPUS" != "0.0/$GPUS.0 GPU" ]; then
+  echo "==> Ray head is not idle on $GPUS GPUs (${RAY_GPUS:-ray status printed no GPU line}); recycling"
+  EX "$(ray_head recycle "$GPUS")"
+fi
 
 # 4. boot the new server (detached; all fds redirected; timeout-wrapped exec)
 echo "==> booting server ($SERVER_LOG)"
@@ -84,7 +80,7 @@ for kv in "${EXTRA_ENV[@]:-}"; do
 done
 EX "rm -f $SERVER_LOG"
 EX_TIMEOUT 30 "
-export PYTHONPATH=/app NUM_GPUS=$GPUS RAY_ADDRESS=$RAY_ADDR
+export PYTHONPATH=/app NUM_GPUS=$GPUS RAY_ADDRESS=$RAY_DRIVER_ADDRESS
 export HF_TOKEN=\$(cat /tmp/hf_token.txt) HF_HOME=/data/.cache/huggingface
 export TINKER_API_KEY=tml-dev-key TINKERCLOUD_BACKEND=$BACKEND ALLOW_PARTIAL_BATCHES=true
 $ENV_LINES

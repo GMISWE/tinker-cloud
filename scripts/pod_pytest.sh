@@ -22,7 +22,7 @@
 # also one that stops before pytest (tunnel down, push failed, Ray head up).
 set -euo pipefail
 # shellcheck source=scripts/lib/cluster.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE, kx
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, kx, require_tunnel, refuse_if_gpus_busy, EX_TIMEOUT, ray_head
 POD="${1:-tinkercloud-nemorl}"; shift || true
 if [ $# -eq 0 ]; then
   set -- tests/unit tests/conformance -q -p no:cacheprovider
@@ -50,12 +50,17 @@ on_exit() {
 trap on_exit EXIT
 require_tunnel
 
-# one shot, not kx: a dropped connection here means "unknown" and the run goes on.
-# `ray stop` leaves <defunct> raylets behind, so only a non-zombie state counts.
-if [ "$GPU_RUN" = 1 ] && timeout 30 kubectl -n "$NS" exec "$POD" -- bash -c "ps -C raylet -o stat= | grep -q '^[^Z]'" >/dev/null 2>&1; then
-  echo "a Ray head is running on $POD; GPU suites start their own. Stop the server and the head first:" >&2
-  echo "  kubectl -n $NS exec $POD -- bash -c \"pkill -TERM -f 'python3 -m trainin[g]'; sleep 6; ray stop --force\"" >&2
-  exit 1
+# GPU suites start their own head, so none may run; a state that cannot be read stops the run.
+if [ "$GPU_RUN" = 1 ]; then
+  HEAD_STATE=$(EX_TIMEOUT 30 "$(ray_head state)")
+  case "$HEAD_STATE" in
+    none) ;;
+    "") echo "ERROR: could not read the Ray head's state on $POD (the exec gave no output)" >&2; exit 1 ;;
+    *)
+      echo "the Ray head on $POD is '$HEAD_STATE'; GPU suites start their own. Stop the server and the head first:" >&2
+      echo "  kubectl -n $NS exec $POD -- bash -c \"pkill -TERM -f 'python3 -m trainin[g]'; sleep 6; ray stop --force\"" >&2
+      exit 1 ;;
+  esac
 fi
 
 tar -C "$ROOT" -czf "$TMP/code.tgz" --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \

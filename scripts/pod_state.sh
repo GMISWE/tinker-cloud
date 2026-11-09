@@ -8,7 +8,7 @@
 #   scripts/pod_state.sh <pod>...   # these pods only
 set -uo pipefail
 # shellcheck source=scripts/lib/cluster.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE, kx
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, kx, pod_cmd, ray_head
 require_tunnel
 export KX_TIMEOUT="${KX_TIMEOUT:-60}"
 
@@ -31,7 +31,7 @@ LOCAL_TREE=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && find training -name '*.py
 for pod in "${PODS[@]}"; do
   echo "== $pod =="
   # shellcheck disable=SC2016  # the string runs on the pod; its $ expand there
-  kx exec "$pod" -- bash -c '
+  kx exec "$pod" -- bash -c "$(pod_cmd '
     echo "  gpu MiB: $(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | tr "\n" " ")"
     echo "  server:  $(curl -s -m 5 localhost:8000/health || echo DOWN)"
     ps -eo pid,etime,args | grep "m trainin[g]$" | sed "s/^/  proc:    /"
@@ -39,5 +39,6 @@ for pod in "${PODS[@]}"; do
     echo "  actors:  $(ray list actors --filter state=ALIVE 2>/dev/null | grep -c ALIVE) alive"
     echo "  pypi:    $(python3 -c "import importlib.metadata as m,sys; print(*(p+\"=\"+m.version(p) for p in sys.argv[1:]))" uvicorn fastapi pydantic httpx 2>/dev/null)"
     echo "  /app:    training/ tree $(cd /app && find training -name "*.py" 2>/dev/null | sort | xargs sha256sum 2>/dev/null | cut -d" " -f1 | sha256sum | cut -c1-12) (local: '"$LOCAL_TREE"')"
-  ' 2>/dev/null || echo "  (exec dropped: state unknown)"
+  ')" 2>/dev/null || echo "  (exec dropped: state unknown)"
+  echo "  head:    $(kx exec "$pod" -- bash -c "$(pod_cmd "$(ray_head state)")" 2>/dev/null || echo "unknown (exec dropped)")"
 done
