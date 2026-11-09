@@ -61,6 +61,18 @@ def test_second_engine_is_refused_and_a_new_pid_replaces_the_old_row():
     assert [r.pid for r in dropped] == [7, 8] and registry.only() is None
 
 
+def test_engine_for_is_the_engine_an_id_names_or_the_only_one():
+    """Requests (Decider.decide) and model deletes (free_model) both ask engine_for: an id that names an
+    engine goes to it; no id, or one in another shape (create-via-load's), goes to the only engine."""
+    registry = Registry()
+    for id_ in (None, "s1:train:0", "model_fake_0123456789abcdef"):
+        assert registry.engine_for(id_) is None, id_
+    row = registry.register(**ROW)
+    for id_ in (None, "s1:train:0", "model_fake_0123456789abcdef", "req_fake_0123456789abcdef"):
+        assert registry.engine_for(id_) == row, id_
+    assert registry.engine_for("model_other_0123456789abcdef") is None
+
+
 def test_a_registration_reaches_another_worker_on_its_refresh(tmp_path):
     """Two registries over one file stand in for two gateway workers."""
     a, b = Registry(tmp_path / "engines.db"), Registry(tmp_path / "engines.db")

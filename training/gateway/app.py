@@ -43,7 +43,7 @@ from ..models.responses import (
     SessionSearchResponse,
     SessionSummary,
 )
-from ..utils.helpers import BASE_MODEL_SAMPLING_UNSUPPORTED, engine_name_of
+from ..utils.helpers import BASE_MODEL_SAMPLING_UNSUPPORTED
 from . import routing
 from .decide import Decider, Headers, Reject
 from .forward import EngineResponse, EngineUnreachable, Pool, forward
@@ -188,10 +188,7 @@ class Gateway:
 
     async def free_model(self, model_id: str, reason: str) -> None:
         """Delete a model on its engine and acknowledge the reap; never raises (FreeFn's contract)."""
-        name = engine_name_of(model_id)
-        # an id in another shape (create-via-load's `{session}:train:{seq}`) names no engine: its delete
-        # goes where every request carrying it went, to the only engine (Decider.decide)
-        engine = self.registry.get(name) if name else self.registry.only()
+        engine = self.registry.engine_for(model_id)   # where every request carrying the id went (Decider.decide)
         logger.info("Freeing model %s (%s)", model_id, reason)
         delete_confirmed = False
         if engine is None:

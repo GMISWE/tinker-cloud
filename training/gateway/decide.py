@@ -95,15 +95,15 @@ class Decider:
             return Reject(401, denied)
         if not _header(headers, b"host"):
             return Reject(400, "a Host header is required: the engine builds the URLs it returns from it")
-        engine = self._registry.only()
-        if engine is None:
-            return Reject(503, "no engine registered")
         content_type = _header(headers, b"content-type")
         content_encoding = _header(headers, b"content-encoding")
         doc = routing.json_doc(content_type, content_encoding, body) if body is not None and routing.reads_body(path) else None
         named = routing.named_engine(path, query, content_type, content_encoding, body, doc)
-        if named is not None and named[1] != engine.name:
-            return Reject(404, f"no engine named {named[1]!r} is registered for id {named[0]!r}")
+        engine = self._registry.engine_for(named[0] if named is not None else None)
+        if engine is None:
+            if named is not None and self._registry.rows():
+                return Reject(404, f"no engine named {named[1]!r} is registered for id {named[0]!r}")
+            return Reject(503, "no engine registered")
         if doc is None:
             return Route(engine, [])
         # `doc` is the SDK's body as sent; what a missing key means is each branch's to say
