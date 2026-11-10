@@ -56,7 +56,6 @@ RAY_CLIENT_PORT=10001
 RAY_DRIVER_ADDRESS=auto
 # The API server's port: each boot exports it as TRAINING_PORT; the container, the NetworkPolicy
 # and the health checks read it here.
-# shellcheck disable=SC2034  # read by the scripts that source this file
 API_PORT=8000
 # The API server's process as `pgrep -f`/`pkill -f` (ERE) match it: a command line that starts with
 # a python of any name or path, with single-token interpreter flags (`-u`, `-Xdev`), running
@@ -72,8 +71,8 @@ SERVER_PATTERN='^([^ ]*/)?python[0-9.]*( -[^ ]+)* -m training( |$)'
 SERVER_STOP="pkill -f '$SERVER_PATTERN'; sleep 8; pgrep -f '$SERVER_PATTERN' > /dev/null; [ \$? -eq 1 ] || { echo 'ERROR: an API server still runs after pkill, or pgrep failed'; exit 1; }"
 # The HF token file on a pod, and the pod command that fails unless it is non-empty. The deploy
 # and the rotate run it before they stop the running server, since a refusal inside the boot exec
-# cannot fail its caller (EX_TIMEOUT). The boot command runs it again: the deploy's setup runs
-# between that check and the boot, and a server must not start without a token.
+# cannot fail its caller (EX_TIMEOUT). The boot command runs it again, so a caller that skips
+# that check still starts no server without a token.
 HF_TOKEN_POD_FILE=/tmp/hf_token.txt
 HF_TOKEN_CHECK="[ -s $HF_TOKEN_POD_FILE ] || { echo 'ERROR: $HF_TOKEN_POD_FILE is empty or missing'; exit 1; }"
 # The variables every server boot exports, in order (server_boot's case table holds each one's
