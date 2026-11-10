@@ -152,7 +152,8 @@ class MegatronBridgeBackend(TrainingBackend[MegatronBridgeHandle]):
 
     async def forward_backward(self, handle: MegatronBridgeHandle, data: List[Datum], loss_fn: str,
                                loss_fn_config: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
-        batch = self.converter.forward_backward_to_backend(data, loss_fn, {"seq_length": handle.seq_length})
+        batch = self.converter.forward_backward_to_backend(
+            data, loss_fn, {"seq_length": handle.seq_length, "num_labels": handle.num_labels})
         return await _get(handle.worker.forward_backward.remote(batch))
 
     async def apply_optimizer_step(
