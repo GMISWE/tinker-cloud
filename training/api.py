@@ -96,6 +96,7 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
         metadata_storage = MetadataStorage(config_obj.storage.metadata_dir)
         config_obj.storage.checkpoint_base.mkdir(parents=True, exist_ok=True)
         checkpoint_store = CheckpointStore(config_obj.storage.checkpoint_base, metadata_storage)
+        metadata_storage.sweep_temp_files()   # before any writer runs
         swept = checkpoint_store.sweep_pending()
         if swept:
             logger.warning("Marked %d checkpoint save(s) interrupted by the last shutdown as failed", swept)
