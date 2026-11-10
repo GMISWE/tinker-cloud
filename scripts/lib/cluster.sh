@@ -75,34 +75,33 @@ SERVER_STOP="pkill -f '$SERVER_PATTERN'; sleep 8; pgrep -f '$SERVER_PATTERN' > /
 # that check still starts no server without a token.
 HF_TOKEN_POD_FILE=/tmp/hf_token.txt
 HF_TOKEN_CHECK="[ -s $HF_TOKEN_POD_FILE ] || { echo 'ERROR: $HF_TOKEN_POD_FILE is empty or missing'; exit 1; }"
-# The variables every server boot exports, in order (server_boot's case table holds each one's
-# value and, for a key a KEY=VAL may not replace, where its value is set instead).
+# The variables every server boot exports, in order (server_boot's case table holds each value).
 SERVER_BOOT_KEYS=" PYTHONPATH NUM_GPUS RAY_ADDRESS TRAINING_PORT HF_TOKEN HF_HOME TINKER_API_KEY TINKERCLOUD_BACKEND ALLOW_PARTIAL_BATCHES "
 # The bound on the boot's exec: the command detaches the server and returns after `sleep 2`.
 # shellcheck disable=SC2034  # read by the scripts that source this file
 SERVER_BOOT_TIMEOUT=30
 # server_boot <gpus> <backend> <log> [KEY=VAL ...]: prints the pod command that starts the API
 # server detached, with SERVER_BOOT_KEYS set and then each KEY=VAL quoted with %q, so a value
-# reaches the server unchanged. A KEY=VAL replaces a default (named on stderr) unless the case
-# table below gives that key another home. Refused before anything is printed: such a key, an
-# argument that is not a plain KEY=VAL, and a <log> that is not an absolute path of plain
+# reaches the server unchanged. A KEY=VAL replaces a default (named on stderr), except
+# TRAINING_PORT: the port is API_PORT, which the container and the health checks also read.
+# Refused before anything is printed: TRAINING_PORT=..., an argument that is not a plain
+# KEY=VAL, and a <log> that is not an absolute path of plain
 # [A-Za-z0-9_./-] characters (callers read the log by its bare path). Run it under EX_TIMEOUT
 # $SERVER_BOOT_TIMEOUT and judge the launch by a fresh probe: EX_TIMEOUT drops the exec's exit.
 server_boot() {
   local gpus=$1 backend=$2 log=$3 kv key val cmd="$HF_TOKEN_CHECK"$'\n'
-  local -A set_by=()   # key -> where its value is set, for the keys a KEY=VAL may not replace
   shift 3
   [[ "$log" =~ ^/[A-Za-z0-9_./-]+$ ]] || { echo "ERROR: log path '$log' is not an absolute plain [A-Za-z0-9_./-] path" >&2; return 1; }
   for key in $SERVER_BOOT_KEYS; do
     case "$key" in
       PYTHONPATH) val=/app ;;
-      NUM_GPUS) val=$(printf '%q' "$gpus"); set_by[$key]="server_boot's <gpus> argument" ;;
-      RAY_ADDRESS) val=$RAY_DRIVER_ADDRESS; set_by[$key]="RAY_DRIVER_ADDRESS in lib/cluster.sh" ;;
-      TRAINING_PORT) val=$API_PORT; set_by[$key]="API_PORT in lib/cluster.sh" ;;
-      HF_TOKEN) val="\$(cat $HF_TOKEN_POD_FILE)"; set_by[$key]="the pod's $HF_TOKEN_POD_FILE" ;;
+      NUM_GPUS) val=$(printf '%q' "$gpus") ;;
+      RAY_ADDRESS) val=$RAY_DRIVER_ADDRESS ;;
+      TRAINING_PORT) val=$API_PORT ;;
+      HF_TOKEN) val="\$(cat $HF_TOKEN_POD_FILE)" ;;
       HF_HOME) val=/data/.cache/huggingface ;;
       TINKER_API_KEY) val=tml-dev-key ;;
-      TINKERCLOUD_BACKEND) val=$(printf '%q' "$backend"); set_by[$key]="server_boot's <backend> argument" ;;
+      TINKERCLOUD_BACKEND) val=$(printf '%q' "$backend") ;;
       ALLOW_PARTIAL_BATCHES) val=true ;;
       *) echo "ERROR: SERVER_BOOT_KEYS names $key, which has no default" >&2; return 1 ;;
     esac
@@ -113,8 +112,8 @@ server_boot() {
     if [[ "$kv" != *=* || ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
       echo "ERROR: '$kv' is not a plain KEY=VAL" >&2; return 1
     fi
-    if [ -n "${set_by[$key]:-}" ]; then
-      echo "ERROR: '$kv': $key is set by ${set_by[$key]}, not by a KEY=VAL" >&2; return 1
+    if [ "$key" = TRAINING_PORT ]; then
+      echo "ERROR: '$kv': the port is API_PORT in lib/cluster.sh, not a KEY=VAL" >&2; return 1
     fi
     [[ "$SERVER_BOOT_KEYS" == *" $key "* ]] && echo "==> $key=... replaces the default $key" >&2
     cmd+="export $key=$(printf '%q' "${kv#*=}")"$'\n'
