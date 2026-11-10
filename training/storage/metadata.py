@@ -15,6 +15,10 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+class MetadataReadError(Exception):
+    pass
+
+
 def _contained(base: Path, *parts: str) -> Path:
     """base/parts, refused unless the normalised path stays under base. The parts are ids and
     names that arrive in requests, so every path built from them goes through here."""
@@ -157,7 +161,7 @@ class MetadataStorage:
                 return json.load(f)
         except Exception as e:
             logger.error(f"Failed to load training run {training_run_id}: {e}")
-            return None
+            raise MetadataReadError(f"Failed to load training run {training_run_id}") from e
 
     def update_training_run(
         self,
@@ -294,7 +298,7 @@ class MetadataStorage:
                 return json.load(f)
         except Exception as e:
             logger.error(f"Failed to load checkpoint {checkpoint_name}: {e}")
-            return None
+            raise MetadataReadError(f"Failed to load checkpoint {model_id}/{checkpoint_name}") from e
 
     def list_checkpoints(
         self,
