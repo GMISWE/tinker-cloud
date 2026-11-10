@@ -29,7 +29,7 @@ class VerlArgumentBuilder(ArgumentBuilder):
         lora_config = lora_config or {}
         max_seq_len = int(kwargs.get("max_seq_len", 2048))
 
-        hf_path = self._resolve_hf_path(base_model)
+        hf_path = self.resolve_hf_path(base_model)
 
         # request payloads carry explicit None values — coalesce, don't .get()-default
         lora_rank = int(lora_config.get("rank") or lora_config.get("lora_rank") or 0)
@@ -102,7 +102,7 @@ class VerlArgumentBuilder(ArgumentBuilder):
         return cfg
 
     @staticmethod
-    def _resolve_hf_path(base_model: str) -> str:
+    def resolve_hf_path(base_model: str) -> str:
         for root in filter(None, [os.environ.get("TINKERCLOUD_MODEL_ROOT"), "/data/models", "/root/models"]):
             candidate = os.path.join(root, base_model)
             if os.path.isdir(candidate):

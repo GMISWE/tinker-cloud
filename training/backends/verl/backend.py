@@ -100,9 +100,9 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         return self._builder
 
     def model_repositories(self, base_model: str) -> List[str]:
-        """The model directory or hub id the builder loads (VerlArgumentBuilder._resolve_hf_path)."""
+        """The model directory or hub id the builder loads (VerlArgumentBuilder.resolve_hf_path)."""
         from .builder import VerlArgumentBuilder
-        return [VerlArgumentBuilder._resolve_hf_path(base_model)]
+        return [VerlArgumentBuilder.resolve_hf_path(base_model)]
 
     # ---------------------------------------------------------------- create
 
