@@ -1,6 +1,6 @@
 """`target_tokens` of shape [N, K] on a backend that reads one target per
-position: the pass fails by name instead of being misread. Over HTTP on the
-fake backend, where a failed pass is a 400 on its future."""
+position: the request is refused by name instead of being misread. Over HTTP on
+the fake backend: the POST itself is a 400 and queues nothing."""
 import pytest
 
 TOKENS = list(range(3, 9))
@@ -36,10 +36,11 @@ def model(service_client):
     ("/api/v1/forward_backward", "forward_backward_input"),
 ])
 def test_nk_targets_are_400_naming_the_field_the_rank_and_the_backend(server, model, path, key):
-    r = _run(server, path, _body(model.model_id, key, k=2))
+    r = server.post(path, _body(model.model_id, key, k=2))
     assert r.status_code == 400, (r.status_code, r.text)
     error = r.json()["error"]
     assert "target_tokens of rank 2" in error and "FakeBackend" in error, error
+    assert "request_id" not in r.json()
     # the refusal is the request's, not the model's: one target per position still runs
     r = _run(server, path, _body(model.model_id, key, k=None))
     assert r.status_code == 200, (r.status_code, r.text)

@@ -15,6 +15,7 @@ from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 from typing import Dict, Tuple
 
+from ..backends.base import UnsupportedFeatureError
 from ..models.requests import ForwardRequest, ForwardBackwardRequest, OptimStepRequest
 from ..models.responses import AsyncOperationResponse
 from ..services.training_service import TrainingService
@@ -60,6 +61,10 @@ def _submit_pass(
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
     client_info = training_clients[model_id]
     _validate_loss(batch.loss_fn, batch.loss_fn_config)
+    try:
+        service.check_target_rank(batch.data)
+    except UnsupportedFeatureError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     run = service.forward if forward_only else service.forward_backward
 
     async def execute():
