@@ -77,8 +77,8 @@ def test_invalid_datum_names_index_and_reason(datum, loss_fn, message):
 
 
 def test_unserved_loss_and_empty_request_are_refused():
-    with pytest.raises(ValueError, match="'cispo' is not served"):
-        convert_request([ce_chunked([1], [1], [1])], "cispo")
+    with pytest.raises(ValueError, match="'dro' is not served"):
+        convert_request([ce_chunked([1], [1], [1])], "dro")
     with pytest.raises(ValueError, match="no datums"):
         convert_request([], "cross_entropy")
 
