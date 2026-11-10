@@ -233,14 +233,26 @@ def test_a_hub_repository_is_checked_file_by_file(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("error", ["RepositoryNotFoundError", "GatedRepoError", "HFValidationError"])
 def test_a_repository_the_server_cannot_read_is_refused(monkeypatch, error):
-    """Missing, gated or not an id at all: read as "declares nothing", such a repository passed the check."""
+    """Missing, gated or not an id at all: read as "declares nothing", such a repository passed the
+    check, and a base-model sampler for it was answered 200. It is a ValueError, so a 400."""
     hub = _hub(monkeypatch, offline=False)
+    from fastapi import HTTPException
     from huggingface_hub import utils
+    from tinkercloud.training.backends.fake.backend import FakeBackend
+    from tinkercloud.training.models.requests import ResolveSamplerTargetRequest
+    from tinkercloud.training.routers.sampling import resolve_sampler_target
+    from tinkercloud.training.services.sampling_service import SamplingService
     from tinkercloud.training.utils import model_config
     _trusting(monkeypatch)
     _refusing(monkeypatch, hub, getattr(utils, error))   # the name is the test's parameter
     with pytest.raises(ValueError, match="'org/unreadable' names no model repository this server can read"):
         model_config.check_remote_code("org/unreadable")
+    backend = FakeBackend({"base_models": ["org/unreadable"]})
+    _loads_as_sent(monkeypatch, backend)
+    with pytest.raises(HTTPException) as refused:
+        asyncio.run(resolve_sampler_target(ResolveSamplerTargetRequest(base_model="org/unreadable"), None, {}, None,
+                                           SamplingService(backend=backend)))
+    assert refused.value.status_code == 400 and "'org/unreadable' names no model repository" in refused.value.detail
 
 
 def test_an_empty_id_is_a_repository_the_server_cannot_read(monkeypatch):
@@ -251,25 +263,6 @@ def test_an_empty_id_is_a_repository_the_server_cannot_read(monkeypatch):
     _trusting(monkeypatch)
     with pytest.raises(ValueError, match="'' names no model repository this server can read"):
         model_config.check_remote_code("")
-
-
-def test_a_base_model_sampler_for_a_repository_the_server_cannot_read_is_a_400(monkeypatch):
-    """The route answered 200 for such a base model; the refusal now reaches the client as a 400."""
-    hub = _hub(monkeypatch, offline=False)
-    from fastapi import HTTPException
-    from huggingface_hub.utils import RepositoryNotFoundError
-    from tinkercloud.training.backends.fake.backend import FakeBackend
-    from tinkercloud.training.models.requests import ResolveSamplerTargetRequest
-    from tinkercloud.training.routers.sampling import resolve_sampler_target
-    from tinkercloud.training.services.sampling_service import SamplingService
-    _refusing(monkeypatch, hub, RepositoryNotFoundError)
-    backend = FakeBackend({"base_models": ["org/unreadable"]})
-    _loads_as_sent(monkeypatch, backend)
-    _trusting(monkeypatch)
-    with pytest.raises(HTTPException) as refused:
-        asyncio.run(resolve_sampler_target(ResolveSamplerTargetRequest(base_model="org/unreadable"), None, {}, None,
-                                           SamplingService(backend=backend)))
-    assert refused.value.status_code == 400 and "'org/unreadable' names no model repository" in refused.value.detail
 
 
 def test_offline_a_hub_id_is_checked_through_its_cached_snapshot(monkeypatch, tmp_path):
