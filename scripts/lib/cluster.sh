@@ -83,9 +83,8 @@ SERVER_BOOT_TIMEOUT=30
 # server_boot <gpus> <backend> <log> [KEY=VAL ...]: prints the pod command that starts the API
 # server detached, with SERVER_BOOT_KEYS set and then each KEY=VAL quoted with %q, so a value
 # reaches the server unchanged. A KEY=VAL replaces a default (named on stderr), except
-# TRAINING_PORT: the port is API_PORT, which the container and the health checks also read.
-# Refused before anything is printed: TRAINING_PORT=..., an argument that is not a plain
-# KEY=VAL, and a <log> that is not an absolute path of plain
+# TRAINING_PORT, which is API_PORT above. Refused before anything is printed: TRAINING_PORT=...,
+# an argument that is not a plain KEY=VAL, and a <log> that is not an absolute path of plain
 # [A-Za-z0-9_./-] characters (callers read the log by its bare path). Run it under EX_TIMEOUT
 # $SERVER_BOOT_TIMEOUT and judge the launch by a fresh probe: EX_TIMEOUT drops the exec's exit.
 server_boot() {
