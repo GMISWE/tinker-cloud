@@ -3,10 +3,12 @@ pending/completed/failed record and what a reader is allowed to see.
 
 Pure filesystem tests; no backend, no server."""
 import json
+import shutil
 
 import pytest
 
 from tinkercloud.training.checkpoints import (
+    CheckpointDeleteFailed,
     CheckpointFailed,
     CheckpointKind,
     CheckpointKindMismatch,
@@ -21,6 +23,20 @@ from tinkercloud.training.storage.metadata import MetadataStorage
 ADAMW = {"type": "adamw"}   # the family record every save carries
 
 W, S = CheckpointKind.WEIGHTS, CheckpointKind.SAMPLER_WEIGHTS
+
+
+def _rmtree_stuck_on(name):
+    """A shutil.rmtree that cannot remove the tree called `name`, behaving as the real one does: it raises,
+    or with ignore_errors=True it quietly leaves the files. Other trees go through the real function."""
+    real = shutil.rmtree
+
+    def rmtree(path, ignore_errors=False, **kwargs):
+        if path.name != name:
+            return real(path, ignore_errors=ignore_errors, **kwargs)
+        if ignore_errors:
+            return
+        raise PermissionError(13, "Permission denied", str(path))
+    return rmtree
 
 
 class TestRef:
@@ -133,6 +149,104 @@ class TestDeletion:
         assert store.delete(t.ref) is True
         assert not t.root.exists() and store.get(t.ref) is None
         assert (native / "iter_0000001").is_dir()
+
+    def test_a_delete_that_cannot_remove_the_bytes_keeps_the_record_and_says_why(self, store, monkeypatch):
+        t = store.begin_save("m", W, "c1", optimizer_config=ADAMW)
+        (t.root / "blob").write_text("x")
+        store.complete(t.ref)
+        completed_at = store.get(t.ref)["completed_at"]
+        monkeypatch.setattr(shutil, "rmtree", _rmtree_stuck_on("c1"))
+        with pytest.raises(CheckpointDeleteFailed, match="Could not delete checkpoint .*Permission denied") as caught:
+            store.delete(t.ref)   # a CheckpointError, so the client is told why instead of a bare 500
+        assert caught.value.status_code == 500 and isinstance(caught.value.__cause__, PermissionError)
+        rec = store.get(t.ref)   # the record is kept, so the checkpoint is still listed while its bytes remain
+        assert rec["status"] == "failed" and "delete did not finish" in rec["error"]
+        assert rec["completed_at"] == completed_at   # when the save finished is still true
+        assert (t.root / "blob").is_file()
+        with pytest.raises(CheckpointFailed, match="partly deleted"):   # not "creation failed": the save worked
+            store.require(t.ref)
+        monkeypatch.undo()
+        assert store.delete(t.ref) is True   # a retry removes the bytes and then the record
+        assert not t.root.exists() and store.get(t.ref) is None
+
+    def test_a_checkpoint_still_being_saved_is_not_deleted(self, store):
+        t = store.begin_save("m", W, "c1", optimizer_config=ADAMW)
+        (t.root / "blob").write_text("half")
+        with pytest.raises(CheckpointPending, match="cannot be deleted yet"):
+            store.delete(t.ref)
+        assert (t.root / "blob").is_file() and store.get(t.ref)["status"] == "pending"
+        store.complete(t.ref)   # the backend finishing afterwards finds the record it expects
+        assert store.require(t.ref) == t.root
+        assert store.delete(t.ref) is True
+
+    def test_the_expiry_sweep_survives_a_checkpoint_it_cannot_delete(self, store, monkeypatch):
+        stuck = store.begin_save("m", W, "stuck", ttl_seconds=0, optimizer_config=ADAMW)
+        store.complete(stuck.ref)
+        fine = store.begin_save("m", W, "fine", ttl_seconds=0, optimizer_config=ADAMW)
+        store.complete(fine.ref)
+        monkeypatch.setattr(shutil, "rmtree", _rmtree_stuck_on("stuck"))
+        assert store.sweep_expired() == 1   # "fine" went; "stuck" is logged and left for the next sweep
+        assert store.get(fine.ref) is None and store.get(stuck.ref) is not None
+        monkeypatch.undo()
+        assert store.sweep_expired() == 1 and store.get(stuck.ref) is None
+
+    def test_a_failing_metadata_volume_is_reported_as_a_failed_delete_not_a_raw_oserror(self, store, monkeypatch):
+        """The volume that holds the records can be the thing that fails (read-only remount, I/O error)."""
+        t = store.begin_save("m", W, "c1", optimizer_config=ADAMW)
+        (t.root / "blob").write_text("x")
+        store.complete(t.ref)
+
+        def broken(*_a, **_k):
+            raise OSError(30, "Read-only file system")
+
+        monkeypatch.setattr(shutil, "rmtree", _rmtree_stuck_on("c1"))
+        monkeypatch.setattr(MetadataStorage, "save_checkpoint", broken)   # the failure mark cannot be written either
+        with pytest.raises(CheckpointDeleteFailed, match="Read-only file system|Permission denied"):
+            store.delete(t.ref)
+
+    def test_a_record_that_cannot_be_removed_after_the_bytes_went_is_a_failed_delete(self, store, monkeypatch):
+        t = store.begin_save("m", W, "c1", optimizer_config=ADAMW)
+        store.complete(t.ref)
+
+        def broken(*_a, **_k):
+            raise OSError(5, "Input/output error")
+
+        monkeypatch.setattr(MetadataStorage, "delete_checkpoint", broken)
+        with pytest.raises(CheckpointDeleteFailed, match="Input/output error"):
+            store.delete(t.ref)
+        assert not t.root.exists()   # the bytes are gone; only the record is left, and a retry removes it
+        monkeypatch.undo()
+        assert store.delete(t.ref) is True and store.get(t.ref) is None
+
+    def test_the_expiry_sweep_survives_a_metadata_volume_that_is_failing(self, store, monkeypatch):
+        t = store.begin_save("m", W, "c1", ttl_seconds=0, optimizer_config=ADAMW)
+        store.complete(t.ref)
+
+        def broken(*_a, **_k):
+            raise OSError(30, "Read-only file system")
+
+        monkeypatch.setattr(MetadataStorage, "delete_checkpoint", broken)
+        assert store.sweep_expired() == 0   # logged, not raised: sweep_forever has no try and would end for good
+
+    def test_the_stored_error_and_the_response_do_not_carry_a_server_path(self, store, monkeypatch):
+        t = store.begin_save("m", W, "c1", optimizer_config=ADAMW)
+        (t.root / "blob").write_text("x")
+        store.complete(t.ref)
+        monkeypatch.setattr(shutil, "rmtree", _rmtree_stuck_on("c1"))
+        with pytest.raises(CheckpointDeleteFailed) as caught:
+            store.delete(t.ref)
+        for text in (str(caught.value), store.get(t.ref)["error"]):
+            assert str(store.base) not in text and "Permission denied" in text
+
+    def test_a_checkpoint_that_stays_stuck_logs_one_line_per_sweep_not_a_traceback(self, store, monkeypatch, caplog):
+        t = store.begin_save("m", W, "stuck", ttl_seconds=0, optimizer_config=ADAMW)
+        store.complete(t.ref)
+        monkeypatch.setattr(shutil, "rmtree", _rmtree_stuck_on("stuck"))
+        with caplog.at_level("WARNING"):
+            store.sweep_expired()
+            store.sweep_expired()   # the second sweep finds a record that already says delete_failed
+        assert not any(r.exc_info for r in caplog.records)
+        assert any("Could not delete expired checkpoint" in r.getMessage() for r in caplog.records)
 
     def test_release_model_drops_only_ephemeral_records(self, store):
         keep = store.begin_save("m", W, "c1", optimizer_config=ADAMW); store.complete(keep.ref)
