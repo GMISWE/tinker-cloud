@@ -85,7 +85,8 @@ EX "rm -f $SERVER_LOG"
 EX_TIMEOUT 30 "
 export PYTHONPATH=/app NUM_GPUS=$GPUS RAY_ADDRESS=$RAY_DRIVER_ADDRESS TRAINING_PORT=$API_PORT
 export HF_TOKEN=\$(cat /tmp/hf_token.txt) HF_HOME=/data/.cache/huggingface
-export TINKER_API_KEY=tml-dev-key TINKERCLOUD_BACKEND=$BACKEND ALLOW_PARTIAL_BATCHES=true
+[ -s /data/tinkercloud_api_key ] || (umask 077; printf 'tml-%s\n' \"\$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')\" > /data/tinkercloud_api_key)
+export TINKER_API_KEY=\$(cat /data/tinkercloud_api_key) TINKERCLOUD_BACKEND=$BACKEND ALLOW_PARTIAL_BATCHES=true
 $ENV_LINES
 cd /app && setsid nohup python3 -m training > $SERVER_LOG 2>&1 < /dev/null &
 sleep 2; echo LAUNCHED"
