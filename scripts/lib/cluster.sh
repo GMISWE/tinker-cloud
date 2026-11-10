@@ -86,9 +86,8 @@ SERVER_BOOT_TIMEOUT=30
 # reaches the server unchanged. A KEY=VAL replaces a default (named on stderr) unless the case
 # table below gives that key another home. Refused before anything is printed: such a key, an
 # argument that is not a plain KEY=VAL, and a <log> that is not an absolute path of plain
-# [A-Za-z0-9_./-] characters (callers read the log by its bare path). An exec whose detached child kept a stream
-# open has hung until killed (143), so every fd is redirected; run it under EX_TIMEOUT
-# $SERVER_BOOT_TIMEOUT and judge the launch by a fresh probe, not by the exec's exit.
+# [A-Za-z0-9_./-] characters (callers read the log by its bare path). Run it under EX_TIMEOUT
+# $SERVER_BOOT_TIMEOUT and judge the launch by a fresh probe: EX_TIMEOUT drops the exec's exit.
 server_boot() {
   local gpus=$1 backend=$2 log=$3 kv key val cmd="$HF_TOKEN_CHECK"$'\n'
   local -A set_by=()   # key -> where its value is set, for the keys a KEY=VAL may not replace
