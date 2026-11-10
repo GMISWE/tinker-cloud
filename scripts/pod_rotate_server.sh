@@ -24,7 +24,7 @@ fi
 EXTRA_ENV+=("$@")
 
 # shellcheck source=scripts/lib/cluster.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE, EX, EX_TIMEOUT, ray_head, SERVER_STOP, API_PORT, HF_TOKEN_POD_FILE, HF_TOKEN_CHECK, server_boot, SERVER_BOOT_TIMEOUT, SERVER_HEALTH
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, require_tunnel, EX, EX_TIMEOUT, ray_head, SERVER_STOP, API_PORT, HF_TOKEN_POD_FILE, HF_TOKEN_CHECK, server_boot, SERVER_BOOT_TIMEOUT, SERVER_HEALTH
 require_tunnel
 # no defaults: a default pod or backend boots the wrong server on the right pod
 POD="${POD:?set POD (scripts/pod_state.sh lists the pods)}"

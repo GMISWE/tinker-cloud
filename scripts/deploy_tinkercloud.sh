@@ -78,7 +78,7 @@ done
 # Sets per-profile DEFAULTS; every one is overridable by the same-named env var.
 # shellcheck source=scripts/lib/cluster.sh
 # shellcheck disable=SC1091  # sourced by path at run time: KUBECONFIG, NS, DEFAULT_NODE
-. "$SCRIPT_DIR/lib/cluster.sh"   # KUBECONFIG, NS, kx, EX, EX_TIMEOUT, pod_cmd, ray_head, TRUST_DOMAIN_LABEL, SERVER_PATTERN, SERVER_STOP, API_PORT, HF_TOKEN_POD_FILE, HF_TOKEN_CHECK, server_boot, SERVER_BOOT_TIMEOUT, SERVER_HEALTH
+. "$SCRIPT_DIR/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE, require_tunnel, kx, EX, EX_TIMEOUT, pod_cmd, ray_head, TRUST_DOMAIN_LABEL, SERVER_PATTERN, SERVER_STOP, API_PORT, HF_TOKEN_POD_FILE, HF_TOKEN_CHECK, server_boot, SERVER_BOOT_TIMEOUT, SERVER_HEALTH
 BACKEND_ENV=()   # backend knobs as KEY=VAL, exported to the server process (step 6)
 case "$PROFILE" in
   nemo_rl)
@@ -445,7 +445,7 @@ if [ "$RUN_SERVER" = 1 ]; then
     echo "ERROR: no HF token in target (or the exec failed); pass HF_TOKEN_FILE=<path>"; exit 1; }
 else
   # bionemo: the Evo2 checkpoint (arcinstitute) is public; token optional.
-  EX "$HF_TOKEN_CHECK" > /dev/null || echo "    note: no HF token (fine for public weights)"
+  EX "$HF_TOKEN_CHECK" > /dev/null || echo "    note: no HF token, or the exec failed (fine for public weights)"
 fi
 
 # --- 4. in-container setup ---------------------------------------------------
