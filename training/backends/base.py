@@ -96,6 +96,10 @@ class TrainingBackend(ABC, Generic[H]):
     # Sampler kinds (SaveWeightsForSamplerRequest.kind) this backend serves. "inflight"
     # needs a backend whose sampler serves the model's newest published weights.
     SUPPORTED_SAMPLER_KINDS: FrozenSet[str] = frozenset({"snapshot"})
+    # Highest rank of `target_tokens` this backend reads: 1 is one target per
+    # position, 2 is cross_entropy's [N, K] (K candidates per position, weights
+    # of the same shape). TrainingService refuses a higher rank before the backend sees it.
+    TARGET_TOKENS_MAX_RANK: int = 1
     # True when the backend serves a base-model sampler (create_sampling_client(base_model=...)):
     # sample() on base_model_handle() draws from the base model with no adapter. Other
     # backends refuse it with 400 before any of the two methods below is called.

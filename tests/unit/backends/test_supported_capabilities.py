@@ -26,3 +26,9 @@ def test_automodel_and_fake_serve_both():
     for cls in (_cls("automodel"), FakeBackend):
         assert "gspo" in cls.SUPPORTED_LOSS_FNS
         assert cls.SUPPORTED_SAMPLER_KINDS == frozenset({"snapshot", "inflight"})
+
+
+@pytest.mark.parametrize("backend_type", (*OTHERS, "automodel", "fake"))
+def test_verl_alone_reads_nk_targets(backend_type):
+    """A backend that declared rank 2 without reading it would misread [N, K] as N * K positions."""
+    assert _cls(backend_type).TARGET_TOKENS_MAX_RANK == (2 if backend_type == "verl" else 1)

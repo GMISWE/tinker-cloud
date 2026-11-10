@@ -32,6 +32,19 @@ class TrainingService:
                 suggestion=f"this backend supports: {', '.join(sorted(supported))}",
             )
 
+    def _check_target_rank(self, data: List[Any]) -> None:
+        limit = self.backend.TARGET_TOKENS_MAX_RANK
+        for i, datum in enumerate(data):
+            target = datum.loss_fn_inputs.get("target_tokens")   # RL datums may carry none
+            # no shape on the wire is a flat list: rank 1
+            rank = 1 if target is None or target.shape is None else len(target.shape)
+            if rank > limit:
+                raise UnsupportedFeatureError(
+                    f"target_tokens of rank {rank} (datum {i}, shape {target.shape})",
+                    backend=type(self.backend).__name__,
+                    suggestion=f"this backend reads target_tokens up to rank {limit}",
+                )
+
     async def forward(
         self,
         model_id: str,
@@ -48,6 +61,7 @@ class TrainingService:
         """
         logger.info("Forward pass for %s", model_id)
         self._check_loss_supported(loss_fn)
+        self._check_target_rank(data)
 
         handle = client_info["backend_handle"]
         result = await self.backend.forward(handle, data, loss_fn, loss_fn_config=loss_fn_config)
@@ -68,6 +82,7 @@ class TrainingService:
         """
         logger.info("Forward-backward pass for %s", model_id)
         self._check_loss_supported(loss_fn)
+        self._check_target_rank(data)
 
         handle = client_info["backend_handle"]
         result = await self.backend.forward_backward(handle, data, loss_fn, loss_fn_config=loss_fn_config)
