@@ -43,6 +43,33 @@ class TestRef:
         with pytest.raises(InvalidCheckpointPath):
             CheckpointRef.make("m", W, "a/b")
 
+    def test_make_refuses_names_that_exceed_255_bytes(self):
+        # Name alone is too long.
+        with pytest.raises(InvalidCheckpointPath, match="exceeds 255 UTF-8 bytes"):
+            CheckpointRef.make("m", W, "x" * 256)
+        # Name fits alone but the record key (kind--name) does not.
+        just_under = "x" * (255 - len("weights--"))
+        CheckpointRef.make("m", W, just_under)  # longest name that fits a weights record key
+        with pytest.raises(InvalidCheckpointPath, match="record key"):
+            CheckpointRef.make("m", W, just_under + "x")
+
+    def test_long_name_does_not_remove_existing_checkpoint(self, store):
+        # The bug: begin_save removed the old directory before the write failed.
+        ok = CheckpointRef.make("m", W, "ok-name")
+        store.begin_save("m", W, "ok-name", optimizer_config=ADAMW)
+        store.complete(ok)
+        assert store.require(ok).is_dir()
+        with pytest.raises(InvalidCheckpointPath):
+            store.begin_save("m", W, "x" * 256, optimizer_config=ADAMW)
+        assert store.require(ok).is_dir()  # old checkpoint still there
+
+    def test_make_refuses_name_measured_in_bytes_not_characters(self):
+        # 130 two-byte characters == 260 bytes, refused because the name alone is too long.
+        with pytest.raises(InvalidCheckpointPath, match="exceeds 255 UTF-8 bytes"):
+            CheckpointRef.make("m", W, "é" * 130)
+        # 123 two-byte characters == 246 bytes, the longest that fits a weights record key.
+        CheckpointRef.make("m", W, "é" * 123)
+
 
 class TestLayout:
     def test_roots_by_kind_and_native_area(self, store):

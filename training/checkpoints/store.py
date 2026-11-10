@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 SCHEME = "tinker://"
 NATIVE_DIRNAME = "native"
 EXPIRED_SWEEP_INTERVAL_S = 60.0
+MAX_RECORD_NAME_BYTES = 255
 
 
 class CheckpointKind(str, Enum):
@@ -126,7 +127,15 @@ class CheckpointRef:
 
     @classmethod
     def make(cls, model_id: str, kind: CheckpointKind, name: str) -> "CheckpointRef":
-        return cls(_segment(model_id, "model_id"), CheckpointKind(kind), _segment(name, "checkpoint name"))
+        ref = cls(_segment(model_id, "model_id"), CheckpointKind(kind), _segment(name, "checkpoint name"))
+        if len(name.encode("utf-8")) > MAX_RECORD_NAME_BYTES:
+            raise InvalidCheckpointPath(
+                f"checkpoint name {name!r} exceeds {MAX_RECORD_NAME_BYTES} UTF-8 bytes")
+        if len(ref.record_key.encode("utf-8")) > MAX_RECORD_NAME_BYTES:
+            raise InvalidCheckpointPath(
+                f"checkpoint name {name!r} would make record key {ref.record_key!r} exceed "
+                f"{MAX_RECORD_NAME_BYTES} UTF-8 bytes")
+        return ref
 
     @property
     def uri(self) -> str:
