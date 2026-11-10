@@ -148,3 +148,16 @@ def test_a_resend_after_delete_of_a_model_whose_load_failed_is_refused_naming_th
         retry = c.post("/api/v1/load_weights", json=load)
         assert retry.status_code == 400 and "was deleted" in retry.json()["error"], retry.text
     assert _creates(tmp_path) == [SOURCE, "s:train:1"]
+
+
+def test_a_resend_after_delete_and_a_cleanup_of_futures_is_refused_naming_the_deletion(tmp_path):
+    """A cleanup removes the first request's finished future, so the id read as never used: the resend
+    created the deleted model again."""
+    with _engine(tmp_path) as (c, path):
+        load = {"session_id": "s", "model_seq_id": 1, "path": path, "optimizer": False}
+        _done(c, c.post("/api/v1/load_weights", json=load))
+        assert c.post("/api/v1/delete_model", json={"model_id": "s:train:1"}).status_code == 200
+        assert c.post("/api/v1/cleanup_futures", json={"max_age_hours": 0}).status_code == 200
+        retry = c.post("/api/v1/load_weights", json=load)
+        assert retry.status_code == 400 and "was deleted" in retry.json()["error"], retry.text
+    assert _creates(tmp_path) == [SOURCE, "s:train:1"]

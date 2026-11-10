@@ -332,14 +332,16 @@ async def _create_via_load(
             # this resend recorded the model at the gateway again, so the row goes again
             await report_create_failed(http_request, model_id)
             return AsyncOperationResponse(request_id=first.request_id, model_id=model_id)
-        # created, then deleted: the gateway drops the row this resend recorded on the refusal
-        raise HTTPException(status_code=400, detail=f"Model {model_id} was deleted after {first.request_id} created it: "
-                                                    f"load into a new model_seq_id")
     if model_id in training_clients:
         raise HTTPException(status_code=400, detail=f"Model {model_id} already exists: create-via-load creates it")
     if taken is not None:
         raise HTTPException(status_code=400, detail=f"Model {model_id} is taken by an earlier load_weights with another "
                                                     f"body ({taken.request_id}, {taken.status}): load into a new model_seq_id")
+    # created, then deleted: the first future says so, or, once a cleanup removed it, the training run a
+    # create writes and a delete keeps. The gateway drops the row this resend recorded on the refusal.
+    if first is not None or metadata_storage.load_training_run(model_id) is not None:
+        raise HTTPException(status_code=400, detail=f"Model {model_id} was deleted after it was created: "
+                                                    f"load into a new model_seq_id")
     ref = CheckpointRef.parse(request.path)           # 400 on a malformed path
     store.require(ref, kind=CheckpointKind.WEIGHTS)   # 404 / 425 / 500 / wrong kind, before the future exists
     source = metadata_storage.load_training_run(ref.model_id)   # written at every create, kept past unload
