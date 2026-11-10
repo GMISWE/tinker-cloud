@@ -186,6 +186,21 @@ class MetadataStorage:
         self.save_training_run(training_run_id, metadata)
         return True
 
+    def restore_training_run(self, training_run_id: str, record: Dict[str, Any]) -> Path:
+        """Write back a record exactly as load_training_run returned it, without stamping a new updated_at."""
+        path = _contained(self.training_runs_dir, f"{training_run_id}.json")
+        _write_json(path, record)   # whole or not at all, like every other record write
+        return path
+
+    def delete_training_run(self, training_run_id: str) -> bool:
+        """Remove a training run's metadata file; False if there was none."""
+        path = _contained(self.training_runs_dir, f"{training_run_id}.json")
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return False
+        return True
+
     def list_training_runs(
         self,
         model_id: Optional[str] = None,
