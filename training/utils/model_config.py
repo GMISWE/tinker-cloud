@@ -60,38 +60,50 @@ async def check_model_code(backend: "TrainingBackend", base_model: str) -> None:
 def check_remote_code(repo: str) -> None:
     """Raises ValueError when `repo`, a hub id or a local directory, declares custom code (an
     `auto_map` at any depth of its config, tokenizer or processor config, whichever exist) and the
-    operator does not trust it, and when it is a hub id naming nothing this server can read. The
+    operator does not trust it, when one of those files is not readable JSON, and when it is a hub
+    id naming nothing this server can read. The
     server's own loads pass trust_remote_code only for a trusted model, but NeMo RL loads its
     tokenizer, and its vLLM worker the model's config and the model, trusting remote code whatever
     they are given, so the repository is checked before any backend sees it."""
     if remote_code_trusted(repo):
         return
-    local = Path(repo)
-    declaring = _directory_files_declaring_code(local) if local.is_dir() else _hub_id_files_declaring_code(repo)
+    # os.path.isdir, as transformers decides a local directory (utils.hub.cached_file); Path("") is the working directory
+    declaring = _directory_files_declaring_code(repo, Path(repo)) if os.path.isdir(repo) else _hub_id_files_declaring_code(repo)
     if declaring:
         raise ValueError(
             f"{repo!r} declares custom code (auto_map in {', '.join(declaring)}); the server runs a model "
             f"repository's code only for models the operator lists in TINKERCLOUD_TRUST_REMOTE_CODE_MODELS")
 
 
-def _declares_code(path: str) -> bool:
-    with open(path) as f:
-        return _has_auto_map(json.load(f))
+def _declares_code(repo: str, path: Path) -> bool:
+    """Whether `repo`'s file at `path` declares code; ValueError when it is not readable JSON."""
+    try:
+        with path.open() as f:
+            document = json.load(f)
+    except (ValueError, RecursionError) as e:   # not JSON, not text, or nested past the parser's limit
+        raise ValueError(f"{repo!r}: {path.name} is not readable JSON ({type(e).__name__}), so it cannot be "
+                         f"checked for custom code") from e
+    return _has_auto_map(document)
 
 
-def _has_auto_map(node: Any) -> bool:
+def _has_auto_map(document: Any) -> bool:
     """A non-empty `auto_map` in this JSON value or anywhere inside it: a processor config can hold
     a component's whole config, `auto_map` included, under a key of its own."""
-    if isinstance(node, dict):
-        return any((key == "auto_map" and bool(value)) or _has_auto_map(value) for key, value in node.items())
-    if isinstance(node, list):
-        return any(_has_auto_map(value) for value in node)
+    pending = [document]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, dict):
+            if node.get("auto_map"):   # absent or empty names no class to import
+                return True
+            pending.extend(node.values())
+        elif isinstance(node, list):
+            pending.extend(node)
     return False
 
 
-def _directory_files_declaring_code(directory: Path) -> List[str]:
+def _directory_files_declaring_code(repo: str, directory: Path) -> List[str]:
     return [name for name in _CODE_DECLARING_FILES
-            if (directory / name).is_file() and _declares_code(str(directory / name))]
+            if (directory / name).is_file() and _declares_code(repo, directory / name)]
 
 
 def _hub_id_files_declaring_code(repo: str) -> List[str]:
@@ -115,7 +127,7 @@ def _cached_files_declaring_code(repo: str) -> List[str]:
         snapshot = snapshot_download(repo, local_files_only=True)
     except LocalEntryNotFoundError as e:
         raise ValueError(f"{repo!r} is not in this server's hub cache, and the hub library is in offline mode") from e
-    return _directory_files_declaring_code(Path(snapshot))
+    return _directory_files_declaring_code(repo, Path(snapshot))
 
 
 def _online_files_declaring_code(repo: str) -> List[str]:
@@ -131,7 +143,7 @@ def _online_files_declaring_code(repo: str) -> List[str]:
             raise
         except EntryNotFoundError:   # the repository has no such file
             continue
-        if _declares_code(path):
+        if _declares_code(repo, Path(path)):
             declaring.append(name)
     return declaring
 

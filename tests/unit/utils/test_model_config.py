@@ -142,6 +142,26 @@ def test_an_auto_map_at_any_depth_declares_code(monkeypatch, tmp_path, doc):
         model_config.check_remote_code(repo)
 
 
+def _nested(depth):
+    return '{"k":' * depth + '{"auto_map": {"AutoProcessor": "processing_x.XProcessor"}}' + "}" * depth
+
+
+@pytest.mark.parametrize("text, refusal", [
+    (_nested(500), "auto_map in processor_config.json"),
+    (_nested(100_000), "processor_config.json is not readable JSON .RecursionError."),
+    ('{"auto_map": ', "processor_config.json is not readable JSON .JSONDecodeError."),
+], ids=["deep", "deeper_than_the_parser", "not_json"])
+def test_an_auto_map_at_any_depth_is_found_and_an_unreadable_file_is_refused_by_name(monkeypatch, tmp_path, text, refusal):
+    """500 levels parse and overflowed a recursive walk (a RecursionError, no refusal naming the
+    file); a file the parser cannot read at all cannot pass either, and the refusal names it."""
+    from tinkercloud.training.utils import model_config
+    _trusting(monkeypatch)
+    repo = _repo(tmp_path, {"config.json": CLEAN_CONFIG})
+    (tmp_path / "processor_config.json").write_text(text)
+    with pytest.raises(ValueError, match=f"^'{repo}'.*{refusal}"):
+        model_config.check_remote_code(repo)
+
+
 def test_only_a_non_empty_auto_map_at_any_depth_declares_code(monkeypatch, tmp_path):
     from tinkercloud.training.utils import model_config
     _trusting(monkeypatch)
@@ -221,6 +241,16 @@ def test_a_repository_the_server_cannot_read_is_refused(monkeypatch, error):
     _refusing(monkeypatch, hub, getattr(utils, error))   # the name is the test's parameter
     with pytest.raises(ValueError, match="'org/unreadable' names no model repository this server can read"):
         model_config.check_remote_code("org/unreadable")
+
+
+def test_an_empty_id_is_a_repository_the_server_cannot_read(monkeypatch):
+    """Path("") is the working directory, so "" was checked as that directory and passed; the
+    loaders take "" for a hub id, which it is not."""
+    _hub(monkeypatch, offline=False)
+    from tinkercloud.training.utils import model_config
+    _trusting(monkeypatch)
+    with pytest.raises(ValueError, match="'' names no model repository this server can read"):
+        model_config.check_remote_code("")
 
 
 def test_a_base_model_sampler_for_a_repository_the_server_cannot_read_is_a_400(monkeypatch):
