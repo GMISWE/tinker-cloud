@@ -1,7 +1,7 @@
 """MetadataStorage builds every path from ids that arrive in requests: each stays under its directory."""
 import pytest
 
-from tinkercloud.training.storage.metadata import MetadataStorage
+from tinkercloud.training.storage.metadata import MetadataReadError, MetadataStorage
 
 
 @pytest.fixture
@@ -31,6 +31,23 @@ def test_ids_that_stay_inside_still_work(storage):
     [rec] = storage.list_checkpoints("model_x_0123456789abcdef")
     assert rec["checkpoint_name"] == "weights--c1"
     assert storage.delete_checkpoint("model_x_0123456789abcdef", "weights--c1")
+
+
+@pytest.mark.parametrize("path, load, record", [
+    (lambda s: s.training_runs_dir / "m.json", lambda s: s.load_training_run("m"), "training run m"),
+    (lambda s: s.checkpoints_dir / "m" / "c.json", lambda s: s.load_checkpoint("m", "c"), "checkpoint m/c"),
+])
+def test_a_truncated_record_is_not_missing(storage, path, load, record):
+    record_path = path(storage)
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_text("{")
+    with pytest.raises(MetadataReadError, match=record):
+        load(storage)
+
+
+def test_a_missing_record_is_none(storage):
+    assert storage.load_training_run("m") is None
+    assert storage.load_checkpoint("m", "c") is None
 
 
 # A record is replaced whole or not at all: it is how a checkpoint is found again.
