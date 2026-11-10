@@ -2,6 +2,7 @@
 adapter interchange format. Backends receive resolved directories from the
 store and never parse a tinker:// URI themselves."""
 from .store import (
+    CheckpointDeleteFailed,
     CheckpointError,
     CheckpointFailed,
     CheckpointKind,
@@ -17,7 +18,7 @@ from .store import (
 )
 
 __all__ = [
-    "CheckpointError", "CheckpointFailed", "CheckpointKind", "CheckpointKindMismatch",
+    "CheckpointDeleteFailed", "CheckpointError", "CheckpointFailed", "CheckpointKind", "CheckpointKindMismatch",
     "CheckpointNotFound", "CheckpointPending", "CheckpointRef", "CheckpointStatus",
     "CheckpointStore", "InvalidCheckpointPath", "SaveTicket", "is_expired",
 ]

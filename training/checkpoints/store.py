@@ -84,6 +84,11 @@ class CheckpointFailed(CheckpointError):
     status_code = 500
 
 
+class CheckpointDeleteFailed(CheckpointError):
+    """The files under a checkpoint could not be removed; the record stays so the delete can be retried."""
+    status_code = 500
+
+
 class CheckpointKindMismatch(CheckpointError):
     status_code = 400
 
@@ -308,8 +313,13 @@ class CheckpointStore:
             for rec in self.records(model_id):
                 if rec["status"] != CheckpointStatus.PENDING.value and is_expired(rec, now):
                     ref = CheckpointRef.make(rec["model_id"], rec["kind"], rec["name"])
-                    if self.delete(ref):
-                        n += 1
+                    try:
+                        if self.delete(ref):
+                            n += 1
+                    except CheckpointDeleteFailed as e:
+                        # delete() has already logged the full error. A stuck checkpoint is retried every sweep, so
+                        # this is one line each time and not a traceback.
+                        logger.warning("Could not delete expired checkpoint %s (%s); the next sweep retries it", ref.uri, e)
         return n
 
     async def sweep_forever(self) -> None:
@@ -333,6 +343,8 @@ class CheckpointStore:
         if status == CheckpointStatus.PENDING.value:
             raise CheckpointPending(f"Checkpoint is still being created: {ref.uri}")
         if status == CheckpointStatus.FAILED.value:
+            if rec.get("delete_failed"):
+                raise CheckpointFailed(f"Checkpoint is partly deleted and cannot be used: {ref.uri}: {rec.get('error')}")
             raise CheckpointFailed(f"Checkpoint creation failed: {ref.uri}: {rec.get('error')}")
         if is_expired(rec):
             raise CheckpointNotFound(f"Checkpoint expired at {rec['expires_at']}: {ref.uri}")
@@ -394,15 +406,50 @@ class CheckpointStore:
 
     def delete(self, ref: CheckpointRef) -> bool:
         """Remove the record and the bytes under the root. A backend's private
-        artifacts under native/ are not touched (the store does not know them)."""
-        if self.get(ref) is None:
+        artifacts under native/ are not touched (the store does not know them).
+
+        A checkpoint still being saved is refused (CheckpointPending): the
+        backend may be writing under the root, and `complete()` would turn a
+        half-deleted record back into a completed one. The record goes only
+        after the bytes.
+
+        Any storage error on the way (the files, or the volume that holds the
+        records) is raised as CheckpointDeleteFailed, so the client is told why
+        and sweep_expired, which has no other handler, survives it. The message
+        and the stored error carry the reason without the server's path; the
+        full error is in the log. If the bytes could not be removed the record
+        stays, marked failed so nothing loads a half-deleted checkpoint. The
+        client can retry the delete, and so can the expiry sweep when the
+        checkpoint has expired."""
+        rec = self.get(ref)
+        if rec is None:
             return False
+        if rec["status"] == CheckpointStatus.PENDING.value:
+            raise CheckpointPending(f"Checkpoint is still being created, so it cannot be deleted yet: {ref.uri}")
         root = self.root(ref)
-        if root.is_dir():
-            shutil.rmtree(root, ignore_errors=True)
-        self.metadata.delete_checkpoint(ref.model_id, ref.record_key)
+        try:
+            if root.is_dir():
+                try:
+                    shutil.rmtree(root)
+                except OSError as e:
+                    self._mark_delete_failed(ref, rec, e)
+                    raise
+            self.metadata.delete_checkpoint(ref.model_id, ref.record_key)
+        except OSError as e:
+            logger.error("Could not delete checkpoint %s (%s): %s", ref.uri, root, e)
+            raise CheckpointDeleteFailed(f"Could not delete checkpoint {ref.uri}: {e.strerror or type(e).__name__}") from e
         logger.info("Deleted checkpoint %s (%s)", ref.uri, root)
         return True
+
+    def _mark_delete_failed(self, ref: CheckpointRef, rec: Dict[str, Any], e: OSError) -> None:
+        """Best effort: the volume that holds the records may be the thing that is failing, and then the caller's
+        error is the one to report. `completed_at` stays: it is when the save finished."""
+        rec.update(status=CheckpointStatus.FAILED.value, error=f"delete did not finish: {e.strerror or type(e).__name__}",
+                   delete_failed=True)
+        try:
+            self._write(ref, rec)
+        except OSError:
+            logger.exception("Could not record the failed delete of %s", ref.uri)
 
     def release_model(self, model_id: str) -> int:
         """The model is gone from the server: drop its ephemeral records.
