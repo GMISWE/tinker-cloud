@@ -337,11 +337,12 @@ async def _create_via_load(
     if taken is not None:
         raise HTTPException(status_code=400, detail=f"Model {model_id} is taken by an earlier load_weights with another "
                                                     f"body ({taken.request_id}, {taken.status}): load into a new model_seq_id")
-    # created, then deleted: the first future says so, or, once a cleanup removed it, the training run a
-    # create writes and a delete keeps. The gateway drops the row this resend recorded on the refusal.
+    # created, then gone: the first future says so, or, once a cleanup or a restart removed it, the
+    # training run a create writes and a delete or restart keeps; neither marks which of the two freed
+    # the model. The gateway drops the row this resend recorded on the refusal.
     if first is not None or metadata_storage.load_training_run(model_id) is not None:
-        raise HTTPException(status_code=400, detail=f"Model {model_id} was deleted after it was created: "
-                                                    f"load into a new model_seq_id")
+        raise HTTPException(status_code=400, detail=f"Model {model_id} was deleted, or freed by an engine restart, "
+                                                    f"after it was created: load into a new model_seq_id")
     ref = CheckpointRef.parse(request.path)           # 400 on a malformed path
     store.require(ref, kind=CheckpointKind.WEIGHTS)   # 404 / 425 / 500 / wrong kind, before the future exists
     source = metadata_storage.load_training_run(ref.model_id)   # written at every create, kept past unload
