@@ -7,6 +7,7 @@ ensuring that training state survives even after training clients are deleted.
 import json
 import logging
 import os
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -22,6 +23,27 @@ def _contained(base: Path, *parts: str) -> Path:
     if not path.startswith(root + os.sep):
         raise ValueError(f"{'/'.join(parts)!r} leaves {root}")
     return Path(path)
+
+
+def _write_json(path: Path, data: Dict[str, Any]) -> None:
+    """Replace ``path`` with ``data`` as JSON, or leave it exactly as it was.
+
+    The text goes to a temp file beside the record and is renamed over it, so a
+    reader sees the old record or the new one and never a partial one. A crash
+    between the two leaves the temp file; ``sweep_temp_files`` removes it at boot.
+    The temp name does not include the record's name, so it fits wherever the record does.
+    """
+    text = json.dumps(data, indent=2, sort_keys=True)
+    tmp = path.with_name(f".{uuid.uuid4().hex}.tmp")   # not *.json: no listing picks it up
+    try:
+        with open(tmp, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 class MetadataStorage:
@@ -59,6 +81,25 @@ class MetadataStorage:
         self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"Initialized metadata storage at {self.metadata_dir}")
 
+    def sweep_temp_files(self) -> int:
+        """Remove the temp files of writes that a crash cut short; returns the count.
+
+        Only for boot, before any writer runs. A leftover ``.<hex>.tmp`` would
+        otherwise keep its model directory from being removed, and so keep the
+        model listed with no record in it. A model directory this leaves empty is
+        removed too.
+        """
+        removed = 0
+        for directory in [self.training_runs_dir, *(d for d in self.checkpoints_dir.glob("*") if d.is_dir())]:
+            for tmp in directory.glob(".*.tmp"):
+                tmp.unlink()
+                removed += 1
+            if directory != self.training_runs_dir and not any(directory.iterdir()):
+                directory.rmdir()
+        if removed:
+            logger.warning("Removed %d temp file(s) left by an interrupted metadata write", removed)
+        return removed
+
     def save_training_run(
         self,
         training_run_id: str,
@@ -85,8 +126,7 @@ class MetadataStorage:
         # Save to JSON file
         metadata_path = _contained(self.training_runs_dir, f"{training_run_id}.json")
         try:
-            with open(metadata_path, "w") as f:
-                json.dump(metadata, f, indent=2, sort_keys=True)
+            _write_json(metadata_path, metadata)
             logger.info(f"Saved training run metadata to {metadata_path}")
             return metadata_path
         except Exception as e:
@@ -221,8 +261,7 @@ class MetadataStorage:
         # Save checkpoint metadata
         checkpoint_path = _contained(model_checkpoints_dir, f"{checkpoint_name}.json")
         try:
-            with open(checkpoint_path, "w") as f:
-                json.dump(checkpoint_data, f, indent=2, sort_keys=True)
+            _write_json(checkpoint_path, checkpoint_data)
             logger.info(f"Saved checkpoint metadata to {checkpoint_path}")
             return checkpoint_path
         except Exception as e:
