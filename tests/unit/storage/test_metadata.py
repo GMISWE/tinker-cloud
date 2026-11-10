@@ -114,3 +114,43 @@ def test_after_the_boot_sweep_a_model_that_was_listed_only_for_a_leftover_is_gon
     assert storage.list_checkpoints("m") == [] and d.exists()   # the directory exists only for the leftover
     storage.sweep_temp_files()
     assert not d.exists()
+
+
+def test_delete_training_run_removes_the_file_and_says_whether_there_was_one(storage):
+    storage.save_training_run("model_x_0123456789abcdef", {"base_model": "b"})
+    assert storage.delete_training_run("model_x_0123456789abcdef") is True
+    assert storage.load_training_run("model_x_0123456789abcdef") is None
+    assert storage.delete_training_run("model_x_0123456789abcdef") is False
+
+
+def test_delete_training_run_refuses_an_id_that_leaves_its_directory(storage):
+    with pytest.raises(ValueError, match="leaves"):
+        storage.delete_training_run("../outside")
+
+
+def test_restore_training_run_writes_the_record_back_exactly(storage):
+    storage.save_training_run("model_x_0123456789abcdef", {"base_model": "b", "last_checkpoint": "c1"})
+    before = storage.load_training_run("model_x_0123456789abcdef")
+    storage.save_training_run("model_x_0123456789abcdef", {"base_model": "other"})   # overwritten, and updated_at moves
+    storage.restore_training_run("model_x_0123456789abcdef", before)
+    assert storage.load_training_run("model_x_0123456789abcdef") == before   # including updated_at
+
+
+def test_restore_training_run_refuses_an_id_that_leaves_its_directory(storage):
+    with pytest.raises(ValueError, match="leaves"):
+        storage.restore_training_run("../outside", {})
+
+
+def test_restore_training_run_is_replaced_whole_or_not_at_all(storage, monkeypatch, tmp_path):
+    storage.save_training_run("model_x_0123456789abcdef", {"base_model": "b"})
+    before = storage.load_training_run("model_x_0123456789abcdef")
+
+    def refuse(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("tinkercloud.training.storage.metadata.os.replace", refuse)
+    with pytest.raises(OSError, match="disk full"):
+        storage.restore_training_run("model_x_0123456789abcdef", {"base_model": "other"})
+    monkeypatch.undo()
+    assert storage.load_training_run("model_x_0123456789abcdef") == before
+    assert sorted(p.name for p in (tmp_path / "meta" / "training_runs").iterdir()) == ["model_x_0123456789abcdef.json"]

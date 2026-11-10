@@ -12,7 +12,7 @@ import logging
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Set, Tuple
 
-from ..backends.base import TrainingBackend
+from ..backends.base import BackendHandle, TrainingBackend
 from ..models.requests import OptimizerConfig
 from ..checkpoints import CheckpointStore
 from ..core import routing
@@ -90,45 +90,63 @@ class ModelService:
             native_root=native_root,
             optimizer=optimizer_config.type,
         )
-        optimizer_record = optimizer_config.record()
+        # The backend holds this model's resources (a trainer, a tenant, GPU
+        # memory) from here on. Nothing else knows the handle until it is in
+        # training_clients, and the reaper and delete_model look only there, so
+        # a step that fails before that point, or after it, would strand it.
+        # Whatever raises, undo all of it once and report the original error.
+        # delete_model keeps a model's training-run record for resume, and a
+        # create under the same id (create-via-load) overwrites it. Hold the
+        # earlier record so a failed create puts it back and never deletes it.
+        earlier_record = metadata_storage.load_training_run(model_id)
+        record_written = False
+        try:
+            optimizer_record = optimizer_config.record()
 
-        # Save metadata
-        hf_path = handle.hf_path
-        training_run_id = model_id
-        metadata = {
-            "training_run_id": model_id,
-            "model_id": model_id,
-            "base_model": base_model,
-            "hf_path": hf_path,
-            "lora_config": lora_config,
-            "optimizer_config": optimizer_record,
-            "objective": handle.objective,
-            "num_labels": handle.num_labels,
-            "created_at": datetime.now().isoformat(),
-            "model_owner": "kgateway-user",
-            "is_lora": bool(lora_config and lora_config.get("rank", 0) > 0),
-            "lora_rank": lora_config.get("rank", 0) if lora_config else 0,
-            "corrupted": False,
-            "last_request_time": datetime.now().isoformat(),
-            "last_checkpoint": None,
-            "last_sampler_checkpoint": None,
-        }
-        metadata_storage.save_training_run(model_id, metadata)
-        training_runs_metadata[model_id] = metadata
+            # Save metadata
+            hf_path = handle.hf_path
+            training_run_id = model_id
+            metadata = {
+                "training_run_id": model_id,
+                "model_id": model_id,
+                "base_model": base_model,
+                "hf_path": hf_path,
+                "lora_config": lora_config,
+                "optimizer_config": optimizer_record,
+                "objective": handle.objective,
+                "num_labels": handle.num_labels,
+                "created_at": datetime.now().isoformat(),
+                "model_owner": "kgateway-user",
+                "is_lora": bool(lora_config and lora_config.get("rank", 0) > 0),
+                "lora_rank": lora_config.get("rank", 0) if lora_config else 0,
+                "corrupted": False,
+                "last_request_time": datetime.now().isoformat(),
+                "last_checkpoint": None,
+                "last_sampler_checkpoint": None,
+            }
+            record_written = True   # set first: a save that fails halfway may still have touched the file
+            metadata_storage.save_training_run(model_id, metadata)
+            training_runs_metadata[model_id] = metadata
 
-        # Backend-agnostic record; engine state stays behind the handle.
-        client_info = {
-            "backend_handle": handle,
-            "training_run_id": training_run_id,
-            "hf_path": hf_path,
-            "base_model": base_model,
-            "lora_config": lora_config,
-            "optimizer_config": optimizer_record,
-            "created_at": datetime.now().isoformat(),
-        }
-        training_clients[model_id] = client_info
-        if handle.inference_endpoints:
-            routing.table.publish(model_id, routing.InferenceEndpoint(handle.inference_endpoints))
+            # Backend-agnostic record; engine state stays behind the handle.
+            client_info = {
+                "backend_handle": handle,
+                "training_run_id": training_run_id,
+                "hf_path": hf_path,
+                "base_model": base_model,
+                "lora_config": lora_config,
+                "optimizer_config": optimizer_record,
+                "created_at": datetime.now().isoformat(),
+            }
+            training_clients[model_id] = client_info
+            if handle.inference_endpoints:
+                routing.table.publish(model_id, routing.InferenceEndpoint(handle.inference_endpoints))
+
+        except Exception:
+            await self._undo_failed_create(handle, request_id, model_id, metadata_storage,
+                                           training_clients, training_runs_metadata,
+                                           earlier_record if record_written else None, record_written)
+            raise
 
         logger.info("[%s] Model %s created successfully", request_id, model_id)
         return {
@@ -137,6 +155,44 @@ class ModelService:
             "lora_config": lora_config,
             "status": "ready",
         }
+
+    async def _undo_failed_create(
+        self,
+        handle: BackendHandle,
+        request_id: str,
+        model_id: str,
+        metadata_storage: MetadataStorage,
+        training_clients: Dict[str, Dict[str, Any]],
+        training_runs_metadata: Dict[str, Dict[str, Any]],
+        earlier_record: Optional[Dict[str, Any]],
+        record_written: bool,
+    ) -> None:
+        """Take back what a create that is about to fail had recorded, then free what the backend allocated.
+
+        Each step may or may not have run, so each tolerates its absence. If the
+        create wrote the training-run record, the record is put back as it was,
+        or removed when there was none, so list_training_runs does not list a run
+        whose create failed and a record kept for resume is not lost. A create
+        that failed before it wrote leaves the record alone. A step that fails
+        here is logged: the create's own error is the one to report. If the
+        backend cannot release the handle, no registry holds it any more, so
+        that leak is accepted and only the log shows it.
+        """
+        training_clients.pop(model_id, None)
+        training_runs_metadata.pop(model_id, None)
+        routing.table.withdraw(model_id)
+        if record_written:
+            try:
+                if earlier_record is None:
+                    metadata_storage.delete_training_run(model_id)
+                else:
+                    metadata_storage.restore_training_run(model_id, earlier_record)
+            except Exception:
+                logger.exception("[%s] Could not restore the training-run record of %s", request_id, model_id)
+        try:
+            await self.backend.delete_model(handle)
+        except Exception:
+            logger.exception("[%s] Could not release %s after its create failed", request_id, model_id)
 
     async def delete_model(
         self,
