@@ -22,6 +22,10 @@ meaningless, and an overflow would put inf/NaN into the gradients and from there
 into the optimizer state. A clamped position gets no gradient, and every row
 reports how many it had (`clamped`), so the deviation is visible in the metrics.
 
+cispo: -sum_t clip(exp(lp_t - q_t), low, high).detach() * lp_t * A_t. The clipped
+ratio is detached, so gradients flow only through lp_t; the ratio itself carries
+no gradient. CISPO defaults to a disabled lower bound and an upper cap of 4.0.
+
 compute_loss returns this shard's sum. Ranks average gradients (FSDP2), so the
 worker scales the loss by the rank count before backward; the average of the
 scaled shard gradients is then the gradient of the one sum over all rows.
@@ -96,8 +100,8 @@ def compute_loss(logits: torch.Tensor, shard: Batch,
                  clip: Optional[Tuple[float, float]] = None,
                  chunk_tokens: int = DEFAULT_CHUNK_TOKENS) -> LossOutput:
     """The shard's loss for shard.loss_fn. `clip` = (low, high) ratio bounds,
-    required for ppo and gspo and refused for the others."""
-    clipped_loss = shard.loss_fn in (LossFn.PPO, LossFn.GSPO)
+    required for ppo, cispo and gspo and refused for the others."""
+    clipped_loss = shard.loss_fn in (LossFn.PPO, LossFn.CISPO, LossFn.GSPO)
     if clipped_loss != (clip is not None):
         raise ValueError(f"clip bounds are {'required' if clipped_loss else 'not taken'} by {shard.loss_fn.value}")
     width = shard.input_ids.shape[1]
@@ -113,7 +117,7 @@ def compute_loss(logits: torch.Tensor, shard: Batch,
         active = valid
         terms = -inputs["weights"] * lp
         clamped = torch.zeros(lp.shape[0], dtype=torch.float32, device=device)
-    elif shard.loss_fn in (LossFn.IMPORTANCE_SAMPLING, LossFn.PPO):
+    elif shard.loss_fn in (LossFn.IMPORTANCE_SAMPLING, LossFn.PPO, LossFn.CISPO):
         adv = inputs["advantages"]
         active = valid & (adv != 0)
         log_ratio = torch.where(active, lp - inputs["logprobs"], zero)
@@ -123,6 +127,10 @@ def compute_loss(logits: torch.Tensor, shard: Batch,
             assert clip is not None  # checked on entry
             low, high = clip
             terms = -torch.minimum(ratio * adv, ratio.clamp(low, high) * adv)
+        elif shard.loss_fn is LossFn.CISPO:
+            assert clip is not None  # checked on entry
+            low, high = clip
+            terms = -(ratio.clamp(low, high).detach() * lp * adv)
         else:
             terms = -(ratio * adv)
     elif shard.loss_fn is LossFn.GSPO:

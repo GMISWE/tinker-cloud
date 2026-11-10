@@ -122,9 +122,12 @@ def test_shard_gradients_average_to_the_full_batch_gradient():
     assert torch.allclose(sum(grads) / ranks, want_grad, atol=1e-6)
 
 
-def test_clip_is_required_for_ppo_and_refused_elsewhere():
+def test_clip_is_required_for_clipped_losses_and_refused_elsewhere():
     b = batch_of([rl_datum([1], [2], [-1.0], [1.0])], "ppo")
     with pytest.raises(ValueError, match="required by ppo"):
+        compute_loss(Toy()(b.input_ids), b)
+    b = batch_of([rl_datum([1], [2], [-1.0], [1.0])], "cispo")
+    with pytest.raises(ValueError, match="required by cispo"):
         compute_loss(Toy()(b.input_ids), b)
     b = batch_of([ce_datum([1], [2], [1.0])], "cross_entropy")
     with pytest.raises(ValueError, match="not taken by cross_entropy"):
@@ -157,3 +160,41 @@ def test_extreme_ratio_is_clamped_counted_and_finite(loss_fn, clip):
 def test_cross_entropy_reports_no_clamping():
     b = batch_of([ce_datum([1, 2], [2, 3], [1.0, 1.0])], "cross_entropy")
     assert compute_loss(Toy()(b.input_ids), b).clamped.tolist() == [0.0]
+
+
+def test_cispo_matches_direct_formula():
+    m = Toy(seed=6)
+    tokens, targets = [1, 4, 7, 2], [4, 7, 2, 9]
+    with torch.no_grad():
+        lp_true = reference_lp(m(torch.tensor([tokens])), torch.tensor([targets]))[0]
+    q = (lp_true - 2.0).tolist()                 # ratio ~ e^2: inside the default CISPO upper cap
+    adv = [1.0, -0.5, 0.0, 2.0]
+    b = batch_of([rl_datum(tokens, targets, q, adv)], "cispo")
+    out = compute_loss(m(b.input_ids), b, clip=(0.0, 4.0))
+    r = torch.exp(lp_true - torch.tensor(q, dtype=torch.float64))
+    a = torch.tensor(adv, dtype=torch.float64)
+    clipped_r = r.clamp(0.0, 4.0).detach()
+    want = -(clipped_r * lp_true.double() * a).sum()
+    assert math.isclose(float(out.loss), float(want), rel_tol=1e-6)
+
+
+def test_cispo_ratio_is_clipped_and_detached():
+    m = Toy(seed=7)
+    tokens, targets = [1, 2], [2, 3]
+    q = [-1.0, -1.0]
+    adv = [-1.0, 1.0]
+    b = batch_of([rl_datum(tokens, targets, q, adv)], "cispo")
+    logits = m(b.input_ids)
+    out = compute_loss(logits, b, clip=(0.0, 2.0))
+
+    # Reproduce the loss manually with a detached clipped ratio.
+    lp = token_logprobs(logits, b.inputs["target_tokens"])[0]
+    ratio = torch.exp(lp - torch.tensor(q, dtype=lp.dtype, device=lp.device))
+    clipped_ratio = ratio.clamp(0.0, 2.0).detach()
+    manual_loss = -(clipped_ratio * lp * torch.tensor(adv, dtype=lp.dtype, device=lp.device)).sum()
+    assert math.isclose(float(out.loss), float(manual_loss), rel_tol=1e-6)
+
+    # If compute_loss's ratio were not detached, the gradients would differ.
+    (cispo_grad,) = torch.autograd.grad(out.loss, m.E, retain_graph=True)
+    (manual_grad,) = torch.autograd.grad(manual_loss, m.E)
+    assert torch.allclose(cispo_grad.double(), manual_grad.double(), atol=1e-6)

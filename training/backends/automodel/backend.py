@@ -420,7 +420,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         batch = await asyncio.to_thread(coalesce, payloads, n)
         shards = shard(batch, n)
         clip = (clip_thresholds(batch.loss_fn.value, dict(pk.loss_fn_config))
-                if batch.loss_fn in (LossFn.PPO, LossFn.GSPO) else None)
+                if batch.loss_fn in (LossFn.PPO, LossFn.CISPO, LossFn.GSPO) else None)
         run = group.ranks.forward_backward if pk.kind == "forward_backward" else group.ranks.forward
         try:
             outs = await run(pk.model_id, shards, clip)

@@ -288,7 +288,7 @@ def test_pass_results_are_split_per_request():
 
 
 def test_supported_losses_are_the_wire_strings():
-    assert AutomodelBackend.SUPPORTED_LOSS_FNS == {"cross_entropy", "importance_sampling", "ppo", "gspo"}
+    assert AutomodelBackend.SUPPORTED_LOSS_FNS == {"cross_entropy", "importance_sampling", "ppo", "cispo", "gspo"}
 
 
 def test_nonfinite_step_fails_the_request_and_keeps_the_group(tmp_path):

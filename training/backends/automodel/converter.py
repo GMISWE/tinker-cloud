@@ -31,6 +31,7 @@ class LossFn(str, Enum):
     CROSS_ENTROPY = "cross_entropy"
     IMPORTANCE_SAMPLING = "importance_sampling"
     PPO = "ppo"
+    CISPO = "cispo"
     GSPO = "gspo"
 
 
@@ -40,6 +41,7 @@ LOSS_INPUTS: Dict[LossFn, Tuple[str, ...]] = {
     LossFn.CROSS_ENTROPY: ("target_tokens", "weights"),
     LossFn.IMPORTANCE_SAMPLING: ("target_tokens", "logprobs", "advantages"),
     LossFn.PPO: ("target_tokens", "logprobs", "advantages"),
+    LossFn.CISPO: ("target_tokens", "logprobs", "advantages"),
     LossFn.GSPO: ("target_tokens", "logprobs", "advantages", "sequence_ratio_mask"),
 }
 

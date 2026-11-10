@@ -25,9 +25,13 @@ LOSS_FNS: Dict[str, FrozenSet[str]] = {
 # (the SDK's loss_fn_config_v2 can carry strings; every current key is numeric).
 TEXT_KEYS: Dict[str, FrozenSet[str]] = {}
 
-# Tinker's documented PPO/CISPO defaults (epsilon 0.2 either side).
+# Tinker's documented PPO defaults (epsilon 0.2 either side).
 DEFAULT_CLIP_LOW = 0.8
 DEFAULT_CLIP_HIGH = 1.2
+# Tinker's documented CISPO defaults: lower bound disabled, upper bound capped at 4.0
+# (tinker-docs /tinker/losses/cispo/).
+CISPO_CLIP_LOW = 0.0
+CISPO_CLIP_HIGH = 4.0
 # Tinker's gspo defaults, the GSPO paper's range (tinker-docs /tinker/losses/gspo/).
 GSPO_CLIP_LOW = 1 - 3e-4
 GSPO_CLIP_HIGH = 1 + 4e-4
@@ -72,7 +76,12 @@ def validate(loss_fn: str, loss_fn_config: Optional[Mapping[str, Any]] = None) -
 
 def clip_thresholds(loss_fn: str, loss_fn_config: Optional[Mapping[str, Any]]) -> tuple:
     """(low, high) for a clipped loss, with Tinker's per-loss defaults filled in."""
-    low, high = (GSPO_CLIP_LOW, GSPO_CLIP_HIGH) if loss_fn == "gspo" else (DEFAULT_CLIP_LOW, DEFAULT_CLIP_HIGH)
+    if loss_fn == "gspo":
+        low, high = GSPO_CLIP_LOW, GSPO_CLIP_HIGH
+    elif loss_fn == "cispo":
+        low, high = CISPO_CLIP_LOW, CISPO_CLIP_HIGH
+    else:
+        low, high = DEFAULT_CLIP_LOW, DEFAULT_CLIP_HIGH
     cfg = loss_fn_config or {}
     # an absent threshold is Tinker's documented default for the loss
     return (float(cfg.get("clip_low_threshold", low)), float(cfg.get("clip_high_threshold", high)))
