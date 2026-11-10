@@ -70,7 +70,7 @@ class ModelReaper:
         """Cancel every free in flight, wait for them to end, then free every
         model in `model_ids` concurrently and wait for all of them. A free that
         raised, in either phase, is reported after every free has run."""
-        inflight = [t for t in self._frees.values() if not t.done()]
+        inflight = [self._frees[m] for m in self._frees if self._freeing(m)]
         for task in inflight:
             task.cancel()
         if inflight:
