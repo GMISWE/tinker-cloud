@@ -58,12 +58,27 @@ def test_save_options(service_client):
     assert tc.save_state("latest", overwrite=True, user_metadata={"run": "second"}).result().path == path
     saved = next(c for c in rest.list_checkpoints(tc.model_id).result().checkpoints if c.tinker_path == path)
     assert saved.user_metadata == {"run": "second"} and saved.expires_at is None
+    tc.save_state("latest", overwrite=True).result()
+    saved = next(c for c in rest.list_checkpoints(tc.model_id).result().checkpoints if c.tinker_path == path)
+    assert saved.user_metadata is None
 
     sampler = tc.save_weights_for_sampler(
         "eval", ttl_seconds=3600, user_metadata={"split": "test"}).result().path
     saved = next(c for c in rest.list_checkpoints(tc.model_id).result().checkpoints if c.tinker_path == sampler)
     assert saved.user_metadata == {"split": "test"}
     assert 3500 < saved.expires_at.timestamp() - time.time() <= 3600
+
+
+def test_save_ttl_bounds(service_client, server):
+    tc = service_client.create_lora_training_client(base_model="fake/tiny", rank=2)
+    routes = (
+        ("/api/v1/save_weights", {"model_id": tc.model_id, "path": "training"}),
+        ("/api/v1/save_weights_for_sampler", {"model_id": tc.model_id, "path": "sampler"}),
+    )
+    for route, body in routes:
+        for ttl_seconds in (3599, 10 * 365 * 24 * 3600 + 1):
+            r = server.post(route, {**body, "ttl_seconds": ttl_seconds})
+            assert r.status_code == 422, (route, ttl_seconds, r.text)
 
 
 def test_load_weights_first_request_rule(service_client, server):

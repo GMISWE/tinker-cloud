@@ -48,3 +48,12 @@ def test_an_inflight_save_with_a_path_is_400(service_client, server):
     assert "inflight" in r.text
     r = server.post("/api/v1/save_weights_for_sampler", {"model_id": tc.model_id, "kind": "rolling"})
     assert r.status_code == 422, r.text
+
+
+def test_an_ephemeral_save_with_ttl_is_400(service_client, server):
+    tc = service_client.create_lora_training_client(base_model="fake/tiny", rank=4)
+    for kind in ("snapshot", "inflight"):
+        r = server.post("/api/v1/save_weights_for_sampler", {
+            "model_id": tc.model_id, "sampling_session_seq_id": 10, "kind": kind, "ttl_seconds": 3600,
+        })
+        assert r.status_code == 400 and "ttl_seconds" in r.text, r.text
