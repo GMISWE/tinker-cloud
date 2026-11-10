@@ -9,16 +9,22 @@ weight_decay) + optimizer_zero_grad. forward_backward here does real GPU
 work and returns real logprobs; apply_optimizer_step applies AdamParams and
 steps once.
 
-M2 adds rollout: TinkerActorRolloutRefWorker (actor_rollout role) boots
-colocated vLLM server replicas (LLMServerManager) in hybrid timeshare —
-replicas sleep during training ops and wake with a naive weight sync
-(CheckpointEngineManager) for sampling. update_inference_weights is lazy:
-versions are tracked on the handle and the sync happens on the next
-sample/prepare_for_generation, so pure-training runs never pay for it.
-Narrative: specs/006-verl-backend/design.md.
+Rollout: every model is a TinkerActorRolloutRefWorker group (actor_rollout
+role). Its vLLM server replicas (LLMServerManager) are built at the model's
+first sample, in hybrid timeshare: replicas sleep during training ops and
+wake with a naive weight sync (CheckpointEngineManager) for sampling. A model
+that never samples (a forward-only teacher) never builds one.
+update_inference_weights is lazy: versions are tracked on the handle and the
+sync happens on the next sample/prepare_for_generation, so pure-training runs
+never pay for it.
+
+GPUs: the server's models share one placement group of whole GPUs
+(_SharedGpus), verl's own colocation; a worker takes 1/models_per_gpu of its
+GPU, so several models are resident on the same devices.
 """
 import asyncio
 import logging
+import threading
 from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -30,6 +36,8 @@ from ..base import BackendError, BackendHandle, SampleRequestError, TrainingBack
 from ...utils.model_config import read_raw_hf_config
 from ..objectives import classification_spec
 from .config import VerlConfig
+from .converter import refuse_nk_targets_outside_cross_entropy
+from .losses import padded_logprobs
 from ...models.requests import AdamParams, Datum, OptimParams
 from ...checkpoints.interchange import (
     HF_ADAPTER_DIRNAME,
@@ -38,6 +46,9 @@ from ...checkpoints.interchange import (
 )
 
 logger = logging.getLogger(__name__)
+
+# vLLM's max_logprobs: the top-k it computes per position (handle.max_topk_logprobs).
+VLLM_MAX_LOGPROBS = 20
 
 
 def _set_event() -> asyncio.Event:
@@ -50,14 +61,13 @@ def _set_event() -> asyncio.Event:
 class VerlHandle(BackendHandle):
     """veRL-specific runtime state."""
 
-    worker_group: Any = None          # RayWorkerGroup over Tinker*Worker
-    resource_pool: Any = None         # RayResourcePool
+    worker_group: Any = None          # RayWorkerGroup over TinkerActorRolloutRefWorker
     config: Dict = field(default_factory=dict)
+    trainer_config: Any = None        # the composed verl trainer config the workers and the sampler read
     dp_size: int = 1
     loss_fn_name: str = ""            # currently installed loss fn on workers
     created_at: str = ""
-    # M2 rollout state (hybrid timeshare)
-    has_rollout: bool = False
+    # rollout state (hybrid timeshare); the three managers are None until the first sample
     llm_manager: Any = None           # LLMServerManager (replicas + balancer)
     llm_client: Any = None            # LLMServerClient (token-in-token-out)
     ckpt_manager: Any = None          # CheckpointEngineManager (sleep/sync)
@@ -71,12 +81,67 @@ class VerlHandle(BackendHandle):
     _samplers_drained: asyncio.Event = field(default_factory=_set_event)
 
 
+class _SharedGpus:
+    """The placement group every model's workers live in: one bundle per GPU,
+    up to `models_per_gpu` workers per bundle. Built by the first model,
+    removed with the last. Both methods block on Ray: call them off the event loop."""
+
+    def __init__(self, models_per_gpu: int):
+        self.models_per_gpu = models_per_gpu
+        self.pool: Any = None            # RayResourcePool, None while no model exists
+        self.model_ids: set = set()
+        self._lock = threading.Lock()
+
+    def acquire(self, model_id: str, num_gpus: int):
+        """The pool for one more model of `num_gpus` workers, its placement group ready.
+
+        Raises:
+            BackendError: the GPUs hold models_per_gpu models already, or the
+                model's GPU count is not the pool's.
+        """
+        from verl.single_controller.ray import RayResourcePool
+
+        with self._lock:
+            if len(self.model_ids) >= self.models_per_gpu:
+                raise BackendError(
+                    f"the GPUs hold {len(self.model_ids)} models, the limit TINKERCLOUD_VERL_MODELS_PER_GPU sets "
+                    f"({self.models_per_gpu}): {', '.join(sorted(self.model_ids))}",
+                    backend="verl", operation="create_model",
+                )
+            if self.pool is None:
+                pool = RayResourcePool(
+                    process_on_nodes=[num_gpus], max_colocate_count=self.models_per_gpu, name_prefix="verl_shared_",
+                )
+                pool.get_placement_groups()
+                self.pool = pool
+            elif self.pool.store[0] != num_gpus:
+                raise BackendError(
+                    f"model {model_id} asks for {num_gpus} GPUs; this server's models share {self.pool.store[0]}",
+                    backend="verl", operation="create_model",
+                )
+            self.model_ids.add(model_id)
+            return self.pool
+
+    def release(self, model_id: str) -> None:
+        """Give up `model_id`'s share; the placement group goes with the last model."""
+        import ray
+
+        with self._lock:
+            self.model_ids.remove(model_id)
+            if self.model_ids:
+                return
+            for pg in self.pool.pgs:
+                ray.util.remove_placement_group(pg)
+            self.pool = None
+
+
 class VerlBackend(TrainingBackend[VerlHandle]):
     config: VerlConfig
 
     SUPPORTED_LOSS_FNS = frozenset({"cross_entropy", "importance_sampling", "ppo"})  # losses.LOSS_FNS
 
     SUPPORTED_OPTIMIZERS = frozenset({"adamw"})   # no Muon on this path
+    TARGET_TOKENS_MAX_RANK = 2                    # cross_entropy on [N, K] targets
     """veRL backend using upstream TinkerTrainingWorker split primitives."""
 
     def __init__(self, overrides: Optional[Dict[str, Any]] = None):
@@ -84,6 +149,10 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         self.config = VerlConfig.from_env()
         self._converter = None
         self._builder = None
+        self._gpus = _SharedGpus(self.config.models_per_gpu)
+        # vLLM server actors are Ray-named by replica rank alone, so one model per Ray
+        # cluster can own a sampler: the first to sample or to be prepared for it, until deleted.
+        self._sampler_model_id: Optional[str] = None
 
     @property
     def converter(self):
@@ -140,33 +209,25 @@ class VerlBackend(TrainingBackend[VerlHandle]):
             # native path. verl is UNGATED; see specs/025.
             adapter_dir = None
 
-            enable_rollout = not self.config.debug_train_only
-            boot = await asyncio.to_thread(
-                _boot_worker_group, cfg, model_id, enable_rollout,
-            )
+            trainer_config = await asyncio.to_thread(_compose_actor_rollout_config, cfg)
+            worker_group = await asyncio.to_thread(self._boot, trainer_config, model_id, num_gpus)
             handle = VerlHandle(
                 model_id=model_id,
                 backend_type="verl",
                 # vLLM max_model_len == rollout prompt_length + response_length
                 context_length=int(cfg["rollout"]["prompt_length"]) + int(cfg["rollout"]["response_length"]),
-                worker_group=boot["worker_group"],
-                resource_pool=boot["resource_pool"],
+                max_topk_logprobs=VLLM_MAX_LOGPROBS,
+                worker_group=worker_group,
                 config=cfg,
+                trainer_config=trainer_config,
                 hf_path=cfg["hf_path"],
-                dp_size=boot["dp_size"],
+                dp_size=max(num_gpus // max(cfg["engine"]["ulysses_sequence_parallel_size"], 1), 1),
                 created_at=datetime.now().isoformat(),
-                has_rollout=enable_rollout,
-                llm_manager=boot.get("llm_manager"),
-                llm_client=boot.get("llm_client"),
-                ckpt_manager=boot.get("ckpt_manager"),
-                # boot does one naive sync so vLLM never serves dummy
-                # weights, then sleeps the replicas for training
-                rollout_synced_version=0 if enable_rollout else -1,
                 lora_rank=int(cfg["model"]["lora_rank"] or 0),
             )
             logger.info(
-                "[%s] verl model %s created (dp=%d, rollout=%s, adapter=%s)",
-                request_id, model_id, handle.dp_size, enable_rollout, adapter_dir,
+                "[%s] verl model %s created (dp=%d, adapter=%s)",
+                request_id, model_id, handle.dp_size, adapter_dir,
             )
             return handle
         except BackendError:
@@ -190,7 +251,7 @@ class VerlBackend(TrainingBackend[VerlHandle]):
                 await asyncio.to_thread(self._ensure_loss_fn, handle, loss_fn)
                 td = await asyncio.to_thread(self._to_tensordict, handle, data, loss_fn)
                 out = await asyncio.to_thread(_wg_call, handle.worker_group.forward_backward, td)
-                logprobs = await asyncio.to_thread(self._model_output_logprobs, out, td)
+                logprobs = await asyncio.to_thread(padded_logprobs, out, td)
                 loss_fn_outputs = self.converter.extract_logprobs(logprobs, data)
                 metrics = _scalar_metrics(out)
                 return {
@@ -241,6 +302,10 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         loss_fn: str,
         loss_fn_config: Optional[Dict[str, float]] = None,
     ) -> Dict[str, Any]:
+        try:
+            refuse_nk_targets_outside_cross_entropy(data, loss_fn)
+        except ValueError as e:
+            raise BackendError(str(e), backend="verl", operation="forward", original_error=e) from e
         logprobs = await self.get_logprobs(handle, data)
         return {"loss_fn_output_type": loss_fn, "loss_fn_outputs": logprobs, "metrics": {}}
 
@@ -253,13 +318,12 @@ class VerlBackend(TrainingBackend[VerlHandle]):
             try:
                 await self._quiesce_samplers(handle)
                 await asyncio.to_thread(self._ensure_training_ready, handle)
+                # the infer path runs the loss too: the engine's logits hook, which
+                # [N, K] targets need, is the installed loss function
+                await asyncio.to_thread(self._ensure_loss_fn, handle, "cross_entropy")
                 td = await asyncio.to_thread(self._to_tensordict, handle, data, "cross_entropy", True)
-                from verl.utils import tensordict_utils as tu
-                tu.assign_non_tensor(td, compute_loss=False)
-                # rollout worker exposes the actor's infer path as compute_log_prob
-                infer = getattr(handle.worker_group, "infer_batch", None) or handle.worker_group.compute_log_prob
-                out = await asyncio.to_thread(_wg_call, infer, td)
-                logprobs = await asyncio.to_thread(self._model_output_logprobs, out, td)
+                out = await asyncio.to_thread(_wg_call, handle.worker_group.compute_log_prob, td)
+                logprobs = await asyncio.to_thread(padded_logprobs, out, td)
                 return self.converter.extract_logprobs(logprobs, data)
             except BackendError:
                 raise
@@ -272,11 +336,10 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         # Lazy: weight_version already advanced at optim_step; the actual
         # vLLM sync happens on the next sample/prepare_for_generation
         # (version-gated), so pure-training runs never pay wake/sync cost.
-        if handle.has_rollout:
-            logger.debug(
-                "verl update_inference_weights deferred (v%d, synced v%d)",
-                handle.weight_version, handle.rollout_synced_version,
-            )
+        logger.debug(
+            "verl update_inference_weights deferred (v%d, synced v%d)",
+            handle.weight_version, handle.rollout_synced_version,
+        )
         return None
 
     async def save_checkpoint(
@@ -329,34 +392,23 @@ class VerlBackend(TrainingBackend[VerlHandle]):
                 raise BackendError(str(e), backend="verl", operation="load_checkpoint", original_error=e) from e
 
     async def delete_model(self, handle: VerlHandle) -> None:
-        try:
-            import ray
-            # rollout server actors first (they hold engine refs into workers)
-            for replica in (handle.llm_manager.get_replicas() if handle.llm_manager else []):
-                for server in getattr(replica, "servers", []) or []:
-                    try:
-                        ray.kill(server)
-                    except Exception:
-                        logger.warning("delete_model: rollout server %r not killed", server, exc_info=True)
-            handle.llm_manager = None
-            handle.llm_client = None
-            handle.ckpt_manager = None
-            for w in getattr(handle.worker_group, "workers", []) or []:
-                try:
-                    ray.kill(w)
-                except Exception:
-                    logger.warning("delete_model: worker %r not killed", w, exc_info=True)
-            if handle.resource_pool is not None:
-                pgs = getattr(handle.resource_pool, "pgs", None) or []
-                for pg in pgs:
-                    try:
-                        ray.util.remove_placement_group(pg)
-                    except Exception:
-                        logger.warning("delete_model: placement group %r not removed", pg, exc_info=True)
-            handle.worker_group = None
-            handle.resource_pool = None
-        except Exception as e:
-            raise BackendError(str(e), backend="verl", operation="delete_model", original_error=e) from e
+        # under the lock: a first sample may be building the sampler, and its actors must exist to be killed
+        async with handle._lock:
+            try:
+                await self._quiesce_samplers(handle)
+                if self._sampler_model_id == handle.model_id:
+                    # rollout server actors first (they hold engine refs into workers)
+                    await asyncio.to_thread(_kill_named_actors, VLLM_SERVER_ACTORS)
+                    self._sampler_model_id = None
+                handle.llm_manager = None
+                handle.llm_client = None
+                handle.ckpt_manager = None
+                handle.rollout_awake = False
+                await asyncio.to_thread(_kill_named_actors, _worker_actors(handle.model_id))
+                handle.worker_group = None
+                await asyncio.to_thread(self._gpus.release, handle.model_id)
+            except Exception as e:
+                raise BackendError(str(e), backend="verl", operation="delete_model", original_error=e) from e
 
     async def sample(
         self,
@@ -370,23 +422,23 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         topk_sample_logprobs: int = 0,
         topk_prompt_logprobs: int = 0,
     ) -> Dict[str, Any]:
-        if not handle.has_rollout:
-            raise UnsupportedFeatureError(
-                "sample", backend="verl",
-                suggestion="model was created debug_train_only; recreate with rollout enabled",
-            )
-        for name, k in (("topk_sample_logprobs", topk_sample_logprobs),
-                        ("topk_prompt_logprobs", topk_prompt_logprobs)):
-            if k > 0:  # the verl sample path carries only the sampled token's logprob
-                raise SampleRequestError(f"{name} is not supported on the verl backend", backend="verl")
-        # Hybrid timeshare: generation must not overlap training ops on the
-        # same GPUs. Register as an active sampler under the FIFO lock (which
+        if topk_prompt_logprobs > 0:  # the verl sample path scores sampled positions only
+            raise SampleRequestError("topk_prompt_logprobs is not supported on the verl backend", backend="verl")
+        vllm_sp = _to_vllm_sampling_params(sampling_params)
+        if topk_sample_logprobs > 0:
+            if vllm_sp["temperature"] == 0:  # verl's server refuses a top-k head on a greedy request
+                raise SampleRequestError(
+                    "topk_sample_logprobs needs temperature > 0 on the verl backend", backend="verl")
+            vllm_sp["topk_log_probs"] = topk_sample_logprobs
+        # Hybrid timeshare: generation must not overlap this model's training
+        # ops. Register as an active sampler under the FIFO lock (which
         # serializes the wake/weight-sync), then generate WITHOUT the lock so
-        # concurrent sample requests batch inside vLLM; training ops quiesce
-        # samplers via _quiesce_samplers before touching the GPUs.
+        # concurrent sample requests batch inside vLLM; the model's training ops
+        # quiesce samplers via _quiesce_samplers first. Another model's passes
+        # (a teacher's forward) run beside the awake sampler on the same GPUs.
         async with handle._lock:
             try:
-                await asyncio.to_thread(self._ensure_rollout_ready, handle)
+                await self._ready_sampler(handle)
 
                 if pinned_version is not None and pinned_version != handle.weight_version:
                     # vLLM serves the live (base+adapter) route; a pinned
@@ -410,7 +462,6 @@ class VerlBackend(TrainingBackend[VerlHandle]):
                 raise BackendError(str(e), backend="verl", operation="sample", original_error=e) from e
         try:
             try:
-                vllm_sp = _to_vllm_sampling_params(sampling_params)
                 max_tokens = vllm_sp.get("max_tokens")
 
                 async def _one(i: int):
@@ -440,12 +491,18 @@ class VerlBackend(TrainingBackend[VerlHandle]):
                     )
                 n_tok = len(out.token_ids)
                 stop_reason = "length" if (max_tokens is not None and n_tok >= max_tokens) else "stop"
-                sequences.append({
+                sequence = {
                     "tokens": list(out.token_ids),
                     "logprobs": list(out.log_probs) if out.log_probs is not None else None,
                     "text": None,
                     "stop_reason": stop_reason,
-                })
+                }
+                if topk_sample_logprobs > 0:
+                    # verl's server returns the head best first, [T, k] ids and logprobs
+                    ids = out.extra_fields["response_topk_ids"].tolist()
+                    lps = out.extra_fields["response_topk_log_probs"].tolist()
+                    sequence["topk_sample_logprobs"] = [list(zip(i, lp)) for i, lp in zip(ids, lps)]
+                sequences.append(sequence)
             return {"sequences": sequences, "prompt_logprobs": None}
         except (BackendError, UnsupportedFeatureError):
             raise
@@ -453,20 +510,39 @@ class VerlBackend(TrainingBackend[VerlHandle]):
             raise BackendError(str(e), backend="verl", operation="sample", original_error=e) from e
 
     async def prepare_for_generation(self, handle: VerlHandle) -> None:
-        if not handle.has_rollout:
-            raise UnsupportedFeatureError(
-                "prepare_for_generation", backend="verl",
-                suggestion="model was created debug_train_only; recreate with rollout enabled",
-            )
         async with handle._lock:
             try:
-                await asyncio.to_thread(self._ensure_rollout_ready, handle)
+                await self._ready_sampler(handle)
+            except BackendError:
+                raise
             except Exception as e:
                 raise BackendError(
                     str(e), backend="verl", operation="prepare_for_generation", original_error=e,
                 ) from e
 
     # -------------------------------------------------------------- helpers
+
+    def _boot(self, trainer_config, model_id: str, num_gpus: int):
+        """One model's TinkerActorRolloutRefWorker group in the shared GPUs, its engines
+        initialized. Blocking. A failed boot leaves no actor and no share behind."""
+        import ray
+        from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
+        from verl.workers.engine_workers_tinker import TinkerActorRolloutRefWorker
+
+        pool = self._gpus.acquire(model_id, num_gpus)
+        try:
+            ray_cls = RayClassWithInitArgs(
+                cls=ray.remote(TinkerActorRolloutRefWorker),
+                config=trainer_config.actor_rollout_ref, role="actor_rollout",
+            )
+            worker_group = RayWorkerGroup(
+                resource_pool=pool, ray_cls_with_init=ray_cls, name_prefix=_worker_actors(model_id))
+            worker_group.init_model()
+        except BaseException:
+            _kill_named_actors(_worker_actors(model_id))
+            self._gpus.release(model_id)
+            raise
+        return worker_group
 
     @staticmethod
     async def _quiesce_samplers(h: VerlHandle) -> None:
@@ -475,16 +551,39 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         while h._active_samplers:
             await h._samplers_drained.wait()
 
+    async def _ready_sampler(self, h: VerlHandle) -> None:
+        """Wake `h`'s sampler at its current weights. Call with h._lock HELD.
+
+        Raises:
+            SampleRequestError: another model holds the server's one sampler
+                (it does until it is deleted); nothing is built for `h`.
+        """
+        # no await between the check and the claim
+        if self._sampler_model_id not in (None, h.model_id):
+            raise SampleRequestError(
+                f"the verl backend serves one sampling model per server and {self._sampler_model_id} holds "
+                f"the sampler; {h.model_id} serves forward and training only", backend="verl")
+        self._sampler_model_id = h.model_id
+        try:
+            await asyncio.to_thread(self._ensure_rollout_ready, h)
+        except BaseException:
+            if h.llm_manager is None:
+                # a failed build can leave server actors behind (verl names them, then launches);
+                # the claim goes only after they do
+                await asyncio.to_thread(_kill_named_actors, VLLM_SERVER_ACTORS)
+                self._sampler_model_id = None
+            raise
+
     @staticmethod
     def _ensure_training_ready(h: VerlHandle) -> None:
         """Hybrid timeshare: sleep vLLM replicas before training ops."""
-        if h.has_rollout and h.rollout_awake:
+        if h.rollout_awake:
             h.ckpt_manager.sleep_replicas()
             h.rollout_awake = False
 
     @staticmethod
     def _ensure_rollout_ready(h: VerlHandle) -> None:
-        """Wake vLLM replicas with current weights.
+        """Wake vLLM replicas with current weights, building them at the model's first sample.
 
         update_weights(naive) resumes replica weights, streams the trainer's
         params (LoRA: base once, then adapter), and resumes kv_cache — correct
@@ -493,6 +592,23 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         """
         if h.rollout_awake and h.rollout_synced_version == h.weight_version:
             return
+        if h.llm_manager is None:
+            from verl.checkpoint_engine import CheckpointEngineManager
+            from verl.utils import omega_conf_to_dataclass
+            from verl.workers.rollout.llm_server import LLMServerManager
+
+            full = h.trainer_config
+            llm_manager = LLMServerManager.create(config=full, worker_group=h.worker_group)
+            ckpt_manager = CheckpointEngineManager(
+                config=omega_conf_to_dataclass(full.actor_rollout_ref.rollout.checkpoint_engine),
+                actor_wg=h.worker_group,
+                replicas=llm_manager.get_replicas(),
+            )
+            # the replicas load dummy weights (load_format) and must take the trainer's before
+            # they serve; verl's update_weights wants them asleep first (its docstring)
+            ckpt_manager.sleep_replicas()
+            # all three at once: a half-built sampler is rebuilt from nothing
+            h.llm_manager, h.llm_client, h.ckpt_manager = llm_manager, llm_manager.get_client(), ckpt_manager
         h.ckpt_manager.update_weights(global_steps=h.weight_version)
         h.rollout_awake = True
         h.rollout_synced_version = h.weight_version
@@ -536,24 +652,24 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         # temperature: engine divides logits by it (logprob provenance);
         # training-side logprobs are untempered in the Tinker contract
         tu.assign_non_tensor(td, global_token_num=global_token_num, temperature=1.0)
+        if "target_tokens" in padded:
+            if h.config["engine"]["ulysses_sequence_parallel_size"] > 1:
+                # each rank's logits then cover a slice of the sequence; the hook's targets do not follow it
+                raise UnsupportedFeatureError("[N, K] target_tokens with sequence parallelism", backend="verl")
+            # the engine hands the full logits to the loss function (losses.target_logprob_columns)
+            # and computes no single-target logprobs of its own
+            tu.assign_non_tensor(td, distillation_use_topk=True, distillation_only=True)
         return td
 
-    @staticmethod
-    def _model_output_logprobs(out, td) -> torch.Tensor:
-        """Gathered worker output -> padded [B, Rmax] logprobs."""
-        from verl.utils import tensordict_utils as tu
-        from verl.workers.utils.padding import no_padding_2_padding
 
-        lp = tu.get(out, "log_probs")
-        if lp is None:
-            raise BackendError("worker returned no log_probs", backend="verl", operation="forward_backward")
-        return no_padding_2_padding(lp, td)
-
-
-def _loss_dispatch(config=None, model_output=None, data=None, dp_group=None, loss_name: str = "cross_entropy"):
-    """Module-level picklable shim: resolves the loss by name inside the worker."""
-    from .losses import get_loss_fn
-    return get_loss_fn(loss_name)(config, model_output, data, dp_group)
+def _loss_dispatch(config=None, model_output=None, data=None, dp_group=None, student_logits=None,
+                   loss_name: str = "cross_entropy"):
+    """Module-level picklable shim: resolves the loss by name inside the worker.
+    The engine also calls it as its logits hook, with `student_logits` and `data` only."""
+    from . import losses
+    if student_logits is not None:
+        return losses.target_logprob_columns(student_logits, data)
+    return losses.get_loss_fn(loss_name)(config, model_output, data, dp_group)
 
 
 def _wg_call(method, td):
@@ -711,6 +827,7 @@ def _compose_actor_rollout_config(cfg: Dict[str, Any]):
         f"actor_rollout_ref.rollout.log_prob_use_dynamic_bsz={engine['use_dynamic_bsz']}",
         f"actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu={engine['infer_micro_batch_size_per_gpu']}",
         f"actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu={engine['infer_max_token_len_per_gpu']}",
+        f"+actor_rollout_ref.rollout.engine_kwargs.vllm.max_logprobs={VLLM_MAX_LOGPROBS}",
         f"trainer.n_gpus_per_node={num_gpus}",
         "trainer.nnodes=1",
     ]
@@ -721,124 +838,20 @@ def _compose_actor_rollout_config(cfg: Dict[str, Any]):
     return full
 
 
-def _boot_worker_group(cfg: Dict[str, Any], model_id: str, enable_rollout: bool = False):
-    """Boot the verl worker group.
+# verl names its vLLM server actors `vllm_server_<replica>_<node>`; one model owns them all (VerlBackend._sampler_model_id)
+VLLM_SERVER_ACTORS = "vllm_server_"
 
-    enable_rollout=False: TinkerTrainingWorker (M1 training-only path).
-    enable_rollout=True: TinkerActorRolloutRefWorker + colocated vLLM server
-    replicas; one naive weight sync at boot (load_format=dummy must never be
-    served), then replicas sleep until the first sample.
-    """
+
+def _worker_actors(model_id: str) -> str:
+    """The name prefix of a model's worker actors."""
+    return f"verl_{model_id}_"
+
+
+def _kill_named_actors(prefix: str) -> None:
+    """Kill every live named actor whose name starts with `prefix`. By name, not by
+    handle: a failed build raises before it returns the handles of what it started."""
     import ray
-    from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 
-    if not ray.is_initialized():
-        ray.init(address="auto", ignore_reinit_error=True)
-
-    if enable_rollout:
-        from verl.checkpoint_engine import CheckpointEngineManager
-        from verl.utils import omega_conf_to_dataclass
-        from verl.workers.engine_workers_tinker import TinkerActorRolloutRefWorker
-        from verl.workers.rollout.llm_server import LLMServerManager
-
-        full = _compose_actor_rollout_config(cfg)
-        ray_cls = RayClassWithInitArgs(
-            cls=ray.remote(TinkerActorRolloutRefWorker),
-            config=full.actor_rollout_ref, role="actor_rollout",
-        )
-        resource_pool = RayResourcePool(
-            process_on_nodes=[cfg["num_gpus"]], name_prefix=f"verl_{model_id}",
-        )
-        wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls)
-        try:
-            wg.init_model()
-
-            # KNOWN LIMIT: vLLM server actors are Ray-named per replica rank
-            # (manager doesn't thread name_suffix), so at most ONE rollout-enabled
-            # verl model per Ray cluster; a second create_model fails loudly on
-            # the actor name. delete_model frees the names.
-            llm_manager = LLMServerManager.create(config=full, worker_group=wg)
-            ckpt_manager = CheckpointEngineManager(
-                config=omega_conf_to_dataclass(full.actor_rollout_ref.rollout.checkpoint_engine),
-                actor_wg=wg,
-                replicas=llm_manager.get_replicas(),
-            )
-            # canonical boot order (agent-loop harness): sleep -> sync -> sleep;
-            # vLLM never serves dummy weights, training starts with GPUs free
-            ckpt_manager.sleep_replicas()
-            ckpt_manager.update_weights(global_steps=0)
-            ckpt_manager.sleep_replicas()
-        except Exception:
-            # boot failure must not leak live actors/PG: the next create_model
-            # would hang forever on placement-group resources (runbook footgun 2)
-            for w in getattr(wg, "workers", []) or []:
-                try:
-                    ray.kill(w)
-                except Exception:
-                    logger.warning("boot failure teardown: worker %r not killed", w, exc_info=True)
-            for pg in getattr(resource_pool, "pgs", None) or []:
-                try:
-                    ray.util.remove_placement_group(pg)
-                except Exception:
-                    logger.warning("boot failure teardown: placement group %r not removed", pg, exc_info=True)
-            raise
-
-        sp = cfg["engine"]["ulysses_sequence_parallel_size"]
-        dp_size = max(cfg["num_gpus"] // max(sp, 1), 1)
-        return {
-            "worker_group": wg,
-            "resource_pool": resource_pool,
-            "dp_size": dp_size,
-            "llm_manager": llm_manager,
-            "llm_client": llm_manager.get_client(),
-            "ckpt_manager": ckpt_manager,
-        }
-
-    from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig, HFModelConfig
-    from verl.workers.engine_workers import TrainingWorkerConfig
-    from verl.workers.engine_workers_tinker import TinkerTrainingWorker
-
-    model = cfg["model"]
-    engine = cfg["engine"]
-    model_config = HFModelConfig(
-        path=model["path"],
-        use_remove_padding=model["use_remove_padding"],
-        lora_rank=model["lora_rank"],
-        lora_alpha=model["lora_alpha"],
-        target_modules=model["target_modules"],
-        lora_adapter_path=model.get("lora_adapter_path"),
-    )
-    engine_config = FSDPEngineConfig(
-        forward_only=False,
-        strategy=engine["strategy"],
-        fsdp_size=engine["fsdp_size"],
-        ulysses_sequence_parallel_size=engine["ulysses_sequence_parallel_size"],
-        use_remove_padding=engine["use_remove_padding"],
-        use_dynamic_bsz=engine["use_dynamic_bsz"],
-        micro_batch_size_per_gpu=engine["micro_batch_size_per_gpu"],
-        max_token_len_per_gpu=engine["max_token_len_per_gpu"],
-        infer_micro_batch_size_per_gpu=engine["infer_micro_batch_size_per_gpu"],
-        infer_max_token_len_per_gpu=engine["infer_max_token_len_per_gpu"],
-        param_offload=engine["param_offload"],
-        optimizer_offload=engine["optimizer_offload"],
-        grad_offload=engine["grad_offload"],
-    )
-    optimizer_config = FSDPOptimizerConfig(
-        lr=cfg["optim"]["lr"], lr_scheduler_type=cfg["optim"]["lr_scheduler_type"],
-    )
-    worker_config = TrainingWorkerConfig(
-        model_type="language_model",
-        model_config=model_config,
-        engine_config=engine_config,
-        optimizer_config=optimizer_config,
-        checkpoint_config=None,
-    )
-
-    ray_cls = RayClassWithInitArgs(cls=ray.remote(TinkerTrainingWorker), config=worker_config)
-    resource_pool = RayResourcePool(process_on_nodes=[cfg["num_gpus"]], name_prefix=f"verl_{model_id}")
-    wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls)
-    wg.reset()
-
-    sp = engine["ulysses_sequence_parallel_size"]
-    dp_size = max(cfg["num_gpus"] // max(sp, 1), 1)
-    return {"worker_group": wg, "resource_pool": resource_pool, "dp_size": dp_size}
+    for name in ray.util.list_named_actors():
+        if name.startswith(prefix):
+            ray.kill(ray.get_actor(name))

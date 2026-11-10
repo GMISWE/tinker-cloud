@@ -57,8 +57,6 @@ class VerlArgumentBuilder(ArgumentBuilder):
                 "strategy": self.overrides.get("strategy", "fsdp2"),
                 "fsdp_size": num_gpus,
                 "ulysses_sequence_parallel_size": int(parallelism.get("sp_size", 1)),
-                "forward_only": False,
-                "use_remove_padding": True,
                 # fixed micro-batch (dynamic_bsz = batch-composition-dependent
                 # micro-partitioning; pure-sum makes it E0-safe but keep the
                 # default deterministic)
@@ -69,19 +67,16 @@ class VerlArgumentBuilder(ArgumentBuilder):
                 "infer_max_token_len_per_gpu": max_seq_len * 8,
                 "param_offload": bool(self.overrides.get("param_offload", False)),
                 "optimizer_offload": bool(self.overrides.get("optimizer_offload", False)),
-                "grad_offload": bool(self.overrides.get("grad_offload", False)),
             },
             "optim": {
                 # placeholder; client owns LR per optim_step (OptimStepParams)
                 "lr": 1e-6,
-                "lr_scheduler_type": "constant",
             },
             "max_seq_len": max_seq_len,
-            # M2: vLLM rollout servers colocated with the training engine
+            # vLLM rollout servers colocated with the training engine
             # (hybrid timeshare: replicas sleep during training ops, wake +
-            # weight-sync for sampling). load_format stays "dummy" — the boot
-            # sequence does one naive update_weights so vLLM never serves
-            # dummy weights.
+            # weight-sync for sampling). load_format stays "dummy": the
+            # backend syncs the trainer's weights before the first sample.
             "rollout": {
                 "name": "vllm",
                 "mode": "async",

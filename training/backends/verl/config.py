@@ -5,10 +5,13 @@ from ..env_config import EnvConfig
 
 
 class VerlConfig(EnvConfig):
-    debug_train_only: bool = Field(False, description="Boot without the rollout engine")
+    models_per_gpu: int = Field(
+        1, ge=1,
+        description="Models resident on each GPU at once (a student and its teachers); every model keeps its "
+                    "weights there, so the limit is GPU memory")
     max_seq_len: int = Field(2048, ge=1, description="Rollout prompt_length and token budgets")
 
     ENV = {
-        "debug_train_only": "TINKERCLOUD_VERL_DEBUG_TRAIN_ONLY",
+        "models_per_gpu": "TINKERCLOUD_VERL_MODELS_PER_GPU",
         "max_seq_len": "TINKERCLOUD_VERL_MAX_SEQ_LEN",
     }
