@@ -95,6 +95,15 @@ def test_cleanup_ages_out_finished_futures_and_keeps_pending_ones(store):
     assert store.filed("s:train:0", 0, "load_weights", {"p": 1}).request_id == "running"
 
 
+def test_a_retry_after_cleanup_is_still_the_first_request(store):
+    """The pending row owns (model_id, seq_id). A cleanup that removed it would let the retry run the
+    operation a second time and the first result could no longer be read."""
+    first = store.save_future("r1", "optim_step", _payload(3), model_id="m", seq_id=7)
+    assert store.cleanup_old_futures(max_age_hours=0) == 0
+    assert store.save_future("r2", "optim_step", _payload(3), model_id="m", seq_id=7) == first == "r1"
+    assert store.get_future("r2") is None   # the retry filed no second row
+
+
 def test_filed_returns_the_status_and_the_failed_create_mark_with_the_id(store):
     """The create-via-load dedup reads the earlier request's status in the same locked read as its id."""
     store.save_future("r1", "load_weights", {"p": 1}, model_id="s:train:0", seq_id=0)
