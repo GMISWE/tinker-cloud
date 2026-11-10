@@ -62,6 +62,10 @@ class CheckpointStatus(str, Enum):
     FAILED = "failed"
 
 
+class CheckpointExists(Exception):
+    pass
+
+
 # --- errors: routers map these to status codes in one place (api.py) ---------
 
 class CheckpointError(Exception):
@@ -87,10 +91,6 @@ class CheckpointFailed(CheckpointError):
 class CheckpointDeleteFailed(CheckpointError):
     """The files under a checkpoint could not be removed; the record stays so the delete can be retried."""
     status_code = 500
-
-
-class CheckpointExists(CheckpointError):
-    status_code = 400
 
 
 class CheckpointKindMismatch(CheckpointError):
@@ -170,6 +170,12 @@ class SaveTicket:
 
 @dataclass(frozen=True)
 class CheckpointSaveOptions:
+    """Options carried from a save request to the store.
+
+    `ttl_seconds=None` means no expiry. `overwrite=False` refuses pending or
+    unexpired completed records. `user_metadata` replaces the old value.
+    """
+
     ttl_seconds: Optional[int]
     overwrite: bool
     user_metadata: Optional[Dict[str, str]]
@@ -182,6 +188,17 @@ def is_expired(record: Dict[str, Any], now: Optional[datetime] = None) -> bool:
     if expires_at is None:
         return False
     return (now or datetime.now(timezone.utc)) >= datetime.fromisoformat(expires_at)
+
+
+def _blocks_save(record: Dict[str, Any]) -> bool:
+    """Whether overwrite=False refuses a record.
+
+    pending: yes; completed: until expiry; failed: no.
+    """
+    status = record["status"]
+    return status == CheckpointStatus.PENDING.value or (
+        status == CheckpointStatus.COMPLETED.value and not is_expired(record)
+    )
 
 
 def _expires_at(ttl_seconds: Optional[int]) -> Optional[str]:
@@ -253,11 +270,7 @@ class CheckpointStore:
         optimizer family record."""
         ref = CheckpointRef.make(model_id, kind, name)
         existing = self.get(ref)
-        exists = existing is not None and (
-            existing["status"] == CheckpointStatus.PENDING.value
-            or existing["status"] == CheckpointStatus.COMPLETED.value and not is_expired(existing)
-        )
-        if not options.overwrite and exists:
+        if not options.overwrite and existing is not None and _blocks_save(existing):
             raise CheckpointExists(f"Checkpoint already exists: {ref.uri}")
         root = self.root(ref)
         step = self.next_step(model_id) if persist else None
