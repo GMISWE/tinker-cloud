@@ -11,6 +11,7 @@ GPU-free. Covers:
 See specs/004-bionemo-classification/plan.md.
 """
 import asyncio
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -116,3 +117,40 @@ def test_generation_methods_raise(backend_cls, handle_cls, backend_type):
     for name, coro in calls.items():
         with pytest.raises(BackendError, match="only valid for the language_modeling objective"):
             asyncio.run(coro)
+
+
+def _fake_worker_module():
+    worker = MagicMock()
+    worker.ready.remote.return_value = None
+    cls = MagicMock()
+    cls.remote.return_value = worker
+    mod = MagicMock()
+    mod.MegatronBridgeWorker = cls
+    return mod
+
+
+def test_token_classification_is_refused_before_worker_starts():
+    backend = MegatronBridgeBackend()
+    config = {"architectures": ["RobertaForTokenClassification"], "num_labels": 8}
+    with patch("tinkercloud.training.backends.megatron_bridge.backend.read_raw_hf_config", return_value=config):
+        with pytest.raises(BackendError, match="token_classification"):
+            asyncio.run(backend.create_model(
+                model_id="m", request_id="r", base_model="tm", num_gpus=1,
+                optimizer="adamw",
+            ))
+
+
+def test_sequence_classification_is_accepted():
+    backend = MegatronBridgeBackend()
+    config = {"architectures": ["RobertaForSequenceClassification"], "num_labels": 3}
+    ray_mod = MagicMock()
+    ray_mod.is_initialized.return_value = True
+    with patch.dict("sys.modules", {"ray": ray_mod, "tinkercloud.training.backends.megatron_bridge.worker": _fake_worker_module()}):
+        with patch("tinkercloud.training.backends.megatron_bridge.backend.read_raw_hf_config", return_value=config):
+            with patch("tinkercloud.training.backends.megatron_bridge.backend._get", return_value=None):
+                handle = asyncio.run(backend.create_model(
+                    model_id="m", request_id="r", base_model="tm", num_gpus=1,
+                    optimizer="adamw",
+                ))
+    assert isinstance(handle, MegatronBridgeHandle)
+    assert handle.objective == Objective.SEQUENCE_CLASSIFICATION.value

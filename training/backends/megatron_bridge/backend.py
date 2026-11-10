@@ -86,6 +86,11 @@ class MegatronBridgeBackend(TrainingBackend[MegatronBridgeHandle]):
                 f"Megatron-Bridge backend only serves classification models; {base_model!r} "
                 f"declares no classification head in its config.json",
                 backend="megatron_bridge", operation="create_model")
+        if classification.objective is Objective.TOKEN_CLASSIFICATION:
+            raise BackendError(
+                f"Megatron-Bridge backend only serves sequence classification; {base_model!r} "
+                f"declares a token_classification head",
+                backend="megatron_bridge", operation="create_model")
         objective = classification.objective.value
         num_labels = classification.num_labels
 
