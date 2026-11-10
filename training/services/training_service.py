@@ -32,7 +32,9 @@ class TrainingService:
                 suggestion=f"this backend supports: {', '.join(sorted(supported))}",
             )
 
-    def _check_target_rank(self, data: List[Any]) -> None:
+    def check_target_rank(self, data: List[Any]) -> None:
+        """Raises UnsupportedFeatureError for `target_tokens` of a rank the backend
+        does not read. The router calls it before it queues the pass."""
         limit = self.backend.TARGET_TOKENS_MAX_RANK
         for i, datum in enumerate(data):
             target = datum.loss_fn_inputs.get("target_tokens")   # RL datums may carry none
@@ -61,7 +63,6 @@ class TrainingService:
         """
         logger.info("Forward pass for %s", model_id)
         self._check_loss_supported(loss_fn)
-        self._check_target_rank(data)
 
         handle = client_info["backend_handle"]
         result = await self.backend.forward(handle, data, loss_fn, loss_fn_config=loss_fn_config)
@@ -82,7 +83,6 @@ class TrainingService:
         """
         logger.info("Forward-backward pass for %s", model_id)
         self._check_loss_supported(loss_fn)
-        self._check_target_rank(data)
 
         handle = client_info["backend_handle"]
         result = await self.backend.forward_backward(handle, data, loss_fn, loss_fn_config=loss_fn_config)
