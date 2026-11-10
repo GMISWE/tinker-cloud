@@ -59,18 +59,15 @@ async def check_model_code(backend: "TrainingBackend", base_model: str) -> None:
 
 def check_remote_code(repo: str) -> None:
     """Raises ValueError when `repo`, a hub id or a local directory, declares custom code (an
-    `auto_map` in its config, tokenizer or processor config, whichever exist) and the operator does
-    not trust it. The server's own loads pass trust_remote_code only for a trusted model, but NeMo
-    RL loads its tokenizer trusting remote code whatever it is given, so the repository is checked
-    before any backend sees it."""
+    `auto_map` at any depth of its config, tokenizer or processor config, whichever exist) and the
+    operator does not trust it, and when it is a hub id naming nothing this server can read. The
+    server's own loads pass trust_remote_code only for a trusted model, but NeMo RL loads its
+    tokenizer, and its vLLM worker the model's config and the model, trusting remote code whatever
+    they are given, so the repository is checked before any backend sees it."""
     if remote_code_trusted(repo):
         return
     local = Path(repo)
-    if local.is_dir():
-        declaring = [name for name in _CODE_DECLARING_FILES
-                     if (local / name).is_file() and _declares_code(str(local / name))]
-    else:
-        declaring = _hub_files_declaring_code(repo)
+    declaring = _directory_files_declaring_code(local) if local.is_dir() else _hub_id_files_declaring_code(repo)
     if declaring:
         raise ValueError(
             f"{repo!r} declares custom code (auto_map in {', '.join(declaring)}); the server runs a model "
@@ -79,16 +76,53 @@ def check_remote_code(repo: str) -> None:
 
 def _declares_code(path: str) -> bool:
     with open(path) as f:
-        raw = json.load(f)
-    return isinstance(raw, dict) and bool(raw.get("auto_map"))
+        return _has_auto_map(json.load(f))
 
 
-def _hub_files_declaring_code(repo: str) -> List[str]:
-    """The hub repository's files that declare code; none for an id naming no repository this
-    server can read, since nothing of it can load (the backend reports the model itself). A file
-    the hub cannot answer for (unreachable, or offline mode, and not cached) fails the check."""
+def _has_auto_map(node: Any) -> bool:
+    """A non-empty `auto_map` in this JSON value or anywhere inside it: a processor config can hold
+    a component's whole config, `auto_map` included, under a key of its own."""
+    if isinstance(node, dict):
+        return any((key == "auto_map" and bool(value)) or _has_auto_map(value) for key, value in node.items())
+    if isinstance(node, list):
+        return any(_has_auto_map(value) for value in node)
+    return False
+
+
+def _directory_files_declaring_code(directory: Path) -> List[str]:
+    return [name for name in _CODE_DECLARING_FILES
+            if (directory / name).is_file() and _declares_code(str(directory / name))]
+
+
+def _hub_id_files_declaring_code(repo: str) -> List[str]:
+    """The files of the repository a hub id names that declare code. ValueError for an id naming
+    no repository this server can read. With the hub library in offline mode (its HF_HUB_OFFLINE constant) the cached
+    snapshot is what is checked, on the assumption that the backend's workers load in the same
+    mode; an id with no snapshot is then a ValueError, since this server holds no such model."""
+    from huggingface_hub import constants
+    from huggingface_hub.utils import HFValidationError, RepositoryNotFoundError
+    try:
+        return _cached_files_declaring_code(repo) if constants.HF_HUB_OFFLINE else _online_files_declaring_code(repo)
+    except (RepositoryNotFoundError, HFValidationError) as e:   # GatedRepoError is a RepositoryNotFoundError
+        raise ValueError(f"{repo!r} names no model repository this server can read (missing, private, "
+                         f"gated, or not a hub id)") from e
+
+
+def _cached_files_declaring_code(repo: str) -> List[str]:
+    from huggingface_hub import snapshot_download
+    from huggingface_hub.utils import LocalEntryNotFoundError
+    try:
+        snapshot = snapshot_download(repo, local_files_only=True)
+    except LocalEntryNotFoundError as e:
+        raise ValueError(f"{repo!r} is not in this server's hub cache, and the hub library is in offline mode") from e
+    return _directory_files_declaring_code(Path(snapshot))
+
+
+def _online_files_declaring_code(repo: str) -> List[str]:
+    """Asks the hub for each file. One it cannot answer for (unreachable and not cached) fails the
+    check with the hub's own error: an outage, not something the client sent."""
     from huggingface_hub import hf_hub_download
-    from huggingface_hub.utils import EntryNotFoundError, HFValidationError, LocalEntryNotFoundError, RepositoryNotFoundError
+    from huggingface_hub.utils import EntryNotFoundError, LocalEntryNotFoundError
     declaring = []
     for name in _CODE_DECLARING_FILES:
         try:
@@ -97,8 +131,6 @@ def _hub_files_declaring_code(repo: str) -> List[str]:
             raise
         except EntryNotFoundError:   # the repository has no such file
             continue
-        except (RepositoryNotFoundError, HFValidationError):
-            return []
         if _declares_code(path):
             declaring.append(name)
     return declaring

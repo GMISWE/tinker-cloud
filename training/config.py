@@ -36,7 +36,7 @@ def is_production() -> bool:
     return os.getenv("ENV", "development") == "production"
 
 
-def split_api_keys(setting: str) -> FrozenSet[str]:
+def split_csv_setting(setting: str) -> FrozenSet[str]:
     """The entries a comma-separated setting names (the keys of TINKER_API_KEY, the models of
     TINKERCLOUD_TRUST_REMOTE_CODE_MODELS): each stripped, empty ones dropped."""
     return frozenset(k.strip() for k in setting.split(",") if k.strip())
@@ -199,7 +199,7 @@ class AuthConfig(BaseModel):
     @validator("api_key", always=True)
     def validate_api_key(cls, v):
         """Production needs a key and refuses the dev key among the keys the setting names."""
-        keys = split_api_keys(v)
+        keys = split_csv_setting(v)
         if not keys or DEV_API_KEY in keys:
             if is_production():
                 raise ValueError("Production requires a secure API key")
@@ -207,12 +207,12 @@ class AuthConfig(BaseModel):
         return v
 
     def parsed_keys(self) -> Tuple[Optional[FrozenSet[str]], Optional[str]]:
-        """The keys a request may carry (split_api_keys of the setting) and the one
+        """The keys a request may carry (split_csv_setting of the setting) and the one
         key an engine and the gateway send each other: the first in sorted order, None when the
         setting names none. (None, None) when auth is off."""
         if not self.enabled:
             return None, None
-        keys = split_api_keys(self.api_key)
+        keys = split_csv_setting(self.api_key)
         return keys, min(keys) if keys else None
 
 
@@ -381,7 +381,7 @@ class TrainingConfig(BaseModel):
     # base_model is the client's choice, so by default no model's repository code runs
     # (utils/model_config.py: remote_code_trusted, check_remote_code).
     trust_remote_code_models: FrozenSet[str] = Field(
-        default_factory=lambda: split_api_keys(os.getenv("TINKERCLOUD_TRUST_REMOTE_CODE_MODELS", "")),
+        default_factory=lambda: split_csv_setting(os.getenv("TINKERCLOUD_TRUST_REMOTE_CODE_MODELS", "")),
         description="Model ids / paths whose repository code transformers may import, matched exactly "
                     "(TINKERCLOUD_TRUST_REMOTE_CODE_MODELS, comma-separated)"
     )

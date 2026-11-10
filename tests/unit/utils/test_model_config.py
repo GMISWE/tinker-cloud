@@ -55,6 +55,37 @@ def _trusting(monkeypatch, *models):
     monkeypatch.setattr(config, "_config", config.TrainingConfig(trust_remote_code_models=list(models)))
 
 
+def _hub(monkeypatch, *, offline, cache=None):
+    """huggingface_hub in the given mode (the library reads HF_HUB_OFFLINE once, at import), on `cache`."""
+    import huggingface_hub as hub
+    from huggingface_hub import constants
+    monkeypatch.setattr(constants, "HF_HUB_OFFLINE", offline)
+    if cache is not None:
+        monkeypatch.setattr(constants, "HF_HUB_CACHE", str(cache))
+    return hub
+
+
+def _cached(cache, repo, files):
+    """`repo` in the hub cache layout under `cache`: refs/main naming one snapshot that holds `files`."""
+    from huggingface_hub.file_download import repo_folder_name
+    root = cache / repo_folder_name(repo_id=repo, repo_type="model")
+    (root / "refs").mkdir(parents=True)
+    (root / "refs" / "main").write_text("0" * 40)
+    _repo(root / "snapshots" / ("0" * 40), files)
+
+
+def _refusing(monkeypatch, hub, error):
+    """Every download from the hub raises `error`, built without its constructor (there is no HTTP response to give it)."""
+    def download(repo, name):
+        raise error.__new__(error)
+    monkeypatch.setattr(hub, "hf_hub_download", download)
+
+
+def _loads_as_sent(monkeypatch, backend):
+    """The fake backend naming base_model as the repository it loads, as TrainingBackend's default does."""
+    monkeypatch.setattr(backend, "model_repositories", lambda base_model: [base_model])
+
+
 def _repo(tmp_path, files):
     """A model directory holding `files` (name -> JSON document)."""
     tmp_path.mkdir(parents=True, exist_ok=True)
@@ -96,6 +127,30 @@ def test_a_repository_without_custom_code_passes(monkeypatch, tmp_path):
     model_config.check_remote_code(_repo(tmp_path, {"config.json": CLEAN_CONFIG, "tokenizer_config.json": {"model_max_length": 4096}}))
 
 
+@pytest.mark.parametrize("doc", [
+    {"image_processor": {"auto_map": {"AutoImageProcessor": "image_processing_x.XImageProcessor"}}},
+    {"processors": [{"name": "audio"}, {"auto_map": {"AutoFeatureExtractor": "feature_x.XExtractor"}}]},
+    {"a": {"b": [{"c": {"auto_map": {"AutoProcessor": "processing_x.XProcessor"}}}]}},
+], ids=["nested_object", "inside_a_list", "deep"])
+def test_an_auto_map_at_any_depth_declares_code(monkeypatch, tmp_path, doc):
+    """A processor config can carry a component's own config, auto_map included, under a key of its
+    own; a check of the top-level key alone passed such a repository."""
+    from tinkercloud.training.utils import model_config
+    repo = _repo(tmp_path, {"config.json": CLEAN_CONFIG, "processor_config.json": doc})
+    _trusting(monkeypatch)
+    with pytest.raises(ValueError, match="auto_map in processor_config.json"):
+        model_config.check_remote_code(repo)
+
+
+def test_only_a_non_empty_auto_map_at_any_depth_declares_code(monkeypatch, tmp_path):
+    from tinkercloud.training.utils import model_config
+    _trusting(monkeypatch)
+    model_config.check_remote_code(_repo(tmp_path, {
+        "config.json": {**CLEAN_CONFIG, "auto_map": {}},
+        "processor_config.json": {"image_processor": {"auto_map": {}, "automap": {"AutoProcessor": "x.X"}},
+                                  "note": "auto_map"}}))
+
+
 def test_a_repository_is_checked_exactly_as_the_backend_loads_it(monkeypatch, tmp_path):
     """A clean m beside an m_torch_dist with a custom tokenizer: a backend that loads base_model as
     sent (NeMo RL) gets m_torch_dist checked, not m; a backend that resolves base_model elsewhere
@@ -118,30 +173,95 @@ def test_a_repository_is_checked_exactly_as_the_backend_loads_it(monkeypatch, tm
     asyncio.run(model_config.check_model_code(FakeBackend(), custom))   # the fake loads no model
 
 
+def test_the_real_backends_name_the_directories_they_load(monkeypatch, tmp_path):
+    """miles resolves an id to <HF_HOME>/<name> and its Megatron twin <name>_torch_dist; verl to
+    <TINKERCLOUD_MODEL_ROOT>/<id>. With either method gone, the default checks the id as sent, a hub
+    id here, and never opens these directories."""
+    from tinkercloud.training.backends.miles.backend import MilesBackend
+    from tinkercloud.training.backends.verl.backend import VerlBackend
+    from tinkercloud.training.utils import model_config
+    _trusting(monkeypatch)
+    miles_home, verl_root = tmp_path / "miles", tmp_path / "verl"
+    _repo(miles_home / "m", {"config.json": CLEAN_CONFIG})
+    megatron = _repo(miles_home / "m_torch_dist", {"config.json": CLEAN_CONFIG, "tokenizer_config.json": CUSTOM_TOKENIZER})
+    monkeypatch.setenv("HF_HOME", str(miles_home))
+    with pytest.raises(ValueError, match=f"'{megatron}' declares custom code"):
+        asyncio.run(model_config.check_model_code(MilesBackend(), "org/m"))
+
+    verl_dir = _repo(verl_root / "org" / "m", {"config.json": {**CLEAN_CONFIG, "auto_map": {"AutoConfig": "c.C"}}})
+    monkeypatch.setenv("TINKERCLOUD_MODEL_ROOT", str(verl_root))
+    with pytest.raises(ValueError, match=f"'{verl_dir}' declares custom code"):
+        asyncio.run(model_config.check_model_code(VerlBackend(), "org/m"))
+
+
 def test_a_hub_repository_is_checked_file_by_file(monkeypatch, tmp_path):
-    hub = pytest.importorskip("huggingface_hub")
-    from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError
+    hub = _hub(monkeypatch, offline=False)
+    from huggingface_hub.utils import EntryNotFoundError
     from tinkercloud.training.utils import model_config
     _trusting(monkeypatch)
     files = {"config.json": CLEAN_CONFIG, "tokenizer_config.json": CUSTOM_TOKENIZER}
     _repo(tmp_path, files)
 
     def download(repo, name):
-        if repo != "org/model":
-            raise RepositoryNotFoundError.__new__(RepositoryNotFoundError)   # its constructor wants an HTTP response
         if name not in files:
             raise EntryNotFoundError.__new__(EntryNotFoundError)
         return str(tmp_path / name)
     monkeypatch.setattr(hub, "hf_hub_download", download)
     with pytest.raises(ValueError, match="auto_map in tokenizer_config.json"):
         model_config.check_remote_code("org/model")
-    model_config.check_remote_code("org/missing")   # no such repository: nothing of it can load
+
+
+@pytest.mark.parametrize("error", ["RepositoryNotFoundError", "GatedRepoError", "HFValidationError"])
+def test_a_repository_the_server_cannot_read_is_refused(monkeypatch, error):
+    """Missing, gated or not an id at all: read as "declares nothing", such a repository passed the check."""
+    hub = _hub(monkeypatch, offline=False)
+    from huggingface_hub import utils
+    from tinkercloud.training.utils import model_config
+    _trusting(monkeypatch)
+    _refusing(monkeypatch, hub, getattr(utils, error))   # the name is the test's parameter
+    with pytest.raises(ValueError, match="'org/unreadable' names no model repository this server can read"):
+        model_config.check_remote_code("org/unreadable")
+
+
+def test_a_base_model_sampler_for_a_repository_the_server_cannot_read_is_a_400(monkeypatch):
+    """The route answered 200 for such a base model; the refusal now reaches the client as a 400."""
+    hub = _hub(monkeypatch, offline=False)
+    from fastapi import HTTPException
+    from huggingface_hub.utils import RepositoryNotFoundError
+    from tinkercloud.training.backends.fake.backend import FakeBackend
+    from tinkercloud.training.models.requests import ResolveSamplerTargetRequest
+    from tinkercloud.training.routers.sampling import resolve_sampler_target
+    from tinkercloud.training.services.sampling_service import SamplingService
+    _refusing(monkeypatch, hub, RepositoryNotFoundError)
+    backend = FakeBackend({"base_models": ["org/unreadable"]})
+    _loads_as_sent(monkeypatch, backend)
+    _trusting(monkeypatch)
+    with pytest.raises(HTTPException) as refused:
+        asyncio.run(resolve_sampler_target(ResolveSamplerTargetRequest(base_model="org/unreadable"), None, {}, None,
+                                           SamplingService(backend=backend)))
+    assert refused.value.status_code == 400 and "'org/unreadable' names no model repository" in refused.value.detail
+
+
+def test_offline_a_hub_id_is_checked_through_its_cached_snapshot(monkeypatch, tmp_path):
+    """Offline, the per-file download of a file the cached snapshot lacks (a text model's processor
+    config) raised the same error as an outage, so a hub id whose snapshot lacks any of the files
+    was refused. The cached snapshot is checked as a directory instead."""
+    _hub(monkeypatch, offline=True, cache=tmp_path)
+    from tinkercloud.training.utils import model_config
+    _cached(tmp_path, "org/clean", {"config.json": CLEAN_CONFIG, "tokenizer_config.json": {"model_max_length": 4096}})
+    _cached(tmp_path, "org/custom", {"config.json": CLEAN_CONFIG, "tokenizer_config.json": CUSTOM_TOKENIZER})
+    _trusting(monkeypatch)
+    model_config.check_remote_code("org/clean")
+    with pytest.raises(ValueError, match="'org/custom' declares custom code .auto_map in tokenizer_config.json"):
+        model_config.check_remote_code("org/custom")
+    with pytest.raises(ValueError, match="'org/absent' is not in this server's hub cache"):
+        model_config.check_remote_code("org/absent")
 
 
 def test_a_hub_outage_fails_the_check(monkeypatch, tmp_path):
     """Unreachable and not cached, a file raises LocalEntryNotFoundError, an EntryNotFoundError too:
     nothing is known about the file, so the check fails rather than skip it as missing."""
-    hub = pytest.importorskip("huggingface_hub")
+    hub = _hub(monkeypatch, offline=False)
     from huggingface_hub.utils import LocalEntryNotFoundError
     from tinkercloud.training.utils import model_config
     _trusting(monkeypatch)
@@ -163,7 +283,7 @@ def test_a_create_is_checked_before_the_backend_sees_the_model(monkeypatch, tmp_
     repo = _repo(tmp_path, {"config.json": CLEAN_CONFIG, "tokenizer_config.json": CUSTOM_TOKENIZER})
     _trusting(monkeypatch)
     backend = FakeBackend()
-    monkeypatch.setattr(backend, "model_repositories", lambda base_model: [base_model])   # as every backend but the fake
+    _loads_as_sent(monkeypatch, backend)
 
     async def dispatched(**kwargs):
         raise AssertionError("the backend saw an untrusted model")
@@ -183,7 +303,7 @@ def test_a_base_model_sampler_is_checked_before_its_engine_starts(monkeypatch, t
     from tinkercloud.training.services.sampling_service import SamplingService
     repo = _repo(tmp_path, {"config.json": CLEAN_CONFIG, "tokenizer_config.json": CUSTOM_TOKENIZER})
     backend = FakeBackend({"base_models": [repo]})
-    monkeypatch.setattr(backend, "model_repositories", lambda base_model: [base_model])
+    _loads_as_sent(monkeypatch, backend)
     service = SamplingService(backend=backend)
     request = ResolveSamplerTargetRequest(base_model=repo)
     _trusting(monkeypatch)
@@ -195,9 +315,14 @@ def test_a_base_model_sampler_is_checked_before_its_engine_starts(monkeypatch, t
 
 
 def test_no_server_loader_trusts_remote_code_unconditionally():
+    """Every .py file under training/, in the keyword form and the dict form a kwargs literal takes."""
+    import re
     from pathlib import Path
     from tinkercloud.training.utils import model_config
+    unconditional = re.compile(r"""trust_remote_code["']?\s*[=:]\s*True""")
+    assert unconditional.search("from_pretrained(path, trust_remote_code=True)")
+    assert unconditional.search('kwargs = {"trust_remote_code": True}')
+    assert not unconditional.search("trust_remote_code=remote_code_trusted(path)")
     training = Path(model_config.__file__).resolve().parents[1]
-    offenders = [str(p.relative_to(training)) for p in training.rglob("*.py")
-                 if not p.name.startswith("._") and "trust_remote_code=True" in p.read_text()]
+    offenders = [str(p.relative_to(training)) for p in training.rglob("*.py") if unconditional.search(p.read_text())]
     assert offenders == []
