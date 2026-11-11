@@ -77,3 +77,24 @@ def test_service_rejects_unsupported_loss_before_backend_call():
     asyncio.run(svc.forward_backward("m", [], "cross_entropy", ci))
     asyncio.run(svc.forward("m", [], "cross_entropy", ci, loss_fn_config=None))
     assert stub.calls == [("fb", "cross_entropy", None), ("forward", "cross_entropy", None)]
+
+
+def test_nk_targets_are_refused_under_a_loss_that_reads_one_target():
+    """A backend may read [N, K] under cross_entropy and one target per position under ppo:
+    the refusal follows the loss function, and a rank above 2 is refused under every loss."""
+    from tinkercloud.training.models.requests import Datum
+
+    def datum(shape):
+        count = shape[0] * (shape[1] if len(shape) > 1 else 1) * (shape[2] if len(shape) > 2 else 1)
+        return Datum.model_validate({"model_input": {"tokens": [1, 2]}, "loss_fn_inputs": {
+            "target_tokens": {"data": [3] * count, "shape": shape}}})
+
+    stub = _Stub()
+    stub.NK_TARGET_LOSS_FNS = frozenset({"cross_entropy"})
+    svc = TrainingService(backend=stub)
+    svc.check_target_rank([datum([2, 4])], "cross_entropy")
+    svc.check_target_rank([datum([2])], "ppo")
+    with pytest.raises(UnsupportedFeatureError, match=r"target_tokens of rank 2 .* under ppo"):
+        svc.check_target_rank([datum([2, 4])], "ppo")
+    with pytest.raises(UnsupportedFeatureError, match="target_tokens of rank 3"):
+        svc.check_target_rank([datum([2, 2, 1])], "cross_entropy")

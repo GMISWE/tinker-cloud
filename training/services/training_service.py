@@ -8,7 +8,7 @@ in the concrete backend implementation (e.g. MilesBackend, NemoRLBackend).
 import logging
 from typing import Dict, List, Any, Optional
 
-from ..backends.base import TrainingBackend, UnsupportedFeatureError
+from ..backends.base import TrainingBackend, UnsupportedFeatureError, wire_shape
 from ..models.requests import OptimParams
 
 logger = logging.getLogger(__name__)
@@ -32,19 +32,21 @@ class TrainingService:
                 suggestion=f"this backend supports: {', '.join(sorted(supported))}",
             )
 
-    def check_target_rank(self, data: List[Any]) -> None:
+    def check_target_rank(self, data: List[Any], loss_fn: str) -> None:
         """Raises UnsupportedFeatureError for `target_tokens` of a rank the backend
-        does not read. The router calls it before it queues the pass."""
-        limit = self.backend.TARGET_TOKENS_MAX_RANK
+        does not read under `loss_fn`. The router calls it before it queues the pass."""
+        reads_nk = loss_fn in self.backend.NK_TARGET_LOSS_FNS
         for i, datum in enumerate(data):
             target = datum.loss_fn_inputs.get("target_tokens")   # RL datums may carry none
-            # no shape on the wire is a flat list: rank 1
-            rank = 1 if target is None or target.shape is None else len(target.shape)
-            if rank > limit:
+            if target is None:
+                continue
+            shape = wire_shape(target)
+            if len(shape) > (2 if reads_nk else 1):
+                served = ", ".join(sorted(self.backend.NK_TARGET_LOSS_FNS)) or "no loss function"   # message text for an empty declaration
                 raise UnsupportedFeatureError(
-                    f"target_tokens of rank {rank} (datum {i}, shape {target.shape})",
+                    f"target_tokens of rank {len(shape)} (datum {i}, shape {shape}) under {loss_fn}",
                     backend=type(self.backend).__name__,
-                    suggestion=f"this backend reads target_tokens up to rank {limit}",
+                    suggestion=f"this backend reads [N, K] target_tokens under: {served}",
                 )
 
     async def forward(

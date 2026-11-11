@@ -7,7 +7,12 @@ import ray
 import torch
 from ray.util.placement_group import placement_group_table
 
-from tinkercloud.training.models.requests import AdamParams, Datum
+from tinkercloud.training.backends.verl.backend import (
+    SHARED_POOL_NAME_PREFIX, VLLM_SERVER_NAME_PREFIX, WORKER_NAME_PREFIX,
+)
+from tinkercloud.training.models.requests import AdamParams
+
+from ..unit.backends.verl.datums import nk_datum as datum  # noqa: F401  (the suites import it from here)
 
 FAMILY = "BytedTsinghua-SIA/Open-MOPD-SmolLM3-3B-"
 STUDENT = FAMILY + "MixSFT"
@@ -42,14 +47,6 @@ def text_tokens(count: int) -> list:
     return tokens[:count]
 
 
-def datum(model_tokens: list, targets: torch.Tensor, weights: torch.Tensor) -> Datum:
-    """A cross-entropy datum whose targets and weights are [N] or [N, K] tensors."""
-    def wire(t):
-        return {"data": t.reshape(-1).tolist(), "shape": list(t.shape)}
-    return Datum.model_validate({"model_input": {"tokens": model_tokens}, "loss_fn_inputs": {
-        "target_tokens": wire(targets), "weights": wire(weights)}})
-
-
 def logprobs_of(result: dict) -> torch.Tensor:
     """The first datum's logprobs of a forward or forward_backward result, in their wire shape."""
     out = result["loss_fn_outputs"][0]["logprobs"]
@@ -74,13 +71,13 @@ def gpu_mib() -> list:
 
 def verl_actors() -> list:
     """Named actors a verl model or its sampler leaves alive (workers, vLLM servers)."""
-    return sorted(n for n in ray.util.list_named_actors() if n.startswith("verl_") or "vllm" in n)
+    return sorted(n for n in ray.util.list_named_actors() if n.startswith((WORKER_NAME_PREFIX, VLLM_SERVER_NAME_PREFIX)))
 
 
 def vllm_actors() -> list:
-    return [n for n in verl_actors() if "vllm" in n]
+    return [n for n in verl_actors() if n.startswith(VLLM_SERVER_NAME_PREFIX)]
 
 
 def live_placement_groups() -> list:
     return sorted(info["name"] for info in placement_group_table().values()
-                  if info["name"].startswith("verl_") and info["state"] != "REMOVED")
+                  if info["name"].startswith(SHARED_POOL_NAME_PREFIX) and info["state"] != "REMOVED")

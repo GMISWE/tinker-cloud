@@ -96,10 +96,10 @@ class TrainingBackend(ABC, Generic[H]):
     # Sampler kinds (SaveWeightsForSamplerRequest.kind) this backend serves. "inflight"
     # needs a backend whose sampler serves the model's newest published weights.
     SUPPORTED_SAMPLER_KINDS: FrozenSet[str] = frozenset({"snapshot"})
-    # Highest rank of `target_tokens` this backend reads: 1 is one target per
-    # position, 2 is cross_entropy's [N, K] (K candidates per position, weights
-    # of the same shape). TrainingService refuses a higher rank before the backend sees it.
-    TARGET_TOKENS_MAX_RANK: int = 1
+    # Loss functions under which this backend reads `target_tokens` of shape [N, K]
+    # (K candidates per position, weights of the same shape). Under any other loss it
+    # reads one target per position; the router refuses the rest before a pass is queued.
+    NK_TARGET_LOSS_FNS: FrozenSet[str] = frozenset()
     # True when the backend serves a base-model sampler (create_sampling_client(base_model=...)):
     # sample() on base_model_handle() draws from the base model with no adapter. Other
     # backends refuse it with 400 before any of the two methods below is called.
@@ -487,6 +487,11 @@ class SampleRequestError(BackendError):
 
     def __init__(self, message: str, backend: str):
         super().__init__(message, backend=backend, operation="sample")
+
+
+def wire_shape(tensor) -> List[int]:
+    """A wire tensor's shape; a tensor sent without one is a flat list."""
+    return list(tensor.shape) if tensor.shape is not None else [len(tensor.data)]
 
 
 class UnsupportedFeatureError(BackendError):

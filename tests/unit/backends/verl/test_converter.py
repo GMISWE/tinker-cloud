@@ -7,14 +7,7 @@ import torch
 from tinkercloud.training.backends.verl.converter import VerlDataConverter
 from tinkercloud.training.models.requests import Datum
 
-
-def nk_datum(tokens, targets, weights):
-    """A cross-entropy datum; `targets` and `weights` are nested lists in wire shape."""
-    def wire(values):
-        t = torch.tensor(values)
-        return {"data": t.reshape(-1).tolist(), "shape": list(t.shape)}
-    return Datum.model_validate({"model_input": {"tokens": tokens}, "loss_fn_inputs": {
-        "target_tokens": wire(targets), "weights": wire(weights)}})
+from .datums import nk_datum
 
 
 def convert(data, loss_fn="cross_entropy"):
@@ -77,12 +70,6 @@ def test_a_rank_above_two_is_refused():
     datum = nk_datum([5, 6], [[[1, 2]], [[3, 4]]], [[[1.0, 1.0]], [[1.0, 1.0]]])
     with pytest.raises(ValueError, match="target_tokens has rank 3"):
         convert([datum])
-
-
-def test_nk_targets_outside_cross_entropy_are_refused():
-    """importance_sampling and ppo score one target per position; [N, K] there would be misread."""
-    with pytest.raises(ValueError, match="target_tokens has rank 2.*cross_entropy only, not ppo"):
-        convert([LONG], loss_fn="ppo")
 
 
 def test_a_datum_without_nk_targets_in_an_nk_call_is_refused():

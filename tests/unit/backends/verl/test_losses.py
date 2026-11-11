@@ -9,18 +9,10 @@ import torch.nn.functional as F
 pytest.importorskip("verl", reason="the loss reads verl's padding helpers")
 
 from tinkercloud.training.backends.verl.backend import VerlBackend, VerlHandle, _loss_dispatch  # noqa: E402
-from tinkercloud.training.models.requests import Datum  # noqa: E402
+from .datums import nk_datum, wire_values  # noqa: E402
 
 VOCAB = 50
 ENGINE = {"micro_batch_size_per_gpu": 1, "infer_micro_batch_size_per_gpu": 1, "ulysses_sequence_parallel_size": 1}
-
-
-def datum(tokens, targets, weights):
-    def wire(values):
-        t = torch.tensor(values)
-        return {"data": t.reshape(-1).tolist(), "shape": list(t.shape)}
-    return Datum.model_validate({"model_input": {"tokens": tokens}, "loss_fn_inputs": {
-        "target_tokens": wire(targets), "weights": wire(weights)}})
 
 
 def engine_loss(data, logits):
@@ -31,7 +23,7 @@ def engine_loss(data, logits):
     td = backend._to_tensordict(handle, data, "cross_entropy")
     offsets = td["input_ids"].offsets()
     if "target_tokens" in td.keys():
-        columns = _loss_dispatch(student_logits=logits.unsqueeze(0), data=td)
+        columns = _loss_dispatch(student_logits=logits.unsqueeze(0), data=td, loss_name="cross_entropy")
         per_position = {key: column.squeeze(0) for key, column in columns.items()}
     else:
         next_ids = torch.roll(td["input_ids"].values(), shifts=-1)
@@ -45,8 +37,7 @@ def reference_loss(data, logits):
     """-sum(w * log_softmax(logits)[position, id]) read from the datums themselves."""
     total, row = logits.new_zeros(()), 0
     for d in data:
-        targets = torch.tensor(d.loss_fn_inputs["target_tokens"].data).reshape(d.loss_fn_inputs["target_tokens"].shape)
-        weights = torch.tensor(d.loss_fn_inputs["weights"].data, dtype=torch.float32).reshape(targets.shape)
+        targets, weights = wire_values(d, "target_tokens"), wire_values(d, "weights")
         n = targets.shape[0]
         log_probs = F.log_softmax(logits[row:row + n], dim=-1)
         picked = log_probs.gather(-1, targets.reshape(n, -1)).reshape(targets.shape)
@@ -69,7 +60,7 @@ def nk_batch():
     for n in lengths:
         targets = torch.randint(0, VOCAB, (n, k), generator=g)
         weights = torch.randn(n, k, generator=g)            # both signs
-        data.append(datum(torch.randint(0, VOCAB, (n,), generator=g).tolist(), targets.tolist(), weights.tolist()))
+        data.append(nk_datum(torch.randint(0, VOCAB, (n,), generator=g).tolist(), targets.tolist(), weights.tolist()))
     logits = torch.randn(sum(lengths) + len(lengths), VOCAB, generator=g, dtype=torch.float64) * 3
     return data, logits
 
@@ -84,16 +75,17 @@ def test_nk_loss_and_gradient_are_the_signed_weighted_sum():
 
 
 def test_a_zero_weight_column_adds_no_gradient():
+    """A column the client zeroes must act as if it were never sent: a hook that scored it
+    through a shared normaliser, or a loss that masked by position, would still move its logit."""
     data, logits = nk_batch()
     zeroed, dropped = [], []
     for d in data:
-        targets = torch.tensor(d.loss_fn_inputs["target_tokens"].data).reshape(d.loss_fn_inputs["target_tokens"].shape)
-        weights = torch.tensor(d.loss_fn_inputs["weights"].data).reshape(targets.shape)
+        targets, weights = wire_values(d, "target_tokens"), wire_values(d, "weights")
         weights[:, 1] = 0.0
         tokens = d.model_input.tokens
-        zeroed.append(datum(tokens, targets.tolist(), weights.tolist()))
+        zeroed.append(nk_datum(tokens, targets.tolist(), weights.tolist()))
         keep = [0, 2, 3]
-        dropped.append(datum(tokens, targets[:, keep].tolist(), weights[:, keep].tolist()))
+        dropped.append(nk_datum(tokens, targets[:, keep].tolist(), weights[:, keep].tolist()))
     _, grad = loss_and_grad(engine_loss, zeroed, logits)
     _, grad_without_the_column = loss_and_grad(reference_loss, dropped, logits)
     torch.testing.assert_close(grad, grad_without_the_column, rtol=1e-5, atol=1e-7)
@@ -106,8 +98,8 @@ def test_k_equal_one_matches_the_n_path():
     weights = torch.randn(n, generator=g).tolist()
     logits = torch.randn(n + 1, VOCAB, generator=g, dtype=torch.float64) * 3
     # the [N] path scores the shifted input ids, so the targets are those ids
-    flat = [datum(tokens[:-1], tokens[1:], weights)]
-    one_column = [datum(tokens[:-1], [[t] for t in tokens[1:]], [[w] for w in weights])]
+    flat = [nk_datum(tokens[:-1], tokens[1:], weights)]
+    one_column = [nk_datum(tokens[:-1], [[t] for t in tokens[1:]], [[w] for w in weights])]
     loss_n, grad_n = loss_and_grad(engine_loss, flat, logits)
     loss_k, grad_k = loss_and_grad(engine_loss, one_column, logits)
     torch.testing.assert_close(loss_k, loss_n, rtol=1e-6, atol=0)
@@ -120,7 +112,7 @@ def test_n_loss_with_signed_weights_is_the_weighted_sum():
     tokens = torch.randint(0, VOCAB, (n + 1,), generator=g).tolist()
     weights = [1.5, -2.0, 0.0, 0.5, -0.25, 3.0]
     logits = torch.randn(n + 1, VOCAB, generator=g, dtype=torch.float64) * 3
-    data = [datum(tokens[:-1], tokens[1:], weights)]
+    data = [nk_datum(tokens[:-1], tokens[1:], weights)]
     loss, grad = loss_and_grad(engine_loss, data, logits)
     want_loss, want_grad = loss_and_grad(reference_loss, data, logits)
     torch.testing.assert_close(loss, want_loss, rtol=1e-6, atol=0)

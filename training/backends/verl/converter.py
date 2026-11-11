@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
-from ..base import DataConverter
+from ..base import DataConverter, wire_shape
 from ...models.requests import Datum
 
 
@@ -39,7 +39,7 @@ def _shaped(tensor, dtype, name: str, index: int) -> torch.Tensor:
     Raises:
         ValueError: the shape does not hold the data, or its rank is above 2.
     """
-    shape = tensor.shape if tensor.shape is not None else [len(tensor.data)]
+    shape = wire_shape(tensor)
     if len(shape) > 2:
         raise ValueError(f"datum {index}: {name} has rank {len(shape)}; the verl backend reads rank 1 or 2")
     values = torch.tensor(tensor.data, dtype=dtype).reshape(-1)
@@ -78,18 +78,6 @@ def _cross_entropy_targets(data: List[Datum], seqs: List[torch.Tensor]):
         raise ValueError("target_tokens differs across the datums of one call: trailing shapes "
                          f"{sorted(trailing)} (() is one target per position)")
     return targets, weights
-
-
-def refuse_nk_targets_outside_cross_entropy(data: List[Datum], loss_fn: str) -> None:
-    """Raises ValueError naming target_tokens when a datum carries [N, K] targets for
-    a loss that scores one target per position."""
-    if loss_fn == "cross_entropy":
-        return
-    for i, datum in enumerate(data):
-        target = _loss_input(datum, "target_tokens")
-        if target is not None and target.shape is not None and len(target.shape) > 1:
-            raise ValueError(f"datum {i}: target_tokens has rank {len(target.shape)}; "
-                             f"the verl backend reads [N, K] targets for cross_entropy only, not {loss_fn}")
 
 
 def _loss_input(datum: Datum, *names):
@@ -153,7 +141,6 @@ class VerlDataConverter(DataConverter):
         if loss_fn == "cross_entropy":
             sent_targets, sent_weights = _cross_entropy_targets(data, seqs)
         else:
-            refuse_nk_targets_outside_cross_entropy(data, loss_fn)
             sent_targets, sent_weights = [None] * b, [None] * b
         # () for [N] targets, (K,) for [N, K]; one shape per call (_cross_entropy_targets)
         trailing = next((tuple(t.shape[1:]) for t in sent_targets if t is not None), ())
