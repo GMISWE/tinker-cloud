@@ -19,7 +19,7 @@ def engine_loss(data, logits):
     """What verl's FSDP engine does around the loss function: `logits` is one
     row per input token of the batch, sequences back to back."""
     backend = VerlBackend()
-    handle = VerlHandle(model_id="m", backend_type="verl", config={"engine": ENGINE})
+    handle = VerlHandle(model_id="m", backend_type="verl", config={"engine": ENGINE}, trainer_config=None)  # unread here
     td = backend._to_tensordict(handle, data, "cross_entropy")
     offsets = td["input_ids"].offsets()
     if "target_tokens" in td.keys():
@@ -91,7 +91,7 @@ def test_a_zero_weight_column_adds_no_gradient():
     torch.testing.assert_close(grad, grad_without_the_column, rtol=1e-5, atol=1e-7)
 
 
-def test_k_equal_one_matches_the_n_path():
+def test_n_path_is_the_signed_sum_and_k_equal_one_matches_it():
     g = torch.Generator().manual_seed(1)
     n = 6
     tokens = torch.randint(0, VOCAB, (n + 1,), generator=g).tolist()
@@ -104,16 +104,8 @@ def test_k_equal_one_matches_the_n_path():
     loss_k, grad_k = loss_and_grad(engine_loss, one_column, logits)
     torch.testing.assert_close(loss_k, loss_n, rtol=1e-6, atol=0)
     torch.testing.assert_close(grad_k, grad_n, rtol=1e-5, atol=1e-7)
-
-
-def test_n_loss_with_signed_weights_is_the_weighted_sum():
-    g = torch.Generator().manual_seed(2)
-    n = 6
-    tokens = torch.randint(0, VOCAB, (n + 1,), generator=g).tolist()
-    weights = [1.5, -2.0, 0.0, 0.5, -0.25, 3.0]
-    logits = torch.randn(n + 1, VOCAB, generator=g, dtype=torch.float64) * 3
-    data = [nk_datum(tokens[:-1], tokens[1:], weights)]
-    loss, grad = loss_and_grad(engine_loss, data, logits)
-    want_loss, want_grad = loss_and_grad(reference_loss, data, logits)
-    torch.testing.assert_close(loss, want_loss, rtol=1e-6, atol=0)
-    torch.testing.assert_close(grad, want_grad, rtol=1e-5, atol=1e-7)
+    # and the [N] path itself is the signed sum (the weights above carry both signs)
+    assert min(weights) < 0 < max(weights)
+    want_loss, want_grad = loss_and_grad(reference_loss, flat, logits)
+    torch.testing.assert_close(loss_n, want_loss, rtol=1e-6, atol=0)
+    torch.testing.assert_close(grad_n, want_grad, rtol=1e-5, atol=1e-7)

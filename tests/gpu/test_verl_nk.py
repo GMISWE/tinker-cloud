@@ -161,6 +161,8 @@ def test_topk_sample_logprobs(loop, student, tokens):
                                 topk_sample_logprobs=handle.max_topk_logprobs))
     assert all(len(row) == handle.max_topk_logprobs for row in at_cap["sequences"][0]["topk_sample_logprobs"])
 
+    with pytest.raises(SampleRequestError, match="temperature > 0"):
+        run(backend.sample(handle, "greedy_topk", prompt, 1, {**SAMPLING, "temperature": 0.0}, topk_sample_logprobs=K))
     with pytest.raises(SampleRequestError, match="topk_prompt_logprobs"):
         run(backend.sample(handle, "prompt_topk", prompt, 1, dict(SAMPLING), topk_prompt_logprobs=1))
     assert best_id <= 0.05
