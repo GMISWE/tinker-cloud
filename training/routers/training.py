@@ -62,7 +62,7 @@ def _submit_pass(
     client_info = training_clients[model_id]
     _validate_loss(batch.loss_fn, batch.loss_fn_config)
     try:
-        service.check_target_rank(batch.data)
+        service.check_target_rank(batch.data, batch.loss_fn)
     except UnsupportedFeatureError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     run = service.forward if forward_only else service.forward_backward

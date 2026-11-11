@@ -3,7 +3,7 @@ veRL backend — binds veRL's upstream Tinker split-training primitives
 (verl.workers.engine_workers_tinker) behind the TrainingBackend ABC.
 
 Execution model: EAGER (Miles-shaped, NOT R9-buffered). veRL upstream ships
-TinkerTrainingWorker with decoupled forward_backward (grad-accumulating,
+workers with decoupled forward_backward (grad-accumulating,
 returns per-token logprobs) + optimizer_step (accepts lr/betas/eps/
 weight_decay) + optimizer_zero_grad. forward_backward here does real GPU
 work and returns real logprobs; apply_optimizer_step applies AdamParams and
@@ -36,7 +36,6 @@ from ..base import BackendError, BackendHandle, SampleRequestError, TrainingBack
 from ...utils.model_config import read_raw_hf_config
 from ..objectives import classification_spec
 from .config import VerlConfig
-from .converter import refuse_nk_targets_outside_cross_entropy
 from .losses import padded_logprobs
 from ...models.requests import AdamParams, Datum, OptimParams
 from ...checkpoints.interchange import (
@@ -108,9 +107,9 @@ class _SharedGpus:
                     f"({self.models_per_gpu}): {', '.join(sorted(self.model_ids))}",
                     backend="verl", operation="create_model",
                 )
-            if self.pool is None:
+            if self.pool is None:   # no model resident: the first one builds the pool, the last one removes it
                 pool = RayResourcePool(
-                    process_on_nodes=[num_gpus], max_colocate_count=self.models_per_gpu, name_prefix="verl_shared_",
+                    process_on_nodes=[num_gpus], max_colocate_count=self.models_per_gpu, name_prefix=SHARED_POOL_NAME_PREFIX,
                 )
                 pool.get_placement_groups()
                 self.pool = pool
@@ -127,22 +126,24 @@ class _SharedGpus:
         import ray
 
         with self._lock:
+            if self.model_ids == {model_id}:
+                for pg in self.pool.pgs:
+                    ray.util.remove_placement_group(pg)
+                self.pool = None
+            # last, so that a release that failed above repeats the same steps
             self.model_ids.remove(model_id)
-            if self.model_ids:
-                return
-            for pg in self.pool.pgs:
-                ray.util.remove_placement_group(pg)
-            self.pool = None
 
 
 class VerlBackend(TrainingBackend[VerlHandle]):
+    """Full or LoRA models on verl's FSDP engine. Models share the server's GPUs
+    (`models_per_gpu`); a model builds its vLLM sampler at its first sample, and
+    one model per server holds a sampler."""
     config: VerlConfig
 
     SUPPORTED_LOSS_FNS = frozenset({"cross_entropy", "importance_sampling", "ppo"})  # losses.LOSS_FNS
 
     SUPPORTED_OPTIMIZERS = frozenset({"adamw"})   # no Muon on this path
-    TARGET_TOKENS_MAX_RANK = 2                    # cross_entropy on [N, K] targets
-    """veRL backend using upstream TinkerTrainingWorker split primitives."""
+    NK_TARGET_LOSS_FNS = frozenset({"cross_entropy"})
 
     def __init__(self, overrides: Optional[Dict[str, Any]] = None):
         self.overrides = overrides or {}
@@ -202,6 +203,7 @@ class VerlBackend(TrainingBackend[VerlHandle]):
                 parallelism=parallelism, rl_config=rl_config,
                 rollout_config=rollout_config, max_seq_len=self.config.max_seq_len,
             )
+            dp_size = _dp_size(num_gpus, cfg["engine"]["ulysses_sequence_parallel_size"])   # before any actor exists
 
             # Interchange adapters attach at model build (verl's PEFT path wraps
             # the module before FSDP), and nothing is loaded at create any more
@@ -221,7 +223,7 @@ class VerlBackend(TrainingBackend[VerlHandle]):
                 config=cfg,
                 trainer_config=trainer_config,
                 hf_path=cfg["hf_path"],
-                dp_size=max(num_gpus // max(cfg["engine"]["ulysses_sequence_parallel_size"], 1), 1),
+                dp_size=dp_size,
                 created_at=datetime.now().isoformat(),
                 lora_rank=int(cfg["model"]["lora_rank"] or 0),
             )
@@ -302,10 +304,6 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         loss_fn: str,
         loss_fn_config: Optional[Dict[str, float]] = None,
     ) -> Dict[str, Any]:
-        try:
-            refuse_nk_targets_outside_cross_entropy(data, loss_fn)
-        except ValueError as e:
-            raise BackendError(str(e), backend="verl", operation="forward", original_error=e) from e
         logprobs = await self.get_logprobs(handle, data)
         return {"loss_fn_output_type": loss_fn, "loss_fn_outputs": logprobs, "metrics": {}}
 
@@ -398,13 +396,13 @@ class VerlBackend(TrainingBackend[VerlHandle]):
                 await self._quiesce_samplers(handle)
                 if self._sampler_model_id == handle.model_id:
                     # rollout server actors first (they hold engine refs into workers)
-                    await asyncio.to_thread(_kill_named_actors, VLLM_SERVER_ACTORS)
+                    await asyncio.to_thread(_kill_named_actors, VLLM_SERVER_NAME_PREFIX)
                     self._sampler_model_id = None
                 handle.llm_manager = None
                 handle.llm_client = None
                 handle.ckpt_manager = None
                 handle.rollout_awake = False
-                await asyncio.to_thread(_kill_named_actors, _worker_actors(handle.model_id))
+                await asyncio.to_thread(_kill_named_actors, worker_name_prefix(handle.model_id))
                 handle.worker_group = None
                 await asyncio.to_thread(self._gpus.release, handle.model_id)
             except Exception as e:
@@ -536,11 +534,13 @@ class VerlBackend(TrainingBackend[VerlHandle]):
                 config=trainer_config.actor_rollout_ref, role="actor_rollout",
             )
             worker_group = RayWorkerGroup(
-                resource_pool=pool, ray_cls_with_init=ray_cls, name_prefix=_worker_actors(model_id))
+                resource_pool=pool, ray_cls_with_init=ray_cls, name_prefix=worker_name_prefix(model_id))
             worker_group.init_model()
-        except BaseException:
-            _kill_named_actors(_worker_actors(model_id))
-            self._gpus.release(model_id)
+        except BaseException:   # a cancelled create too: the actors and the share go, then it re-raises
+            try:
+                _kill_named_actors(worker_name_prefix(model_id))
+            finally:
+                self._gpus.release(model_id)
             raise
         return worker_group
 
@@ -564,13 +564,16 @@ class VerlBackend(TrainingBackend[VerlHandle]):
                 f"the verl backend serves one sampling model per server and {self._sampler_model_id} holds "
                 f"the sampler; {h.model_id} serves forward and training only", backend="verl")
         self._sampler_model_id = h.model_id
+        build = asyncio.ensure_future(asyncio.to_thread(self._ensure_rollout_ready, h))
         try:
-            await asyncio.to_thread(self._ensure_rollout_ready, h)
-        except BaseException:
+            await asyncio.shield(build)
+        except BaseException:   # a cancelled sample too: re-raised below
+            # cancellation does not stop the build thread: judge the sampler after it returns
+            await asyncio.wait([build])
             if h.llm_manager is None:
                 # a failed build can leave server actors behind (verl names them, then launches);
                 # the claim goes only after they do
-                await asyncio.to_thread(_kill_named_actors, VLLM_SERVER_ACTORS)
+                await asyncio.to_thread(_kill_named_actors, VLLM_SERVER_NAME_PREFIX)
                 self._sampler_model_id = None
             raise
 
@@ -663,7 +666,7 @@ class VerlBackend(TrainingBackend[VerlHandle]):
 
 
 def _loss_dispatch(config=None, model_output=None, data=None, dp_group=None, student_logits=None,
-                   loss_name: str = "cross_entropy"):
+                   *, loss_name: str):
     """Module-level picklable shim: resolves the loss by name inside the worker.
     The engine also calls it as its logits hook, with `student_logits` and `data` only."""
     from . import losses
@@ -839,12 +842,26 @@ def _compose_actor_rollout_config(cfg: Dict[str, Any]):
 
 
 # verl names its vLLM server actors `vllm_server_<replica>_<node>`; one model owns them all (VerlBackend._sampler_model_id)
-VLLM_SERVER_ACTORS = "vllm_server_"
+VLLM_SERVER_NAME_PREFIX = "vllm_server_"
+WORKER_NAME_PREFIX = "verl_"
+SHARED_POOL_NAME_PREFIX = "verl_shared_"   # the placement group every model's workers sit in
 
 
-def _worker_actors(model_id: str) -> str:
+def worker_name_prefix(model_id: str) -> str:
     """The name prefix of a model's worker actors."""
-    return f"verl_{model_id}_"
+    return f"{WORKER_NAME_PREFIX}{model_id}_"
+
+
+def _dp_size(num_gpus: int, sp_size: int) -> int:
+    """Data-parallel ranks: the GPUs divided among sequence-parallel groups.
+
+    Raises:
+        BackendError: `sp_size` does not divide `num_gpus`.
+    """
+    if sp_size < 1 or num_gpus % sp_size:
+        raise BackendError(f"ulysses_sequence_parallel_size {sp_size} does not divide {num_gpus} GPUs",
+                           backend="verl", operation="create_model")
+    return num_gpus // sp_size
 
 
 def _kill_named_actors(prefix: str) -> None:

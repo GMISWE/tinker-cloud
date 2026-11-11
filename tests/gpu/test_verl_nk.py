@@ -84,7 +84,8 @@ def test_nk_forward_matches_hf(loop, student, tokens):
     bf16 = hf_log_softmax(STUDENT, tokens[:-1], dtype=torch.bfloat16, device="cuda:0").gather(-1, ids)
     print(f"[nk_forward] against HF bf16: backend mean_abs(1:)={(got - bf16).abs()[1:].mean().item():.5f}; "
           f"HF bf16 against HF fp32 mean_abs(1:)={(bf16 - want).abs()[1:].mean().item():.5f}")
-    # all 16 columns sit at bf16's own distance from fp32 (printed above); the best id is tighter
+    # limits for this stack: plain HF in bf16 reads 0.050 from fp32 over these 16 columns and the
+    # backend 0.051 (measured 2026-11-10, both printed above); the best id alone reads 0.019
     assert diff[1:, 0].mean().item() <= 0.05
     assert mean_abs <= 0.08
     assert corr >= 0.995
