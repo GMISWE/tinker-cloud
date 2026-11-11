@@ -33,15 +33,17 @@ class TrainingService:
             )
 
     def check_target_rank(self, data: List[Any], loss_fn: str) -> None:
-        """Raises UnsupportedFeatureError for `target_tokens` of a rank the backend
-        does not read under `loss_fn`. The router calls it before it queues the pass."""
-        reads_nk = loss_fn in self.backend.NK_TARGET_LOSS_FNS
+        """Raises UnsupportedFeatureError for `target_tokens` above rank 1 under a loss
+        the backend reads one target per position for. The router calls it before it
+        queues the pass. Which shapes a declared loss reads is the backend's converter's."""
+        if loss_fn in self.backend.NK_TARGET_LOSS_FNS:
+            return
         for i, datum in enumerate(data):
             target = datum.loss_fn_inputs.get("target_tokens")   # RL datums may carry none
             if target is None:
                 continue
             shape = wire_shape(target)
-            if len(shape) > (2 if reads_nk else 1):
+            if len(shape) > 1:
                 served = ", ".join(sorted(self.backend.NK_TARGET_LOSS_FNS)) or "no loss function"   # message text for an empty declaration
                 raise UnsupportedFeatureError(
                     f"target_tokens of rank {len(shape)} (datum {i}, shape {shape}) under {loss_fn}",

@@ -62,7 +62,8 @@ class VerlHandle(BackendHandle):
 
     worker_group: Any = None          # RayWorkerGroup over TinkerActorRolloutRefWorker
     config: Dict = field(default_factory=dict)
-    trainer_config: Any = None        # the composed verl trainer config the workers and the sampler read
+    # the composed verl trainer config the workers and the sampler read
+    trainer_config: Any = field(kw_only=True)
     dp_size: int = 1
     loss_fn_name: str = ""            # currently installed loss fn on workers
     created_at: str = ""
@@ -424,7 +425,7 @@ class VerlBackend(TrainingBackend[VerlHandle]):
             raise SampleRequestError("topk_prompt_logprobs is not supported on the verl backend", backend="verl")
         vllm_sp = _to_vllm_sampling_params(sampling_params)
         if topk_sample_logprobs > 0:
-            if vllm_sp["temperature"] == 0:  # verl's server refuses a top-k head on a greedy request
+            if vllm_sp["temperature"] == 0:  # verl refuses it: workers/rollout/utils.py, "rollout.topk_log_probs requires stochastic sampling"
                 raise SampleRequestError(
                     "topk_sample_logprobs needs temperature > 0 on the verl backend", backend="verl")
             vllm_sp["topk_log_probs"] = topk_sample_logprobs
