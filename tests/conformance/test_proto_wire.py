@@ -9,7 +9,8 @@ import numpy as np
 import pytest
 
 from tinkercloud.training.proto import tinker_public_pb2 as pb
-from tinkercloud.training.proto.wire import PROTO_CONTENT_TYPE, zstd_available
+from tinkercloud.training.proto import PROTO_CONTENT_TYPE
+from tinkercloud.training.routers.body_encoding import zstd_available
 
 from .conftest import ACCEPT_PROTO
 

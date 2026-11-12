@@ -30,8 +30,9 @@ from ..core.dependencies import (
     get_sample_futures,
 )
 from ..core.task_manager import TaskManager
-from ..proto.wire import (
-    FORWARD_BACKWARD_OPERATIONS, PROTO_CONTENT_TYPE, PROTO_RESULT_OPERATIONS, forward_backward_json, serialize_result,
+from ..proto import PROTO_CONTENT_TYPE
+from ..proto.response_conv import (
+    FORWARD_BACKWARD_OPERATIONS, PROTO_RESULT_OPERATIONS, forward_backward_json, serialize_result,
 )
 
 # Hold a pending retrieve on the operation's task instead of answering 408

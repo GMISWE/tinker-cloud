@@ -11,7 +11,7 @@ import pytest
 from tinker import types
 
 from tinkercloud.training.proto import tinker_public_pb2 as pb
-from tinkercloud.training.proto.wire import PROTO_CONTENT_TYPE
+from tinkercloud.training.proto import PROTO_CONTENT_TYPE
 
 from .conftest import ACCEPT_PROTO
 

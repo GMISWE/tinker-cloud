@@ -22,7 +22,9 @@ from ..services.training_service import TrainingService
 from ..core.task_manager import TaskManager
 from ..core.dependencies import verify_api_key_dep, get_training_clients, get_futures_storage, get_training_service
 from ..core import loss_registry
-from ..proto.wire import PROTO_CONTENT_TYPE, WireError, decompress_zstd, parse_forward_backward_request
+from ..proto import PROTO_CONTENT_TYPE
+from ..proto.request_conv import WireError, parse_forward_backward_request
+from .body_encoding import decompress_zstd
 from ..storage import FuturesStorage
 from ..utils.helpers import generate_request_id
 

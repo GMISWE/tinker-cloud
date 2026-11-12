@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 import requests
 
-from tinkercloud.training.proto.wire import PROTO_CONTENT_TYPE
+from tinkercloud.training.proto import PROTO_CONTENT_TYPE
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 API_KEY = "tml-protocol-test-key"

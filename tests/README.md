@@ -35,7 +35,7 @@ The script pushes the local working tree (sha-verified) to a scratch dir on
 the pod and runs pytest there; the deployed `/app` is untouched. GPU suites
 need the pod's server and Ray head stopped: they start their own Ray.
 
-`unit/proto/test_wire_sdk.py` (the codec driven by the SDK's own converters) is
+`unit/proto/test_sdk_round_trip.py` (the codec driven by the SDK's own converters) is
 skipped unless a `tinker >= 0.25` is importable. To run the conformance suite
 under an upstream SDK without touching the pod's install, put one in a scratch
 target and name it in `SDK_PYTHONPATH`, which `pod_pytest.sh` prepends to the test

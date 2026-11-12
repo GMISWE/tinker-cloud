@@ -60,7 +60,7 @@ def _result(server, body):
 def test_sparse_weights_are_served_as_the_dense_request_is(server, model):
     """The POST was a 422 before the decode, so a custom loss on [N, K] targets never reached a backend.
     This guards the acceptance over HTTP: the fake backend's outputs do not depend on the weights, and the
-    decoded values are `tests/unit/proto/test_wire_sparse.py`'s to check."""
+    decoded values are `tests/unit/proto/test_request_conv_sparse.py`'s to check."""
     dense = _result(server, _body(model, seq_id=1))
     sparse = _result(server, _body(model, seq_id=2, sparse_weights=True))
     assert sparse.loss_fn_outputs == dense.loss_fn_outputs

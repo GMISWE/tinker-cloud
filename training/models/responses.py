@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from ..checkpoints import CheckpointStatus
-from .wire_values import DEFAULT_TENSOR_DTYPE, batched_layout, is_array, list_or_array
+from .tensor_values import DEFAULT_TENSOR_DTYPE, batched_layout, is_array, list_or_array
 
 
 class AsyncOperationResponse(BaseModel):

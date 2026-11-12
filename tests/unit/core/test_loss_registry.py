@@ -96,3 +96,9 @@ def test_nk_targets_are_refused_under_a_loss_that_reads_one_target():
     svc.check_target_rank([datum([2])], "ppo")
     with pytest.raises(UnsupportedFeatureError, match=r"target_tokens of rank 2 .* under ppo"):
         svc.check_target_rank([datum([2, 4])], "ppo")
+
+
+def test_registry_rejects_text_on_a_numeric_key():
+    with pytest.raises(ValueError, match="must be a number"):
+        loss_registry.validate("ppo", {"clip_low_threshold": "0.8"})
+    loss_registry.validate("ppo", {"clip_low_threshold": 0.8})

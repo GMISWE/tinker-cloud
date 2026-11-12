@@ -5,8 +5,8 @@ import numpy as np
 import pytest
 
 from tinkercloud.training.proto import tinker_public_pb2 as pb
-from tinkercloud.training.proto import wire
-from tinkercloud.training.proto.wire import WireError, parse_forward_backward_request
+from tinkercloud.training.proto import request_conv
+from tinkercloud.training.proto.request_conv import WireError, parse_forward_backward_request
 
 from tests.datums import write_csr
 
@@ -92,8 +92,8 @@ def test_the_sparse_tensors_of_a_request_share_one_bound_on_their_dense_bytes(mo
     the decode would allocate it. The bound is the request's: two tensors that each fit do not fit twice."""
     msg = _csr_msg()
     msg.data.add().CopyFrom(msg.data[0])
-    monkeypatch.setattr(wire, "MAX_DECOMPRESSED_BODY_BYTES", 2 * ROWS * COLS * 4)
+    monkeypatch.setattr(request_conv, "MAX_DECOMPRESSED_BODY_BYTES", 2 * ROWS * COLS * 4)
     parse_forward_backward_request(msg.SerializeToString())
-    monkeypatch.setattr(wire, "MAX_DECOMPRESSED_BODY_BYTES", 2 * ROWS * COLS * 4 - 1)
+    monkeypatch.setattr(request_conv, "MAX_DECOMPRESSED_BODY_BYTES", 2 * ROWS * COLS * 4 - 1)
     with pytest.raises(WireError, match="densifies past"):
         parse_forward_backward_request(msg.SerializeToString())

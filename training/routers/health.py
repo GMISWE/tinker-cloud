@@ -26,7 +26,7 @@ from ..core.dependencies import (
 )
 from ..core.task_manager import TaskManager
 from ..services.training_service import TrainingService
-from ..proto.wire import zstd_available
+from .body_encoding import zstd_available
 
 logger = logging.getLogger(__name__)
 

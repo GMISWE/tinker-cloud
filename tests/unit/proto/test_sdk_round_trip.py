@@ -5,7 +5,8 @@ import numpy as np
 import pytest
 
 from tinkercloud.training.models.requests import ForwardBackwardRequest
-from tinkercloud.training.proto.wire import parse_forward_backward_request, serialize_result
+from tinkercloud.training.proto.request_conv import parse_forward_backward_request
+from tinkercloud.training.proto.response_conv import serialize_result
 
 
 sdk_req = pytest.importorskip("tinker.proto.request_conv", reason="tinker >= 0.25 not installed")
