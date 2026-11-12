@@ -14,8 +14,8 @@ from tinkercloud.training.backends.automodel.backend import AutomodelBackend, Au
 from tinkercloud.training.backends.automodel.converter import LossFn
 from tinkercloud.training.backends.automodel.errors import NonFiniteGradNorm, StateMismatch
 from tinkercloud.training.backends.automodel.lora import LoraSpec
-from tinkercloud.training.backends.automodel.scheduler import GroupScheduler
 from tinkercloud.training.backends.base import BackendError
+from tinkercloud.training.backends.common.scheduler import GroupScheduler
 from tinkercloud.training.backends.http_pool import HttpClientPool
 from tinkercloud.training.core import routing
 from tinkercloud.training.models.requests import AdamParams, Datum
@@ -192,7 +192,7 @@ def wired(tmp_path=None, vllm=None, tenants=("m",), group_tenants=("m",)):
     the scheduler starts its worker task."""
     backend = AutomodelBackend(overrides=CONFIG)
     ranks = Ranks()
-    scheduler = GroupScheduler("g", lambda pk, payloads: backend._run_pass("g", pk, payloads))
+    scheduler = GroupScheduler("g", lambda pk, payloads: backend._run_pass("g", pk, payloads), "automodel")
     backend._groups["g"] = _Group("g", ranks, scheduler, set(group_tenants))
     handle = AutomodelHandle(model_id="m", base_model="b", lora=LORA, group_key="g")
     if tmp_path is not None:
