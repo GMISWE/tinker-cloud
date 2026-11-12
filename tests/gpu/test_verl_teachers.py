@@ -12,7 +12,6 @@ import os
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
-import asyncio  # noqa: E402
 import itertools  # noqa: E402
 
 import pytest  # noqa: E402
@@ -36,11 +35,10 @@ POSITIONS = 128
 SAMPLING = {"temperature": 1.0, "top_p": 1.0, "max_tokens": 32, "seed": 0}
 
 
-def test_three_teachers_share_the_students_gpus(monkeypatch):
+def test_three_teachers_share_the_students_gpus(monkeypatch, loop):
     monkeypatch.setenv("TINKERCLOUD_VERL_MODELS_PER_GPU", "4")
     # the sampler takes its share of GPUs that already hold four models
     backend = VerlBackend(overrides={"rollout_gpu_memory_utilization": 0.3})
-    loop = asyncio.new_event_loop()
     run = loop.run_until_complete
     tokens = text_tokens(POSITIONS + 1)
     g = torch.Generator().manual_seed(0)
@@ -91,6 +89,5 @@ def test_three_teachers_share_the_students_gpus(monkeypatch):
     finally:
         for handle in handles.values():
             run(backend.delete_model(handle))
-        loop.close()
     assert verl_actors() == []
     assert live_placement_groups() == []
