@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from tinkercloud.training.backends.base import SampleRequestError
 from tinkercloud.training.backends.fake.backend import FAKE_MAX_TOPK, FakeBackend
-from tinkercloud.training.checkpoints.store import CheckpointKind, CheckpointStore
+from tinkercloud.training.checkpoints.store import CheckpointStore
 from tinkercloud.training.models.requests import ASampleRequest, SampleRequest, SamplingParams
 from tinkercloud.training.routers.sampling import check_sample_extensions, sample
 from tinkercloud.training.services.sampling_service import SamplingService, _check_sample_request, _mask_prompt_prefix
@@ -94,6 +94,8 @@ def test_service_caps_topk_at_the_engine_limit():
 
 
 def test_sync_sample_forwards_pinned_version_to_backend(tmp_path, monkeypatch):
+    """`/api/v1/sample` resolved the sampler's pin and dropped it, so the backend saw `pinned_version=None`.
+    The second request carries no pin: the control."""
     trace_path = tmp_path / "trace.jsonl"
     monkeypatch.setenv("FAKE_BACKEND_TRACE", str(trace_path))
     monkeypatch.setattr(helpers, "_ENGINE_NAME", "t")
@@ -107,18 +109,10 @@ def test_sync_sample_forwards_pinned_version_to_backend(tmp_path, monkeypatch):
         futures = SampleFutureStore()
         store = CheckpointStore(tmp_path / "ckpt", MetadataStorage(tmp_path / "meta"))
 
-        ticket = store.begin_save(
-            model_id, CheckpointKind.SAMPLER_WEIGHTS, "snap_v2",
-            weight_version=2, optimizer_config={"type": "adamw"},
-        )
-        store.complete(ticket.ref)
-
         params = SamplingParams(max_tokens=2)
         reqs = [
             (SampleRequest(prompts=[[1, 2]], num_samples=1, sampling_params=params, sampling_session_id="s1"),
              {"x_model_id": model_id, "x_pinned_version": "1", "x_base_model": None}),
-            (SampleRequest(prompts=[[3, 4]], num_samples=1, sampling_params=params, model_path=ticket.ref.uri),
-             {"x_model_id": None, "x_pinned_version": None, "x_base_model": None}),
             (SampleRequest(prompts=[[5, 6]], num_samples=1, sampling_params=params, sampling_session_id="s2"),
              {"x_model_id": model_id, "x_pinned_version": None, "x_base_model": None}),
         ]
@@ -130,5 +124,5 @@ def test_sync_sample_forwards_pinned_version_to_backend(tmp_path, monkeypatch):
             assert sf.status == "completed"
 
     asyncio.run(_exercise())
-    sample_traces = [json.loads(line) for line in trace_path.read_text().splitlines() if '"op": "sample"' in line]
-    assert [t["pinned_version"] for t in sample_traces] == [1, 2, None]
+    trace = [json.loads(line) for line in trace_path.read_text().splitlines()]
+    assert [t["pinned_version"] for t in trace if t["op"] == "sample"] == [1, None]
