@@ -1,6 +1,7 @@
 """A datum that arrived as a proto body carries its tensors as arrays; one that arrived as JSON
 carries lists. Every backend's converter must read both to the same backend input: a converter that
-slices, concatenates or truth-tests the values treats an array differently from a list."""
+slices, concatenates or truth-tests the values treats an array differently from a list. The last case
+holds the wire name of those values, which the two arrivals share."""
 import dataclasses
 import sys
 from collections.abc import Mapping
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
+from pydantic import ValidationError
 
 from tinkercloud.training.models.requests import ForwardBackwardRequest
 from tinkercloud.training.proto import tinker_public_pb2 as pb
@@ -114,3 +116,14 @@ def test_a_proto_datum_and_a_json_datum_convert_alike(convert, loss_fn, inputs, 
                             SimpleNamespace(BatchedDataDict=dict))
     proto_data, json_data = _both_arrivals(inputs)
     _assert_same(convert(proto_data, loss_fn), convert(json_data, loss_fn))
+
+
+def test_a_tensor_is_named_data_on_the_wire_only():
+    """The model keeps a tensor's values under `values`, which is not a wire name: a body that sends
+    `values` and no `data` is as malformed as one that sends neither."""
+    body = {"model_id": "m", "forward_backward_input": {"loss_fn": "cross_entropy", "data": [{
+        "model_input": {"tokens": TOKENS}, "loss_fn_inputs": {"weights": {"values": [1.0] * N, "dtype": "float32"}}}]}}
+    with pytest.raises(ValidationError) as refused:
+        ForwardBackwardRequest.model_validate(body)
+    (error,) = refused.value.errors()
+    assert error["type"] == "missing" and error["loc"][-2:] == ("weights", "data")
