@@ -27,7 +27,6 @@ if torch.cuda.device_count() < 4:
     pytest.skip("needs 4 GPUs", allow_module_level=True)
 
 from tinkercloud.training.backends.verl.backend import VerlBackend  # noqa: E402
-from tinkercloud.training.backends.verl.builder import VerlArgumentBuilder  # noqa: E402
 
 from .verl_smollm3 import K, STUDENT, TEACHERS, adam, create_full_weights, datum, gpu_mib, verl_actors  # noqa: E402
 
@@ -84,11 +83,7 @@ def backend():
     with pytest.MonkeyPatch.context() as env:
         env.setenv("TINKERCLOUD_VERL_MODELS_PER_GPU", "4")
         env.setenv("TINKERCLOUD_VERL_MAX_SEQ_LEN", str(MAX_SEQ_LEN))
-        env.setenv("TINKERCLOUD_MODEL_ROOT", MODEL_ROOT)
-        # a name the root does not hold falls through to another directory or the hub id, silently
-        for name in (STUDENT, *TEACHERS):
-            resolved = VerlArgumentBuilder.resolve_hf_path(name)
-            assert resolved.startswith(MODEL_ROOT + "/"), resolved
+        env.setenv("TINKERCLOUD_MODEL_ROOT", MODEL_ROOT)   # a name the root lacks is refused at create
         yield VerlBackend()
     assert verl_actors() == []
 

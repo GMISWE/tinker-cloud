@@ -47,6 +47,15 @@ PUSHED=0
 on_exit() {
   local rc=$?
   rm -rf "$TMP"
+  # A GPU run that fails or is cut off can leave its pytest alive on the GPUs (seen: one that waited
+  # on a pass that had run out of memory until its own 25-minute timeout, while the next run was
+  # refused). Its processes are the ones whose working directory is this run's tree. The head is
+  # taken to be the run's own: the guard below saw none before the push, and one started since by
+  # someone else is stopped with it.
+  if [ "$PUSHED" = 1 ] && [ "$GPU_RUN" = 1 ] && [ "$rc" != 0 ]; then
+    { kx exec "$POD" -- bash -c "for p in /proc/[0-9]*; do [ \"\$(readlink \$p/cwd 2>/dev/null)\" = '$REMOTE/app' ] && kill -9 \${p##*/}; done; true" \
+        && EX_TIMEOUT 60 "$(ray_head stop)"; } >&2 || echo "  could not clean up the failed GPU run on $POD" >&2
+  fi
   # a pod we never reached has nothing to remove; a failed removal leaves one tree in /tmp
   [ "$PUSHED" = 0 ] || kx exec "$POD" -- rm -rf "$REMOTE" "$REMOTE.tgz" || echo "  could not remove $POD:$REMOTE" >&2
   [ "$LOGGED" = 1 ] || printf '%s %s %s | no run (exit %s before pytest)\n' "$(date -u +%FT%TZ)" "$POD" "$ARGS" "$rc" >> "$LOG"
@@ -86,6 +95,6 @@ RC=0
 timeout "$KX_TIMEOUT" kubectl -n "$NS" exec "$POD" -- bash -c "cd '$REMOTE/app' && env -u TINKERCLOUD_BACKEND -u RAY_ADDRESS PYTHONPATH='${SDK_PYTHONPATH:+$SDK_PYTHONPATH:}$REMOTE' python -m pytest $(printf '%q ' "$@")" \
   | tee "$TMP/run.log" || RC=$?
 # the verdict is pytest's summary line ("N passed, M skipped in ...", "N tests collected", "no tests ran", "ERROR: ...")
-VERDICT="$(grep -E '^(=+ )?([0-9]+ (passed|failed|errors?|skipped|tests? collected|deselected)|no tests ran|ERROR)' "$TMP/run.log" | tail -1 | tr -d '=' | sed 's/^ *//;s/ *$//')"
+VERDICT="$(grep -E '^(=+ )?([0-9]+ (passed|failed|errors?|skipped|tests? collected|deselected)|no tests ran|ERROR)' "$TMP/run.log" | tail -1 | tr -d '=' | sed 's/^ *//;s/ *$//' || true)"
 printf '%s %s %s | %s\n' "$(date -u +%FT%TZ)" "$POD" "$*" "${VERDICT:-no pytest summary (rc $RC)}" >> "$LOG"; LOGGED=1
 exit $RC
