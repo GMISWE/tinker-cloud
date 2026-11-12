@@ -13,8 +13,6 @@ import os
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
-import asyncio  # noqa: E402
-
 import pytest  # noqa: E402
 
 pytest.importorskip("verl", reason="needs the verl training env")
@@ -24,35 +22,14 @@ if torch.cuda.device_count() < 4:
     pytest.skip("needs 4 GPUs", allow_module_level=True)
 
 from tinkercloud.training.backends.base import SampleRequestError  # noqa: E402
-from tinkercloud.training.backends.verl.backend import VerlBackend  # noqa: E402
 
 from .verl_smollm3 import (  # noqa: E402
-    FULL_WEIGHTS, K, NUM_GPUS, STUDENT, adam, datum, hf_log_softmax, logprobs_of, text_tokens, verl_actors,
+    K, STUDENT, adam, datum, hf_log_softmax, logprobs_of, text_tokens,
 )
 
 POSITIONS = 160
 PROMPT_LEN = 32
 SAMPLING = {"temperature": 1.0, "top_p": 1.0, "max_tokens": 64, "seed": 0}
-
-
-@pytest.fixture(scope="module")
-def loop():
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
-@pytest.fixture(scope="module")
-def student(loop):
-    """(backend, handle) of the student; deleted after the module, and no actor may outlive it."""
-    backend = VerlBackend()
-    handle = loop.run_until_complete(backend.create_model(
-        "nk_student", "create", STUDENT, NUM_GPUS, lora_config=FULL_WEIGHTS, optimizer="adamw"))
-    try:
-        yield backend, handle
-    finally:
-        loop.run_until_complete(backend.delete_model(handle))
-    assert verl_actors() == []
 
 
 @pytest.fixture(scope="module")

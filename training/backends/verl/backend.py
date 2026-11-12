@@ -9,7 +9,7 @@ weight_decay) + optimizer_zero_grad. forward_backward here does real GPU
 work and returns real logprobs; apply_optimizer_step applies AdamParams and
 steps once.
 
-Rollout: every model is a TinkerActorRolloutRefWorker group (actor_rollout
+Rollout: every model is a StepClipWorker group (verl's Tinker worker; actor_rollout
 role). Its vLLM server replicas (LLMServerManager) are built at the model's
 first sample, in hybrid timeshare: replicas sleep during training ops and
 wake with a naive weight sync (CheckpointEngineManager) for sampling. A model
@@ -24,6 +24,7 @@ GPU, so several models are resident on the same devices.
 """
 import asyncio
 import logging
+import math
 import threading
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -60,7 +61,7 @@ def _set_event() -> asyncio.Event:
 class VerlHandle(BackendHandle):
     """veRL-specific runtime state."""
 
-    worker_group: Any = None          # RayWorkerGroup over TinkerActorRolloutRefWorker
+    worker_group: Any = None          # RayWorkerGroup over StepClipWorker
     config: Dict = field(default_factory=dict)
     # the composed verl trainer config the workers and the sampler read
     trainer_config: Any = field(kw_only=True)
@@ -284,11 +285,11 @@ class VerlBackend(TrainingBackend[VerlHandle]):
                     "eps": float(adam.eps),
                     "weight_decay": float(adam.weight_decay),
                 }
-                if adam.grad_clip_norm > 0:
-                    logger.warning("verl optim_step: grad_clip_norm is set at engine build, not per step")
+                # 0 means no clipping; the request model refuses a negative value
+                clip = float(adam.grad_clip_norm) if adam.grad_clip_norm > 0 else NO_GRAD_CLIP
 
                 metrics = await asyncio.to_thread(
-                    _wg_scalar_call, handle.worker_group.optimizer_step, params,
+                    _wg_scalar_call, handle.worker_group.optimizer_step, params, clip,
                 )
                 handle.weight_version += 1
                 grad_norm = metrics.get("grad_norm")
@@ -522,16 +523,17 @@ class VerlBackend(TrainingBackend[VerlHandle]):
     # -------------------------------------------------------------- helpers
 
     def _boot(self, trainer_config, model_id: str, num_gpus: int):
-        """One model's TinkerActorRolloutRefWorker group in the shared GPUs, its engines
+        """One model's StepClipWorker group in the shared GPUs, its engines
         initialized. Blocking. A failed boot leaves no actor and no share behind."""
         import ray
         from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
-        from verl.workers.engine_workers_tinker import TinkerActorRolloutRefWorker
+
+        from .worker import StepClipWorker
 
         pool = self._gpus.acquire(model_id, num_gpus)
         try:
             ray_cls = RayClassWithInitArgs(
-                cls=ray.remote(TinkerActorRolloutRefWorker),
+                cls=ray.remote(StepClipWorker),
                 config=trainer_config.actor_rollout_ref, role="actor_rollout",
             )
             worker_group = RayWorkerGroup(
@@ -693,7 +695,8 @@ def _wg_call(method, td):
 def _wg_scalar_call(method, *args):
     out = method(*args)
     if isinstance(out, list):
-        # ONE_TO_ALL returns per-worker dicts; grad_norm identical post-clip
+        # ONE_TO_ALL returns per-worker dicts. A rank with no outputs of its own adds no grad_norm (verl
+        # TinkerTrainingWorker.optimizer_step); the ranks that report one are assumed to agree, unverified.
         merged: Dict[str, Any] = {}
         for d in out:
             if isinstance(d, dict):
@@ -773,16 +776,24 @@ def _adopt_adapter_shape(checkpoint_root: str, model_cfg: Dict[str, Any]) -> Non
             model_cfg[key] = want
 
 
-def _compose_actor_rollout_config(cfg: Dict[str, Any]):
-    """Assemble a trainer-shaped OmegaConf for ActorRolloutRefWorker +
-    LLMServerManager from verl's packaged ppo_trainer defaults."""
-    import os as _os
+NO_GRAD_CLIP = math.inf   # the engine's clip for a step that asks for none: a max norm no gradient exceeds
 
-    from hydra import compose, initialize_config_dir
-    from hydra.core.global_hydra import GlobalHydra
+# What a Tinker client assumes of the trainer and never sends. Each equals upstream's default today, except
+# `lr_warmup_steps` (upstream -1, which defers to the ratio); set here so that a moved default cannot change a
+# run (verl key under `actor_rollout_ref.actor` -> value).
+PINNED_ACTOR_CONFIG = {
+    "optim.optimizer": "AdamW",
+    "optim.optimizer_impl": "torch.optim",
+    "optim.lr_scheduler_type": "constant",   # the client sends lr per step; the scheduler is never stepped
+    "optim.lr_warmup_steps": 0,
+    "optim.lr_warmup_steps_ratio": 0.0,
+    "fsdp_config.model_dtype": "fp32",       # master weights
+    "fsdp_config.dtype": "bfloat16",         # autocast
+}
 
-    import verl.trainer.config as _cfgpkg
 
+def actor_rollout_overrides(cfg: Dict[str, Any]) -> List[str]:
+    """The Hydra overrides that turn verl's packaged ppo_trainer defaults into one model's config."""
     model = cfg["model"]
     engine = cfg["engine"]
     rollout = cfg["rollout"]
@@ -792,7 +803,7 @@ def _compose_actor_rollout_config(cfg: Dict[str, Any]):
     tm = model["target_modules"]
     tm_override = "[" + ",".join(tm) + "]" if isinstance(tm, (list, tuple)) else str(tm)
 
-    overrides = [
+    return [
         f"actor_rollout_ref.model.path={model['path']}",
         f"actor_rollout_ref.model.use_remove_padding={model['use_remove_padding']}",
         f"actor_rollout_ref.model.lora_rank={model['lora_rank']}",
@@ -814,6 +825,7 @@ def _compose_actor_rollout_config(cfg: Dict[str, Any]):
         f"actor_rollout_ref.actor.fsdp_config.param_offload={engine['param_offload']}",
         f"actor_rollout_ref.actor.fsdp_config.optimizer_offload={engine['optimizer_offload']}",
         f"actor_rollout_ref.actor.optim.lr={cfg['optim']['lr']}",
+        *(f"actor_rollout_ref.actor.{key}={value}" for key, value in PINNED_ACTOR_CONFIG.items()),
         f"actor_rollout_ref.rollout.name={rollout['name']}",
         f"actor_rollout_ref.rollout.mode={rollout['mode']}",
         f"actor_rollout_ref.rollout.prompt_length={rollout['prompt_length']}",
@@ -836,10 +848,20 @@ def _compose_actor_rollout_config(cfg: Dict[str, Any]):
         "trainer.nnodes=1",
     ]
 
+
+def _compose_actor_rollout_config(cfg: Dict[str, Any]):
+    """Assemble a trainer-shaped OmegaConf for ActorRolloutRefWorker +
+    LLMServerManager from verl's packaged ppo_trainer defaults."""
+    import os as _os
+
+    from hydra import compose, initialize_config_dir
+    from hydra.core.global_hydra import GlobalHydra
+
+    import verl.trainer.config as _cfgpkg
+
     GlobalHydra.instance().clear()
     with initialize_config_dir(config_dir=_os.path.dirname(_cfgpkg.__file__), version_base=None):
-        full = compose(config_name="ppo_trainer", overrides=overrides)
-    return full
+        return compose(config_name="ppo_trainer", overrides=actor_rollout_overrides(cfg))
 
 
 # verl names its vLLM server actors `vllm_server_<replica>_<node>`; one model owns them all (VerlBackend._sampler_model_id)

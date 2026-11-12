@@ -76,6 +76,13 @@ def test_a_step_of_the_other_family_is_400_naming_both(server, dimuon, adamw):
     assert "adamw" in r.json()["error"] and "dimuon" in r.json()["error"]
 
 
+def test_a_negative_adam_clip_is_422_naming_the_field(server, adamw):
+    r = _step(server, adamw.model_id, {"adam_params": {"learning_rate": 1e-3, "grad_clip_norm": -1.0}})
+    assert r.status_code == 422 and "grad_clip_norm" in r.text, (r.status_code, r.text)
+    r = _step(server, adamw.model_id, {"adam_params": {"learning_rate": 1e-3, "grad_clip_norm": 0.0}})
+    assert r.status_code == 200, r.text
+
+
 def test_both_or_neither_parameter_key_is_400(server, dimuon):
     r = _step(server, dimuon.model_id, {"adam_params": {"learning_rate": 1e-3},
                                         "optimizer_params": {"type": "dimuon", "learning_rate": 1e-3}})

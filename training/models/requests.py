@@ -431,7 +431,8 @@ class AdamParams(BaseModel):
     beta2: float = Field(default=0.95, description="Beta2 coefficient")
     eps: float = Field(default=1e-12, description="Epsilon for numerical stability")
     weight_decay: float = Field(default=0.0, description="Weight decay")
-    grad_clip_norm: float = Field(default=0.0, description="Gradient clip norm (0.0 = no clipping)")
+    # the SDK defines 0 (no clipping) and positive norms; a negative one is a caller bug
+    grad_clip_norm: float = Field(default=0.0, ge=0, description="Gradient clip norm (0.0 = no clipping)")
 
 
 class DimuonParams(BaseModel):
