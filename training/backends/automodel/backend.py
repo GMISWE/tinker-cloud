@@ -51,7 +51,7 @@ from ...core import routing
 from ...core.fault_injection import hang_point
 from ...core.loss_registry import clip_thresholds
 from ...models.requests import Datum, LoraConfig, OptimParams
-from ...utils.model_config import model_context_length, read_raw_hf_config
+from ...utils.model_config import model_context_length, read_raw_hf_config, remote_code_trusted
 from ..base import BackendError, BackendHandle, TrainingBackend, UnsupportedFeatureError
 from ..common.sampling.generation import sample_over_http
 from ..common.sampling.vllm_client import VllmLoraClient
@@ -203,7 +203,8 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
 
         try:
             from transformers import AutoTokenizer   # the training env's transformers
-            tokenizer = await asyncio.to_thread(AutoTokenizer.from_pretrained, base_model)
+            tokenizer = await asyncio.to_thread(
+                AutoTokenizer.from_pretrained, base_model, trust_remote_code=remote_code_trusted(base_model))
             sampler = await self._sampler_for(base_model, context_length, sampler_rank, request_id)
         except BaseException:   # a failed create cleans up what it started (R5)
             await self._drop_tenant(key, model_id, "create_model", f"create_model of {model_id} failed")
@@ -459,7 +460,8 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
             context_length = model_context_length(raw)
             rank = vllm_lora_rank(self.config.max_lora_rank * vllm_rank_factor(raw))
             from transformers import AutoTokenizer   # the training env's transformers
-            tokenizer = await asyncio.to_thread(AutoTokenizer.from_pretrained, base_model)
+            tokenizer = await asyncio.to_thread(
+                AutoTokenizer.from_pretrained, base_model, trust_remote_code=remote_code_trusted(base_model))
             self._sweep_once()
             sampler = await self._sampler_for(base_model, context_length, rank, key)
             sampler.tenants.add(key)

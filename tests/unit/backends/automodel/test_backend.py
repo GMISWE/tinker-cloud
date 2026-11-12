@@ -246,7 +246,7 @@ def creatable(monkeypatch):
     monkeypatch.setattr(mod, "read_raw_hf_config", lambda base_model: {"model_type": "qwen3"})
     monkeypatch.setattr(mod, "classification_spec", lambda raw: None)
     monkeypatch.setattr(mod, "model_context_length", lambda raw: 2048)
-    tokenizers = types.SimpleNamespace(from_pretrained=lambda base_model: Tokenizer())
+    tokenizers = types.SimpleNamespace(from_pretrained=lambda base_model, **kwargs: Tokenizer())
     monkeypatch.setitem(sys.modules, "transformers", types.SimpleNamespace(AutoTokenizer=tokenizers))
     return AutomodelBackend(overrides=CONFIG), started
 
@@ -879,3 +879,40 @@ def test_a_base_model_the_sampler_cannot_boot_on_is_refused_at_the_check(tmp_pat
     (tmp_path / "config.json").write_text(json.dumps(config))
     with pytest.raises(ValueError, match=f"is not served: .*{reason}"):
         asyncio.run(AutomodelBackend(overrides=CONFIG).check_base_model(str(tmp_path)))
+
+
+def test_create_and_base_sampler_forward_trust_remote_code(monkeypatch, tmp_path):
+    """AutoTokenizer.from_pretrained receives trust_remote_code=remote_code_trusted(base_model)
+    for both create_model and base_model_handle."""
+    import sys
+    import types
+    from tinkercloud.training import config as cfg_mod
+
+    backend, _ = creatable(monkeypatch)
+    seen = []
+
+    def from_pretrained(base_model, **kwargs):
+        seen.append((base_model, kwargs))
+        return Tokenizer()
+
+    monkeypatch.setitem(sys.modules, "transformers", types.SimpleNamespace(
+        AutoTokenizer=types.SimpleNamespace(from_pretrained=from_pretrained),
+    ))
+    monkeypatch.setattr(cfg_mod, "_config", cfg_mod.TrainingConfig(trust_remote_code_models=["trusted/model"]))
+
+    async def go():
+        await backend.create_model("m1", "r1", "untrusted/model", 2, lora_config=LORA_A,
+                                   native_root=tmp_path / "m1", optimizer="adamw")
+        await backend.create_model("m2", "r2", "trusted/model", 2, lora_config=LORA_A,
+                                   native_root=tmp_path / "m2", optimizer="adamw")
+        await backend.base_model_handle("untrusted/base")
+        await backend.base_model_handle("trusted/model")
+        await backend.close()
+
+    asyncio.run(go())
+    assert seen == [
+        ("untrusted/model", {"trust_remote_code": False}),
+        ("trusted/model", {"trust_remote_code": True}),
+        ("untrusted/base", {"trust_remote_code": False}),
+        ("trusted/model", {"trust_remote_code": True}),
+    ]
