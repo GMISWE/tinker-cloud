@@ -128,7 +128,7 @@ server_boot() {
 SERVER_HEALTH="curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://localhost:$API_PORT/health"
 
 # The pod side of this pod's Ray head: `ray_head state`, `ray_head ensure <gpus>` or
-# `ray_head recycle <gpus>`.
+# `ray_head recycle <gpus>`; `ray_head stop` stops whatever head runs and starts none.
 # state prints one word: none (no live raylet), open (a head answers a client holding no token: an
 # earlier deploy's), token (it refuses that client and answers one holding the token file), or a
 # sentence starting `unusable` (a head runs that neither answers).
@@ -195,7 +195,8 @@ case $cmd in
       *) fail "$state" ;;
     esac ;;
   recycle) stop_head; start_head "$5" ;;
-  *) fail "ray_head takes state, ensure <gpus> or recycle <gpus>, not '$cmd'" ;;
+  stop) stop_head ;;
+  *) fail "ray_head takes state, ensure <gpus>, recycle <gpus> or stop, not '$cmd'" ;;
 esac
 EOF
 # ray_head <command> [gpus]: the pod-side command line that runs RAY_HEAD_SH.

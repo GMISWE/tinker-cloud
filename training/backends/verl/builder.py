@@ -106,8 +106,22 @@ class VerlArgumentBuilder(ArgumentBuilder):
 
     @staticmethod
     def resolve_hf_path(base_model: str) -> str:
-        for root in filter(None, [os.environ.get("TINKERCLOUD_MODEL_ROOT"), "/data/models", "/root/models"]):
+        """The directory `base_model` loads from, or the name itself (an absolute path, else a hub id).
+
+        Raises:
+            FileNotFoundError: TINKERCLOUD_MODEL_ROOT is set and holds no such model. The operator
+                named where models live; another copy of the same name may differ in its config.
+        """
+        if os.path.isabs(base_model):
+            return base_model
+        root = os.environ.get("TINKERCLOUD_MODEL_ROOT")
+        if root:
             candidate = os.path.join(root, base_model)
             if os.path.isdir(candidate):
                 return candidate
-        return base_model  # HF hub id / absolute path
+            raise FileNotFoundError(f"TINKERCLOUD_MODEL_ROOT is {root} and holds no directory {base_model}")
+        for root in ("/data/models", "/root/models"):
+            candidate = os.path.join(root, base_model)
+            if os.path.isdir(candidate):
+                return candidate
+        return base_model

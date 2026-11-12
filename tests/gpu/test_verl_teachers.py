@@ -27,7 +27,7 @@ from tinkercloud.training.backends.base import SampleRequestError  # noqa: E402
 from tinkercloud.training.backends.verl.backend import VerlBackend  # noqa: E402
 
 from .verl_smollm3 import (  # noqa: E402
-    K, STUDENT, TEACHERS, adam, create_full_weights, datum, gpu_mib, live_placement_groups, logprobs_of,
+    K, STUDENT, TEACHERS, adam, candidate_ids, create_full_weights, datum, gpu_mib, live_placement_groups, logprobs_of,
     text_tokens, verl_actors, vllm_actors,
 )
 
@@ -42,8 +42,7 @@ def test_three_teachers_share_the_students_gpus(monkeypatch, loop):
     run = loop.run_until_complete
     tokens = text_tokens(POSITIONS + 1)
     g = torch.Generator().manual_seed(0)
-    ids = torch.randint(0, 30000, (POSITIONS, K), generator=g)
-    ids[:, 0] = torch.tensor(tokens[1:])
+    ids = candidate_ids(tokens, g)
     nk = datum(tokens[:-1], ids, torch.ones(POSITIONS, K))
     handles = {}
     try:

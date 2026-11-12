@@ -24,7 +24,7 @@ if torch.cuda.device_count() < 4:
 from tinkercloud.training.backends.base import SampleRequestError  # noqa: E402
 
 from .verl_smollm3 import (  # noqa: E402
-    K, STUDENT, adam, datum, hf_log_softmax, logprobs_of, text_tokens,
+    K, STUDENT, adam, candidate_ids, datum, hf_log_softmax, logprobs_of, text_tokens,
 )
 
 POSITIONS = 160
@@ -72,8 +72,7 @@ def test_nk_forward_backward_signed_sum_and_k1(loop, student, tokens):
     backend, handle = student
     run = loop.run_until_complete
     g = torch.Generator().manual_seed(0)
-    ids = torch.randint(0, 30000, (POSITIONS, K), generator=g)
-    ids[:, 0] = torch.tensor(tokens[1:])
+    ids = candidate_ids(tokens, g)
     weights = torch.randn(POSITIONS, K, generator=g)               # both signs
     result = run(backend.forward_backward(handle, [datum(tokens[:-1], ids, weights)], "cross_entropy"))
     logprobs = logprobs_of(result)

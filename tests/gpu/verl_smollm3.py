@@ -53,6 +53,13 @@ def text_tokens(count: int) -> list:
     return tokens[:count]
 
 
+def candidate_ids(tokens: list, generator: torch.Generator) -> torch.Tensor:
+    """[len(tokens) - 1, K] candidate ids: the next token in column 0, random ids beside it."""
+    ids = torch.randint(0, 30000, (len(tokens) - 1, K), generator=generator)
+    ids[:, 0] = torch.tensor(tokens[1:])
+    return ids
+
+
 def logprobs_of(result: dict) -> torch.Tensor:
     """The first datum's logprobs of a forward or forward_backward result, in their wire shape."""
     out = result["loss_fn_outputs"][0]["logprobs"]

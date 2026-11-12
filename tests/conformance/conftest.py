@@ -30,8 +30,9 @@ def _free_port() -> int:
 class Server:
     """`single`: today's one process. `split`: an engine on a unix socket behind the gateway on TCP."""
 
-    # "single": the one-process server, the topology the server ships with
-    def __init__(self, tmp: Path, mode: str = "single", **extra_env: str):
+    # "single": the one-process server, the topology the server ships with; `backend` names its backend
+    # (the split engine is the fake one)
+    def __init__(self, tmp: Path, mode: str = "single", backend: str = "fake", **extra_env: str):
         self.mode = mode
         self.port = _free_port()
         self.base_url = f"http://127.0.0.1:{self.port}"
@@ -48,7 +49,7 @@ class Server:
             "PYTHONPATH": str(REPO_ROOT),
             "METADATA_DIR": str(self.metadata_dir),
             "TINKERCLOUD_CHECKPOINT_BASE": str(self.checkpoint_base),
-            "TINKERCLOUD_BACKEND": "fake",
+            "TINKERCLOUD_BACKEND": backend,
             "TINKER_API_KEY": API_KEY,
             "FAKE_BACKEND_TRACE": str(self.trace_path),
             "FAKE_BACKEND_GATE": str(self.gate),
@@ -64,7 +65,7 @@ class Server:
         self.engine = None
         if mode == "single":
             self.proc = subprocess.Popen(
-                [sys.executable, "-m", "training.api", "--backend", "fake",
+                [sys.executable, "-m", "training.api", "--backend", backend,
                  "--host", "127.0.0.1", "--port", str(self.port)],
                 cwd=str(REPO_ROOT), env=env, stdout=self.log, stderr=subprocess.STDOUT,
             )
