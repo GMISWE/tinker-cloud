@@ -151,6 +151,7 @@ class SamplingService:
         num_samples: int,
         sampling_params: Optional[Dict[str, Any]],
         training_clients: Dict[str, Dict[str, Any]],
+        pinned_version: Optional[int] = None,
         model_id: Optional[str] = None,
         base_model: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -174,6 +175,7 @@ class SamplingService:
                 num_samples=num_samples,
                 sampling_params=sampling_params,
                 prompt_logprobs=False,
+                pinned_version=pinned_version,
             )
             all_sequences.extend(result["sequences"])
 
