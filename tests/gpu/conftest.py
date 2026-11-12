@@ -52,7 +52,8 @@ def live_sdk(tmp_path_factory, ray_local):
     """`live_sdk(backend, **env)` boots this tree's API server on `backend`, as a driver of the module's
     Ray instance, and returns a `tinker.ServiceClient` on it. A test on the backend object skips what a
     client goes through: the SDK's encoding, HTTP, the wire codec, the request model and the queue.
-    The servers are stopped after the module."""
+    The servers are stopped after the module. `live_sdk.servers` lists the started `Server`s, for a
+    test that reads a server's log."""
     import ray
     import tinker
 
@@ -69,6 +70,7 @@ def live_sdk(tmp_path_factory, ray_local):
         server.wait_healthy(120)
         return tinker.ServiceClient(base_url=server.base_url, api_key=API_KEY)
 
+    start.servers = servers
     yield start
     for server in servers:
         server.stop()

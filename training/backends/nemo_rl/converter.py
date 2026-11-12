@@ -190,8 +190,8 @@ class NemoRLDataConverter(DataConverter):
             num_tokens = len(_full_input_tokens(datum))
             for key in ("target_tokens", "weights"):
                 tensor = datum.loss_fn_inputs.get(key)
-                if tensor is not None and len(tensor.data) != num_tokens:
-                    raise ValueError(f"datum {i}: {key} has {len(tensor.data)} entries for {num_tokens} tokens")
+                if tensor is not None and len(tensor.values) != num_tokens:
+                    raise ValueError(f"datum {i}: {key} has {len(tensor.values)} entries for {num_tokens} tokens")
             max_seq_len = max(max_seq_len, num_tokens + 1)
 
         input_ids = torch.zeros(batch_size, max_seq_len, dtype=torch.long)
@@ -463,7 +463,7 @@ def _extract_loss_masks(datum: Datum, seq_len: int) -> torch.Tensor:
     mask = datum.loss_fn_inputs.get("mask")
     if mask is None:
         return torch.ones(seq_len, dtype=torch.float32)
-    masks = torch.tensor(mask.data, dtype=torch.float32)
+    masks = torch.tensor(mask.values, dtype=torch.float32)
     # If masks are response-length, expand to full sequence length
     if len(masks) < seq_len:
         full = torch.zeros(seq_len, dtype=torch.float32)
@@ -506,7 +506,7 @@ def _extract_field(datum: Datum, field_name: str) -> Optional[torch.Tensor]:
     tensor = datum.loss_fn_inputs.get(_FIELD_NAME_MAP.get(field_name, field_name))
     if tensor is None:
         return None
-    return torch.tensor(tensor.data, dtype=torch.float32)
+    return torch.tensor(tensor.values, dtype=torch.float32)
 
 
 def _extract_target_tokens(datum: Datum) -> Optional[torch.Tensor]:
@@ -514,7 +514,7 @@ def _extract_target_tokens(datum: Datum) -> Optional[torch.Tensor]:
     tensor = datum.loss_fn_inputs.get("target_tokens")
     if tensor is None:
         return None
-    return torch.tensor(tensor.data, dtype=torch.long)
+    return torch.tensor(tensor.values, dtype=torch.long)
 
 
 def _extract_sft_weights(datum: Datum) -> Optional[torch.Tensor]:
@@ -523,4 +523,4 @@ def _extract_sft_weights(datum: Datum) -> Optional[torch.Tensor]:
     tensor = datum.loss_fn_inputs.get("weights")
     if tensor is None:
         return None
-    return torch.tensor(tensor.data, dtype=torch.float32)
+    return torch.tensor(tensor.values, dtype=torch.float32)

@@ -44,7 +44,7 @@ class TinkerDataConverter:
 
     @staticmethod
     def extract_tensor_data(tensor: TensorData) -> List[Any]:
-        return tensor.data
+        return tensor.data   # a list, never the array of a proto body: the callers slice and concatenate lists
 
     @classmethod
     def forward_to_rollout(cls, data: List[Datum]) -> Dict[str, Any]:

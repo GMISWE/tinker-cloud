@@ -30,7 +30,9 @@ from ..core.dependencies import (
     get_sample_futures,
 )
 from ..core.task_manager import TaskManager
-from ..proto.wire import PROTO_CONTENT_TYPE, PROTO_RESULT_OPERATIONS, serialize_result
+from ..proto.wire import (
+    FORWARD_BACKWARD_OPERATIONS, PROTO_CONTENT_TYPE, PROTO_RESULT_OPERATIONS, forward_backward_json, serialize_result,
+)
 
 # Hold a pending retrieve on the operation's task instead of answering 408
 # immediately. The SDK's retrieve cycle costs ~450 ms client-side, so an
@@ -56,7 +58,7 @@ router = APIRouter(
 async def _completed_response(fut: Dict[str, Any], accept: str, futures_storage: FuturesStorage) -> Response:
     """A completed future's result: proto bytes when the client accepts proto
     and the operation has that view (SDK >= 0.25 rejects JSON for sample and
-    forward/forward_backward results), else the JSON of record."""
+    forward/forward_backward results), else its JSON."""
     if fut["operation"] in PROTO_RESULT_OPERATIONS and PROTO_CONTENT_TYPE in accept.lower():
         blob = fut.get("result_proto")
         if blob is None:
@@ -67,6 +69,8 @@ async def _completed_response(fut: Dict[str, Any], accept: str, futures_storage:
                 raise HTTPException(status_code=500, detail=f"result has no proto encoding: {e}") from e
             futures_storage.set_result_proto(fut["request_id"], blob)
         return Response(content=blob, media_type=PROTO_CONTENT_TYPE)
+    if fut["operation"] in FORWARD_BACKWARD_OPERATIONS:   # stored with its array tensors in the proto view only
+        return JSONResponse(content=await asyncio.to_thread(forward_backward_json, fut["result"], fut["result_proto"]))
     return JSONResponse(content=fut.get("result", {}))
 
 

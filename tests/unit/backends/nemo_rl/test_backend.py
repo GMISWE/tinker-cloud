@@ -264,7 +264,7 @@ def test_invalid_sft_does_not_change_the_buffer(field):
     handle = make_handle([], data_buffer=[buffered], loss_fn_name="cross_entropy",
                          loss_fn_config=loss_fn_config)
     datum = ce_datum([10, 20, 30], [20, 30, 40], [1.0, 1.0, 1.0])
-    datum.loss_fn_inputs[field].data = [1]
+    datum.loss_fn_inputs[field].values = [1]
     with pytest.raises(BackendError, match=f"datum 1: {field} has 1 entries for 3 tokens"):
         asyncio.run(backend.forward_backward(handle, [ce_datum([1]), datum], "cross_entropy"))
     assert len(handle.data_buffer) == 1 and handle.data_buffer[0] is buffered

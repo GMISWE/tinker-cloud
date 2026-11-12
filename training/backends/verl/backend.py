@@ -146,6 +146,10 @@ class VerlBackend(TrainingBackend[VerlHandle]):
 
     SUPPORTED_OPTIMIZERS = frozenset({"adamw"})   # no Muon on this path
     NK_TARGET_LOSS_FNS = frozenset({"cross_entropy"})
+    # A chunk of fewer rows than GPUs is padded with copies up to one row per GPU. The SDK estimates
+    # 196 bytes a token for [N, 16] targets and weights (4 a token, 8 an int64, 4 a float32): 32
+    # sequences of 14K tokens are 88 MB.
+    FWDBWD_MAX_CHUNK_BYTES = 100_000_000
 
     def __init__(self, overrides: Optional[Dict[str, Any]] = None):
         self.overrides = overrides or {}

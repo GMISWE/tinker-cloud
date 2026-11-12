@@ -115,7 +115,7 @@ def _extract_labels(datum: Datum) -> torch.Tensor:
     labels = datum.loss_fn_inputs.get("labels")
     if labels is None:
         return torch.zeros(0, dtype=torch.long)
-    return _as_long(labels.data)
+    return _as_long(labels.values)
 
 
 def _as_long(val) -> torch.Tensor:

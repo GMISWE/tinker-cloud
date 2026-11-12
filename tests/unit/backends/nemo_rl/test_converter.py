@@ -27,7 +27,7 @@ def sft_converter(monkeypatch):
 ])
 def test_sft_rejects_mismatched_lengths(sft_converter, field, count):
     datum = ce_datum([10, 20, 30], [20, 30, 40], [1.0, 1.0, 1.0])
-    datum.loss_fn_inputs[field].data = [1] * count
+    datum.loss_fn_inputs[field].values = [1] * count
     with pytest.raises(ValueError, match=f"datum 1: {field} has {count} entries for 3 tokens"):
         sft_converter.forward_backward_to_backend([ce_datum([1]), datum], "cross_entropy", {})
 
