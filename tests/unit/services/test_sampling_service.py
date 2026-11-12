@@ -3,6 +3,7 @@ model carries them, the router refuses the unsupported ones by name (400), the
 service caps top-k at the engine's limit and masks prompt scores before a
 prompt_logprobs_last_n suffix."""
 import asyncio
+import json
 
 import pytest
 from fastapi import HTTPException
@@ -10,9 +11,13 @@ from pydantic import ValidationError
 
 from tinkercloud.training.backends.base import SampleRequestError
 from tinkercloud.training.backends.fake.backend import FAKE_MAX_TOPK, FakeBackend
-from tinkercloud.training.models.requests import ASampleRequest
-from tinkercloud.training.routers.sampling import check_sample_extensions
-from tinkercloud.training.services.sampling_service import _check_sample_request, _mask_prompt_prefix
+from tinkercloud.training.checkpoints.store import CheckpointKind, CheckpointStore
+from tinkercloud.training.models.requests import ASampleRequest, SampleRequest, SamplingParams
+from tinkercloud.training.routers.sampling import check_sample_extensions, sample
+from tinkercloud.training.services.sampling_service import SamplingService, _check_sample_request, _mask_prompt_prefix
+from tinkercloud.training.storage.metadata import MetadataStorage
+from tinkercloud.training.storage.sample_futures import SampleFutureStore
+from tinkercloud.training.utils import helpers
 
 PROMPT = [1, 2, 3, 4, 5]
 
@@ -86,3 +91,44 @@ def test_service_caps_topk_at_the_engine_limit():
         _check_sample_request(h, [1, 2], {"max_tokens": 2}, 0, 21)
     h.max_topk_logprobs = None   # unknown cap: not checked
     _check_sample_request(h, [1, 2], {"max_tokens": 2}, 1000, 1000)
+
+
+def test_sync_sample_forwards_pinned_version_to_backend(tmp_path, monkeypatch):
+    trace_path = tmp_path / "trace.jsonl"
+    monkeypatch.setenv("FAKE_BACKEND_TRACE", str(trace_path))
+    monkeypatch.setattr(helpers, "_ENGINE_NAME", "t")
+
+    async def _exercise():
+        backend = FakeBackend()
+        model_id = "model_t_0123456789abcdef"
+        handle = await backend.create_model(model_id, "r1", "fake/tiny", 0, optimizer="adamw")
+        clients = {model_id: {"backend_handle": handle}}
+        service = SamplingService(backend)
+        futures = SampleFutureStore()
+        store = CheckpointStore(tmp_path / "ckpt", MetadataStorage(tmp_path / "meta"))
+
+        ticket = store.begin_save(
+            model_id, CheckpointKind.SAMPLER_WEIGHTS, "snap_v2",
+            weight_version=2, optimizer_config={"type": "adamw"},
+        )
+        store.complete(ticket.ref)
+
+        params = SamplingParams(max_tokens=2)
+        reqs = [
+            (SampleRequest(prompts=[[1, 2]], num_samples=1, sampling_params=params, sampling_session_id="s1"),
+             {"x_model_id": model_id, "x_pinned_version": "1", "x_base_model": None}),
+            (SampleRequest(prompts=[[3, 4]], num_samples=1, sampling_params=params, model_path=ticket.ref.uri),
+             {"x_model_id": None, "x_pinned_version": None, "x_base_model": None}),
+            (SampleRequest(prompts=[[5, 6]], num_samples=1, sampling_params=params, sampling_session_id="s2"),
+             {"x_model_id": model_id, "x_pinned_version": None, "x_base_model": None}),
+        ]
+        for req, hdrs in reqs:
+            op = await sample(req, None, service, futures, clients, store, **hdrs)
+            sf = futures.get(op.request_id)
+            assert sf is not None
+            await sf.done.wait()
+            assert sf.status == "completed"
+
+    asyncio.run(_exercise())
+    sample_traces = [json.loads(line) for line in trace_path.read_text().splitlines() if '"op": "sample"' in line]
+    assert [t["pinned_version"] for t in sample_traces] == [1, 2, None]

@@ -267,7 +267,7 @@ async def sample(
     """
     request_id = generate_request_id()
 
-    model_id, _, target_base = resolve_sample_target(
+    model_id, pinned_version, target_base = resolve_sample_target(
         training_clients, request.sampling_session_id, request.model_path, request.base_model, store,
         x_model_id, x_pinned_version, x_base_model,
     )
@@ -296,6 +296,7 @@ async def sample(
             if request.sampling_params
             else None,
             training_clients=training_clients,
+            pinned_version=pinned_version,
             model_id=model_id,
             base_model=target_base,
         )
