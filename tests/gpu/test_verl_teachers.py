@@ -27,7 +27,7 @@ from tinkercloud.training.backends.base import SampleRequestError  # noqa: E402
 from tinkercloud.training.backends.verl.backend import VerlBackend  # noqa: E402
 
 from .verl_smollm3 import (  # noqa: E402
-    FULL_WEIGHTS, K, NUM_GPUS, STUDENT, TEACHERS, adam, datum, gpu_mib, live_placement_groups, logprobs_of,
+    K, STUDENT, TEACHERS, adam, create_full_weights, datum, gpu_mib, live_placement_groups, logprobs_of,
     text_tokens, verl_actors, vllm_actors,
 )
 
@@ -48,9 +48,7 @@ def test_three_teachers_share_the_students_gpus(monkeypatch, loop):
     handles = {}
     try:
         for name in (STUDENT, *TEACHERS):
-            handles[name] = run(backend.create_model(
-                "m_" + name.rsplit("-", 1)[1].lower(), "create", name, NUM_GPUS,
-                lora_config=FULL_WEIGHTS, optimizer="adamw"))
+            handles[name] = create_full_weights(loop, backend, "m_" + name.rsplit("-", 1)[1].lower(), name)
         student, teachers = handles[STUDENT], [handles[t] for t in TEACHERS]
         reserved = ray.cluster_resources()["GPU"] - ray.available_resources().get("GPU", 0.0)
         print(f"\n[teachers] after 4 creates: gpu MiB {gpu_mib()} ray reserved GPUs {reserved}")

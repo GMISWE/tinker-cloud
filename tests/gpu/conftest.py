@@ -36,11 +36,10 @@ def student(loop):
     """(backend, handle) of the student; deleted after the module, and no actor may outlive it."""
     from tinkercloud.training.backends.verl.backend import VerlBackend
 
-    from .verl_smollm3 import FULL_WEIGHTS, NUM_GPUS, STUDENT, verl_actors
+    from .verl_smollm3 import STUDENT, create_full_weights, verl_actors
 
     backend = VerlBackend()
-    handle = loop.run_until_complete(backend.create_model(
-        "nk_student", "create", STUDENT, NUM_GPUS, lora_config=FULL_WEIGHTS, optimizer="adamw"))
+    handle = create_full_weights(loop, backend, "nk_student", STUDENT)
     try:
         yield backend, handle
     finally:

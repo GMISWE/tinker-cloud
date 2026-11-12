@@ -9,6 +9,14 @@ from typing import Any, Dict, Optional
 
 from ..base import ArgumentBuilder
 
+# Sequences per GPU in one micro-batch of a training pass and of a forward-only pass. The engine holds the
+# full logits of a micro-batch, so its memory grows with the tokens in it; at 1 a pass of 13K-token
+# sequences fits an 80 GB GPU with four models on it (`tests/gpu/test_verl_fit.py`). Read 2026-11-12: a
+# forward at 4 asked for 30 GiB in one allocation and failed; training at 2 fits with one model and is not
+# measured with four. The gradient is the sum over datums either way.
+TRAIN_MICRO_BATCH_PER_GPU = 1
+INFER_MICRO_BATCH_PER_GPU = 1
+
 
 class VerlArgumentBuilder(ArgumentBuilder):
     def __init__(self, overrides: Optional[Dict[str, Any]] = None):
@@ -61,9 +69,9 @@ class VerlArgumentBuilder(ArgumentBuilder):
                 # micro-partitioning; pure-sum makes it E0-safe but keep the
                 # default deterministic)
                 "use_dynamic_bsz": bool(self.overrides.get("use_dynamic_bsz", False)),
-                "micro_batch_size_per_gpu": int(self.overrides.get("micro_batch_size_per_gpu", 2)),
+                "micro_batch_size_per_gpu": TRAIN_MICRO_BATCH_PER_GPU,
                 "max_token_len_per_gpu": max_seq_len * 4,
-                "infer_micro_batch_size_per_gpu": int(self.overrides.get("infer_micro_batch_size_per_gpu", 4)),
+                "infer_micro_batch_size_per_gpu": INFER_MICRO_BATCH_PER_GPU,
                 "infer_max_token_len_per_gpu": max_seq_len * 8,
                 "param_offload": bool(self.overrides.get("param_offload", False)),
                 "optimizer_offload": bool(self.overrides.get("optimizer_offload", False)),

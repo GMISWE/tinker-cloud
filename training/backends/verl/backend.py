@@ -9,7 +9,7 @@ weight_decay) + optimizer_zero_grad. forward_backward here does real GPU
 work and returns real logprobs; apply_optimizer_step applies AdamParams and
 steps once.
 
-Rollout: every model is a StepClipWorker group (verl's Tinker worker; actor_rollout
+Rollout: every model is a ModelWorker group (verl's Tinker worker; actor_rollout
 role). Its vLLM server replicas (LLMServerManager) are built at the model's
 first sample, in hybrid timeshare: replicas sleep during training ops and
 wake with a naive weight sync (CheckpointEngineManager) for sampling. A model
@@ -61,7 +61,7 @@ def _set_event() -> asyncio.Event:
 class VerlHandle(BackendHandle):
     """veRL-specific runtime state."""
 
-    worker_group: Any = None          # RayWorkerGroup over StepClipWorker
+    worker_group: Any = None          # RayWorkerGroup over ModelWorker
     config: Dict = field(default_factory=dict)
     # the composed verl trainer config the workers and the sampler read
     trainer_config: Any = field(kw_only=True)
@@ -292,6 +292,8 @@ class VerlBackend(TrainingBackend[VerlHandle]):
                     _wg_scalar_call, handle.worker_group.optimizer_step, params, clip,
                 )
                 handle.weight_version += 1
+                # the update is over: what its backward reserved goes back to the GPU's other models
+                await asyncio.to_thread(handle.worker_group.release_cached_memory)
                 grad_norm = metrics.get("grad_norm")
                 return {"success": True, "grad_norm": grad_norm, "metrics": metrics}
             except BackendError:
@@ -323,6 +325,8 @@ class VerlBackend(TrainingBackend[VerlHandle]):
                 await asyncio.to_thread(self._ensure_loss_fn, handle, "cross_entropy")
                 td = await asyncio.to_thread(self._to_tensordict, handle, data, "cross_entropy", True)
                 out = await asyncio.to_thread(_wg_call, handle.worker_group.compute_log_prob, td)
+                # a forward-only model would otherwise hold its pass's memory while another trains
+                await asyncio.to_thread(handle.worker_group.release_cached_memory)
                 logprobs = await asyncio.to_thread(padded_logprobs, out, td)
                 return self.converter.extract_logprobs(logprobs, data)
             except BackendError:
@@ -523,17 +527,17 @@ class VerlBackend(TrainingBackend[VerlHandle]):
     # -------------------------------------------------------------- helpers
 
     def _boot(self, trainer_config, model_id: str, num_gpus: int):
-        """One model's StepClipWorker group in the shared GPUs, its engines
+        """One model's ModelWorker group in the shared GPUs, its engines
         initialized. Blocking. A failed boot leaves no actor and no share behind."""
         import ray
         from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 
-        from .worker import StepClipWorker
+        from .worker import ModelWorker
 
         pool = self._gpus.acquire(model_id, num_gpus)
         try:
             ray_cls = RayClassWithInitArgs(
-                cls=ray.remote(StepClipWorker),
+                cls=ray.remote(ModelWorker),
                 config=trainer_config.actor_rollout_ref, role="actor_rollout",
             )
             worker_group = RayWorkerGroup(
@@ -640,7 +644,7 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         # instead of rejecting or trimming. The infer path (compute_log_prob)
         # partitions by infer_micro_batch_size_per_gpu, not the train one.
         mb_key = "infer_micro_batch_size_per_gpu" if infer else "micro_batch_size_per_gpu"
-        micro_bs = int(h.config.get("engine", {}).get(mb_key, 1) or 1)
+        micro_bs = int(h.config["engine"][mb_key])
         multiple = h.dp_size * micro_bs
         b = padded["input_ids"].shape[0]
         remainder = b % multiple
