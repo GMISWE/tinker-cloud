@@ -404,6 +404,11 @@ class SaveWeightsForSamplerRequest(BaseModel):
     )
     user_metadata: Optional[Dict[str, str]] = Field(default=None, description="User-provided checkpoint metadata")
 
+    @property
+    def ephemeral(self) -> bool:
+        """The save names no checkpoint: it only gives a sampling session the weights the engine already holds."""
+        return self.sampling_session_seq_id is not None and self.path is None and self.name is None
+
 
 # ============= Updated Request Models (New Format) =============
 

@@ -151,11 +151,10 @@ async def save_weights_for_sampler(
         raise HTTPException(status_code=400, detail=f"sampler kind {request.kind!r} is not served by "
                             f"{type(service.backend).__name__}; {', '.join(sorted(service.backend.SUPPORTED_SAMPLER_KINDS))} are")
     inflight = request.kind == "inflight"
-    ephemeral = request.sampling_session_seq_id is not None and request.path is None and request.name is None
-    if inflight and (request.sampling_session_seq_id is None or request.path is not None or request.name is not None):
+    if inflight and not request.ephemeral:
         raise HTTPException(status_code=400, detail="an inflight save names no checkpoint: it publishes the model's "
                             "shared weights to a new sampling session (sampling_session_seq_id, no path)")
-    if ephemeral and request.ttl_seconds is not None:
+    if request.ephemeral and request.ttl_seconds is not None:
         raise HTTPException(status_code=400, detail="ttl_seconds is not valid for an ephemeral sampler save")
 
     # Get base_model from training client (use None if missing, not empty string)
@@ -169,14 +168,7 @@ async def save_weights_for_sampler(
 
     async def execute():
         result = await service.save_weights_for_sampler(
-            model_id=request.model_id,
-            request_id=request_id,
-            name=request.name,
-            options=options,
-            training_clients=training_clients,
-            path=request.path,
-            sampling_session_seq_id=request.sampling_session_seq_id,
-        )
+            request, request_id=request_id, options=options, training_clients=training_clients)
 
         # An ephemeral sampler is the gateway's to route: it learns of it before the SDK does.
         # A snapshot's weight version is pinned at save time so pinned logprob reads are not

@@ -62,10 +62,6 @@ class CheckpointStatus(str, Enum):
     FAILED = "failed"
 
 
-class CheckpointExists(Exception):
-    pass
-
-
 # --- errors: routers map these to status codes in one place (api.py) ---------
 
 class CheckpointError(Exception):
@@ -86,6 +82,12 @@ class CheckpointPending(CheckpointError):
 
 class CheckpointFailed(CheckpointError):
     status_code = 500
+
+
+class CheckpointExists(CheckpointError):
+    """A save without overwrite names a checkpoint that is being saved, or is saved and not expired."""
+    # not 409: the SDK sends a 409 again, and a repeated duplicate save cannot succeed
+    status_code = 400
 
 
 class CheckpointDeleteFailed(CheckpointError):

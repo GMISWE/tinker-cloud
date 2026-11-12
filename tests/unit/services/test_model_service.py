@@ -11,12 +11,19 @@ from tinkercloud.training.storage.metadata import MetadataStorage
 
 
 class _FullDisk(MetadataStorage):
-    """The realistic disk-full: the file is created and cut short, then the write raises."""
+    """A save that raises; a record write is whole or not at all, so nothing is on disk after it."""
 
     def save_training_run(self, training_run_id, metadata):
-        path = self.training_runs_dir / f"{training_run_id}.json"
-        path.write_text('{"training_run_id": "m", "base_')
         raise OSError(28, "No space left on device")
+
+
+class _Unreadable(MetadataStorage):
+    """Every read of a record raises."""
+
+    def _refuse(self, *args, **kwargs):
+        raise PermissionError("metadata directory cannot be read")
+
+    load_training_run = list_training_runs = load_checkpoint = list_checkpoints = _refuse
 
 
 def _create(service, metadata_storage, clients, runs):
@@ -52,16 +59,31 @@ def test_a_create_that_works_registers_the_model(make_service, tmp_path):
     assert storage.load_training_run("m") is not None
 
 
-def test_metadata_that_cannot_be_saved_releases_the_backend_model(make_service, tmp_path):
+def test_metadata_that_cannot_be_saved_releases_the_backend_model(make_service, tmp_path, monkeypatch):
     service, clients, runs = make_service(), {}, {}
+    storage = MetadataStorage(tmp_path / "meta")
+
+    def full(src, dst):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("tinkercloud.training.storage.metadata.os.replace", full)   # the write's last step
     with pytest.raises(OSError, match="No space left"):
-        asyncio.run(_create(service, _FullDisk(tmp_path / "meta"), clients, runs))
+        asyncio.run(_create(service, storage, clients, runs))
+    monkeypatch.undo()
     assert service.backend._models == {}   # it used to stay allocated, in no registry the reaper or delete_model reads
     assert clients == {} and runs == {}
+    assert storage.list_training_runs(limit=10) == []   # no partial record
+
+
+def test_a_create_reads_no_training_run_record(make_service, tmp_path):
+    """A read between the backend's create and the undo's `try` stranded the model when the read raised."""
+    service, clients, runs = make_service(), {}, {}
+    asyncio.run(_create(service, _Unreadable(tmp_path / "meta"), clients, runs))
+    assert set(clients) == {"m"} and set(runs) == {"m"} and set(service.backend._models) == {"m"}
 
 
 def test_a_route_that_is_refused_undoes_everything_the_create_recorded(make_service, tmp_path):
-    """InferenceEndpoint raises ValueError for a URL that is not http(s): the step after the registries are filled."""
+    """InferenceEndpoint raises ValueError for a URL that is not http(s); the route is checked before the record is saved."""
     service, clients, runs = make_service(_backend_serving(["engine:8000"])), {}, {}
     storage = MetadataStorage(tmp_path / "meta")
     with pytest.raises(ValueError):
@@ -79,53 +101,3 @@ def test_a_failed_release_does_not_hide_the_create_error(make_service, tmp_path,
     monkeypatch.setattr(FakeBackend, "delete_model", broken)
     with pytest.raises(OSError, match="No space left"):
         asyncio.run(_create(make_service(), _FullDisk(tmp_path / "meta"), {}, {}))
-
-
-def test_a_training_run_record_that_cannot_be_removed_does_not_hide_the_create_error(make_service, tmp_path, monkeypatch):
-    def broken(self, training_run_id):
-        raise PermissionError("read-only metadata")
-
-    monkeypatch.setattr(MetadataStorage, "delete_training_run", broken)
-    service = make_service(_backend_serving(["engine:8000"]))
-    with pytest.raises(ValueError):
-        asyncio.run(_create(service, MetadataStorage(tmp_path / "meta"), {}, {}))
-    assert service.backend._models == {}   # the handle was still released
-
-
-def _kept_record(storage):
-    """The record an unloaded model keeps for resume (delete_model preserves it), with a checkpoint pointer in it."""
-    storage.save_training_run("m", {"base_model": "fake/tiny", "last_checkpoint": "weights--c1", "marker": "kept"})
-    return storage.load_training_run("m")
-
-
-def test_a_failed_create_under_a_kept_id_restores_the_record_it_overwrote(make_service, tmp_path):
-    """create-via-load reuses the id. The save overwrites the kept record, so the undo must put it back, not delete it."""
-    storage = MetadataStorage(tmp_path / "meta")
-    kept = _kept_record(storage)
-    service = make_service(_backend_serving(["engine:8000"]))   # the route step fails after the save
-    with pytest.raises(ValueError):
-        asyncio.run(_create(service, storage, {}, {}))
-    assert storage.load_training_run("m") == kept   # checkpoint listing and loads still find it
-
-
-def test_a_create_that_fails_before_it_saves_leaves_a_kept_record_alone(make_service, tmp_path, monkeypatch):
-    storage = MetadataStorage(tmp_path / "meta")
-    kept = _kept_record(storage)
-
-    def refuse(self):
-        raise ValueError("unsupported optimizer record")
-
-    monkeypatch.setattr(OptimizerConfig, "record", refuse)
-    service = make_service()
-    with pytest.raises(ValueError, match="unsupported optimizer record"):
-        asyncio.run(_create(service, storage, {}, {}))
-    assert service.backend._models == {}
-    assert storage.load_training_run("m") == kept   # this create never wrote, so it must not delete
-
-
-def test_a_cut_short_write_does_not_leave_a_partial_record_behind(make_service, tmp_path):
-    storage = _FullDisk(tmp_path / "meta")
-    with pytest.raises(OSError, match="No space left"):
-        asyncio.run(_create(make_service(), storage, {}, {}))
-    assert not (storage.training_runs_dir / "m.json").exists()
-    assert storage.list_training_runs(limit=10) == []

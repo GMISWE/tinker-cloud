@@ -102,7 +102,7 @@ class SamplingService:
         sampling_params: Optional[Dict[str, Any]],
         prompt_logprobs: bool,
         training_clients: Dict[str, Dict[str, Any]],
-        pinned_version: Optional[int] = None,
+        pinned_version: Optional[int],   # None: an unpinned sampler; no default, a caller that forgets the pin is an error
         model_id: Optional[str] = None,
         base_model: Optional[str] = None,
         topk_sample_logprobs: int = 0,
@@ -151,7 +151,7 @@ class SamplingService:
         num_samples: int,
         sampling_params: Optional[Dict[str, Any]],
         training_clients: Dict[str, Dict[str, Any]],
-        pinned_version: Optional[int] = None,
+        pinned_version: Optional[int],   # None: an unpinned sampler; no default, a caller that forgets the pin is an error
         model_id: Optional[str] = None,
         base_model: Optional[str] = None,
     ) -> Dict[str, Any]:

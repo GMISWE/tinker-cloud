@@ -15,7 +15,7 @@ from typing import Dict, Any, List, Optional, Tuple
 
 from ..backends.base import TrainingBackend
 from ..checkpoints import CheckpointKind, CheckpointRef, CheckpointSaveOptions, CheckpointStatus, CheckpointStore, is_expired
-from ..models.requests import OptimizerConfig
+from ..models.requests import OptimizerConfig, SaveWeightsForSamplerRequest
 from ..models.responses import Checkpoint, CheckpointType
 from ..storage import MetadataStorage
 
@@ -64,7 +64,8 @@ class CheckpointService:
         backend can write) under the name the client chose."""
         client_info = self._client(training_clients, model_id)
         handle = client_info["backend_handle"]
-        name = path or f"checkpoint_{int(time.time())}"
+        # the server's own name is unique: two unnamed saves in one second are two checkpoints
+        name = path or f"checkpoint_{int(time.time())}_{uuid.uuid4().hex[:8]}"
         ticket = self.store.begin_save(
             model_id, CheckpointKind.WEIGHTS, name,
             options=options, weight_version=handle.weight_version,
@@ -186,25 +187,22 @@ class CheckpointService:
 
     async def save_weights_for_sampler(
         self,
-        model_id: str,
+        request: SaveWeightsForSamplerRequest,
         request_id: str,
-        name: Optional[str],
         options: CheckpointSaveOptions,
         training_clients: Dict[str, Dict[str, Any]],
-        path: Optional[str] = None,
-        sampling_session_seq_id: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Save sampler weights. With a sampling_session_seq_id and no name the
-        save is ephemeral: the weights already reached the inference engine, so
-        the backend writes nothing and the record only names the sampler; the
-        client gets path=None and a sampling_session_id, as the SDK expects."""
+        """Save sampler weights. For an ephemeral save the weights already reached
+        the inference engine, so the backend writes nothing and the record only
+        names the sampler; the client gets path=None and a sampling_session_id,
+        as the SDK expects."""
+        model_id = request.model_id
         client_info = self._client(training_clients, model_id)
         handle = client_info["backend_handle"]
-        ephemeral = sampling_session_seq_id is not None and path is None and name is None
         weight_version = handle.weight_version
 
-        if ephemeral:
-            name = f"{model_id}_{sampling_session_seq_id}_{uuid.uuid4().hex[:8]}"
+        if request.ephemeral:
+            name = f"{model_id}_{request.sampling_session_seq_id}_{uuid.uuid4().hex[:8]}"
             ticket = self.store.begin_save(
                 model_id, CheckpointKind.SAMPLER_WEIGHTS, name, persist=False, weight_version=weight_version,
                 options=options,
@@ -217,7 +215,7 @@ class CheckpointService:
                 "type": "save_weights_for_sampler",
             }
 
-        name = path or name or f"sampler_{int(time.time())}"
+        name = request.path or request.name or f"sampler_{int(time.time())}"
         ticket = self.store.begin_save(
             model_id, CheckpointKind.SAMPLER_WEIGHTS, name, weight_version=weight_version,
             options=options,
