@@ -21,15 +21,13 @@ class NeMo2ClassificationDataConverter(DataConverter):
     def forward_backward_to_backend(self, data: List, loss_fn: str, args: Any) -> Any:
         # The label is the training target, so each datum must carry exactly one
         # valid class: nothing is filled in, cut or rounded. args["num_labels"] is
-        # the model's class count. The backend always passes it, so a caller that
-        # does not gets a KeyError and not a range that is silently unchecked.
-        num_labels = int(args["num_labels"])
-        classes = [_class_label(i, d, num_labels) for i, d in enumerate(data)]
+        # the model's class count.
+        classes = [_class_label(i, d, args["num_labels"]) for i, d in enumerate(data)]
         return self._to_recipe_batch(data, args, torch.tensor(classes, dtype=torch.long))
 
     def forward_to_backend(self, data: List, args: Any) -> Any:
         # Forward-only inputs may carry no label; the first element is taken when
-        # there is one, and 0 otherwise. This is separate from training on purpose.
+        # there is one, and 0 otherwise.
         labels = torch.zeros(len(data), dtype=torch.long)
         for i, lbl in enumerate(_extract_labels(d) for d in data):
             if lbl.numel() > 0:
@@ -42,7 +40,7 @@ class NeMo2ClassificationDataConverter(DataConverter):
         # pad to the model's fixed seq_length if given, else per-batch max
         seq_length = int((args or {}).get("seq_length", 0)) or max(len(t) for t in tokens_B)
         input_ids = torch.full((bsz, seq_length), PAD_TOKEN_ID, dtype=torch.long)
-        pool_mask = torch.zeros(bsz, seq_length, dtype=torch.float32)
+        pool_mask = torch.zeros((bsz, seq_length), dtype=torch.float32)
         for i, tokens in enumerate(tokens_B):
             n = min(len(tokens), seq_length)
             input_ids[i, :n] = tokens[:n] if torch.is_tensor(tokens) else torch.tensor(tokens[:n])
@@ -125,21 +123,23 @@ def _extract_labels(datum: Datum) -> torch.Tensor:
 
 def _class_label(index: int, datum: Datum, num_labels: int) -> int:
     """The one class of a sequence-classification datum: exactly one whole number in
-    loss_fn_inputs["labels"], inside [0, num_labels). A bool is not a class, and the
-    error names the datum and says what was found, not the label list itself."""
+    loss_fn_inputs["labels"], inside [0, num_labels). A bool is not a class. The error
+    names the datum, the count of values and the type, never a value the client sent,
+    except a class out of range, which is cut to 20 digits."""
     labels = datum.loss_fn_inputs.get("labels")
     values = [] if labels is None else labels.data
     if len(values) != 1:
         raise ValueError(
             f"datum {index}: classification training needs exactly one integer class in "
-            f"loss_fn_inputs['labels'], got {len(values)} value(s)"
-            + (f" starting with {values[0]!r}" if values else ""))
+            f"loss_fn_inputs['labels'], got {len(values)} value(s)")
     value = values[0]
     # int is checked before float, so an integer too large for a float is a class out of range and not an OverflowError.
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or (
-            isinstance(value, float) and not value.is_integer()):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(
-            f"datum {index}: classification training needs a whole number as the class, got {type(value).__name__} {value!r}")
+            f"datum {index}: classification training needs a whole number as the class, got a {type(value).__name__}")
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError(
+            f"datum {index}: classification training needs a whole number as the class, got a float that is not whole")
     label = int(value)
     if not 0 <= label < num_labels:
         shown = str(label) if len(str(label)) <= 20 else f"{str(label)[:20]}... ({len(str(label))} digits)"

@@ -217,7 +217,7 @@ def create_app(config: Optional[TrainingConfig] = None) -> FastAPI:
 
     @application.exception_handler(CheckpointError)
     async def checkpoint_error_handler(request: Request, exc: CheckpointError):
-        """Store verdicts on a checkpoint identity: 400 malformed / wrong kind,
+        """Store verdicts on a checkpoint identity: 400 malformed / wrong kind / a duplicate save,
         404 unknown, 425 still being written, 500 the save or a delete failed."""
         return JSONResponse(status_code=exc.status_code, content={"error": str(exc), "status_code": exc.status_code,
                                                                   "path": str(request.url.path)})

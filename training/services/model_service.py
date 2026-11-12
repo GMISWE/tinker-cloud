@@ -90,20 +90,14 @@ class ModelService:
             native_root=native_root,
             optimizer=optimizer_config.type,
         )
-        # The backend holds this model's resources (a trainer, a tenant, GPU
-        # memory) from here on. Nothing else knows the handle until it is in
-        # training_clients, and the reaper and delete_model look only there, so
-        # a step that fails before that point, or after it, would strand it.
-        # Whatever raises, undo all of it once and report the original error.
-        # delete_model keeps a model's training-run record for resume, and a
-        # create under the same id (create-via-load) overwrites it. Hold the
-        # earlier record so a failed create puts it back and never deletes it.
-        earlier_record = metadata_storage.load_training_run(model_id)
-        record_written = False
+        # The backend holds this model's resources from here on, and the reaper and
+        # delete_model find a handle only in training_clients: whatever raises below,
+        # undo it once and report the original error.
         try:
             optimizer_record = optimizer_config.record()
+            # validated before the save, so that a refused route leaves no record
+            endpoint = routing.InferenceEndpoint(handle.inference_endpoints) if handle.inference_endpoints else None
 
-            # Save metadata
             hf_path = handle.hf_path
             training_run_id = model_id
             metadata = {
@@ -124,7 +118,7 @@ class ModelService:
                 "last_checkpoint": None,
                 "last_sampler_checkpoint": None,
             }
-            record_written = True   # set first: a save that fails halfway may still have touched the file
+            # whole or not at all, and the last step that can fail: a failed create leaves no record
             metadata_storage.save_training_run(model_id, metadata)
             training_runs_metadata[model_id] = metadata
 
@@ -139,13 +133,10 @@ class ModelService:
                 "created_at": datetime.now().isoformat(),
             }
             training_clients[model_id] = client_info
-            if handle.inference_endpoints:
-                routing.table.publish(model_id, routing.InferenceEndpoint(handle.inference_endpoints))
-
+            if endpoint is not None:
+                routing.table.publish(model_id, endpoint)
         except Exception:
-            await self._undo_failed_create(handle, request_id, model_id, metadata_storage,
-                                           training_clients, training_runs_metadata,
-                                           earlier_record if record_written else None, record_written)
+            await self._undo_failed_create(handle, request_id, model_id, training_clients, training_runs_metadata)
             raise
 
         logger.info("[%s] Model %s created successfully", request_id, model_id)
@@ -161,34 +152,19 @@ class ModelService:
         handle: BackendHandle,
         request_id: str,
         model_id: str,
-        metadata_storage: MetadataStorage,
         training_clients: Dict[str, Dict[str, Any]],
         training_runs_metadata: Dict[str, Dict[str, Any]],
-        earlier_record: Optional[Dict[str, Any]],
-        record_written: bool,
     ) -> None:
-        """Take back what a create that is about to fail had recorded, then free what the backend allocated.
+        """Take back what a create that is about to fail had registered, then free what the backend allocated.
 
-        Each step may or may not have run, so each tolerates its absence. If the
-        create wrote the training-run record, the record is put back as it was,
-        or removed when there was none, so list_training_runs does not list a run
-        whose create failed and a record kept for resume is not lost. A create
-        that failed before it wrote leaves the record alone. A step that fails
-        here is logged: the create's own error is the one to report. If the
-        backend cannot release the handle, no registry holds it any more, so
-        that leak is accepted and only the log shows it.
+        A step may not have run, so each tolerates its absence. If the backend
+        cannot release the handle, no registry holds it any more: that leak is
+        accepted and only the log shows it, because the create's own error is
+        the one to report.
         """
         training_clients.pop(model_id, None)
         training_runs_metadata.pop(model_id, None)
         routing.table.withdraw(model_id)
-        if record_written:
-            try:
-                if earlier_record is None:
-                    metadata_storage.delete_training_run(model_id)
-                else:
-                    metadata_storage.restore_training_run(model_id, earlier_record)
-            except Exception:
-                logger.exception("[%s] Could not restore the training-run record of %s", request_id, model_id)
         try:
             await self.backend.delete_model(handle)
         except Exception:
