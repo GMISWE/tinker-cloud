@@ -257,7 +257,8 @@ class TensorData(BaseModel):
 
     `values` holds the flattened values as they arrived: a list from a JSON body, a 1-D numpy array
     from a proto body. Code that builds a tensor reads `values`; `data` is the same values as a list,
-    which costs a Python number per value when they arrived as an array."""
+    which costs a Python number per value when they arrived as an array.
+    `tests/unit/backends/test_converter_wire_parity.py` holds every converter to both arrivals."""
 
     values: list_or_array(List[Any]) = Field(..., alias="data", description="Tensor data (flattened)")
     shape: Optional[List[int]] = Field(default=None, description="Tensor shape")
