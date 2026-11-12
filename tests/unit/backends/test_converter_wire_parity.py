@@ -91,7 +91,8 @@ def _nemo_rl(data, loss_fn):
 
 def _megatron_bridge(data, loss_fn):
     from tinkercloud.training.backends.megatron_bridge.converter import NeMo2ClassificationDataConverter
-    return NeMo2ClassificationDataConverter().forward_backward_to_backend(data, loss_fn, None)
+    # the converter checks a label against the model's class count; LABELS carries class 3
+    return NeMo2ClassificationDataConverter().forward_backward_to_backend(data, loss_fn, {"num_labels": 4})
 
 
 def _miles(data, loss_fn):
