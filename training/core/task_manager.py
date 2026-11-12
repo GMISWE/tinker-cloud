@@ -18,7 +18,7 @@ from typing import Callable, Dict, Any, Optional, Awaitable
 from ..storage import FuturesStorage
 from ..services import ordering
 from ..models.responses import validate_result
-from ..proto.wire import (
+from ..proto.response_conv import (
     FORWARD_BACKWARD_OPERATIONS, PROTO_RESULT_OPERATIONS, serialize_result, stored_forward_backward_result,
 )
 

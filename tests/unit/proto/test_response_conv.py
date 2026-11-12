@@ -1,8 +1,7 @@
-"""Proto wire codec (training/proto/wire.py) against the schema the SDK ships.
+"""Proto result conversion (training/proto/response_conv.py) against the schema the SDK ships.
 
-Messages are built directly on the vendored schema, mirroring byte-for-byte
-what the SDK's request_conv writes and what its response_conv reads;
-test_proto_wire_sdk.py runs the same round trips through the SDK's own
+Messages are read directly on the vendored schema, mirroring byte-for-byte what the SDK's
+response_conv reads; test_sdk_round_trip.py runs the same conversions through the SDK's own
 converters when a tinker >= 0.25 is importable.
 """
 import math
@@ -10,34 +9,8 @@ import math
 import numpy as np
 import pytest
 
-from tinkercloud.training.core import loss_registry
-from tinkercloud.training.models.requests import ForwardBackwardRequest
 from tinkercloud.training.proto import tinker_public_pb2 as pb
-from tinkercloud.training.proto import wire
-from tinkercloud.training.proto.wire import (
-    WireError, decompress_zstd, parse_forward_backward_request, serialize_result, zstd_available,
-)
-
-
-def test_a_zstd_body_past_the_bound_is_refused_and_an_unsized_frame_still_reads(monkeypatch):
-    zstandard = pytest.importorskip("zstandard")
-    monkeypatch.setattr(wire, "MAX_DECOMPRESSED_BODY_BYTES", 1 << 20)
-    small = b"x" * 1000
-    assert decompress_zstd(zstandard.ZstdCompressor(write_content_size=False).compress(small)) == small
-    for compressor in (zstandard.ZstdCompressor(), zstandard.ZstdCompressor(write_content_size=False)):
-        with pytest.raises(WireError, match="decompresses past"):
-            decompress_zstd(compressor.compress(b"\0" * ((1 << 20) + 1)))
-
-
-def _fb_msg(seq_id=3, loss_fn="cross_entropy", forward_only=False):
-    msg = pb.ForwardBackwardRequest(model_id="model_abc", seq_id=seq_id, loss_fn=loss_fn, forward_only=forward_only)
-    d = msg.data.add()
-    d.model_input.add().encoded_text.tokens = np.asarray([1, 2, 3, 4], dtype=np.int32).tobytes()
-    d.loss_fn_inputs["target_tokens"].CopyFrom(pb.Tensor(dtype=pb.DTYPE_INT64, shape=[4],
-                                                         dense=np.asarray([2, 3, 4, 5], dtype=np.int64).tobytes()))
-    d.loss_fn_inputs["weights"].CopyFrom(pb.Tensor(dtype=pb.DTYPE_FLOAT32, shape=[4],
-                                                   dense=np.asarray([1, .5, 1, 0], dtype=np.float32).tobytes()))
-    return msg
+from tinkercloud.training.proto.response_conv import serialize_result
 
 
 def _batched(bt):
@@ -47,86 +20,6 @@ def _batched(bt):
     buf = np.frombuffer(bt.data, dtype=np_dtype)
     return [buf[int(offsets[i]) // buf.itemsize: int(offsets[i + 1]) // buf.itemsize] for i in range(len(offsets) - 1)]
 
-
-# ---------------------------------------------------------------- requests
-
-def test_parse_request_yields_the_json_request_shape():
-    req, forward_only = parse_forward_backward_request(_fb_msg().SerializeToString())
-    assert forward_only is False
-    parsed = ForwardBackwardRequest.model_validate(req)
-    assert parsed.model_id == "model_abc" and parsed.seq_id == 3
-    batch = parsed.forward_backward_input
-    assert batch.loss_fn == "cross_entropy" and batch.loss_fn_config is None
-    datum = batch.data[0]
-    assert datum.model_input.chunks[0].tokens == [1, 2, 3, 4]
-    assert datum.loss_fn_inputs["target_tokens"].data == [2, 3, 4, 5]
-    assert datum.loss_fn_inputs["target_tokens"].dtype == "int64"
-    assert datum.loss_fn_inputs["weights"].data == [1.0, 0.5, 1.0, 0.0]
-    assert datum.loss_fn_inputs["weights"].shape == [4]
-
-
-def test_forward_only_flag_and_unset_seq_id():
-    req, forward_only = parse_forward_backward_request(_fb_msg(seq_id=0, forward_only=True).SerializeToString())
-    assert forward_only is True
-    assert req["seq_id"] is None  # 0 on the wire is "unset", never a retry of seq 0
-
-
-def test_loss_fn_config_v2_wins_and_carries_text():
-    msg = _fb_msg(loss_fn="ppo")
-    msg.loss_fn_config["clip_low_threshold"] = 0.7
-    msg.loss_fn_config_v2["clip_low_threshold"].number = 0.8
-    msg.loss_fn_config_v2["note"].text = "x"
-    req, _ = parse_forward_backward_request(msg.SerializeToString())
-    assert req["forward_backward_input"]["loss_fn_config"] == {"clip_low_threshold": 0.8, "note": "x"}
-    # legacy float map only
-    msg = _fb_msg(loss_fn="ppo")
-    msg.loss_fn_config["clip_high_threshold"] = 1.3
-    req, _ = parse_forward_backward_request(msg.SerializeToString())
-    assert req["forward_backward_input"]["loss_fn_config"] == {"clip_high_threshold": 1.3}
-
-
-def test_registry_rejects_text_on_a_numeric_key():
-    with pytest.raises(ValueError, match="must be a number"):
-        loss_registry.validate("ppo", {"clip_low_threshold": "0.8"})
-    loss_registry.validate("ppo", {"clip_low_threshold": 0.8})
-
-
-def test_image_chunk_is_base64_json():
-    msg = _fb_msg()
-    c = msg.data[0].model_input.add()
-    c.image.data, c.image.format, c.image.expected_tokens = b"\x89PNG", "png", 7
-    req, _ = parse_forward_backward_request(msg.SerializeToString())
-    chunk = req["forward_backward_input"]["data"][0]["model_input"]["chunks"][1]
-    assert chunk == {"type": "image", "data": "iVBORw==", "format": "png", "expected_tokens": 7}
-
-
-@pytest.mark.parametrize("mutate,match", [
-    (lambda m: m.data[0].model_input.add().dmel.__setattr__("dmel", b"x"), "chunk type"),
-    (lambda m: m.data[0].loss_fn_inputs["weights"].sparse_csr.__setattr__("values", b"\x00\x00\x00\x00"), "sparse"),
-    (lambda m: m.data[0].loss_fn_inputs["weights"].__setattr__("dtype", pb.DTYPE_BFLOAT16), "dtype"),
-])
-def test_unsupported_bodies_are_wire_errors(mutate, match):
-    msg = _fb_msg()
-    mutate(msg)
-    with pytest.raises(WireError, match=match):
-        parse_forward_backward_request(msg.SerializeToString())
-
-
-def test_malformed_bytes_are_a_wire_error():
-    with pytest.raises(WireError, match="malformed"):
-        parse_forward_backward_request(b"\xff\xff\xff")
-
-
-@pytest.mark.skipif(not zstd_available(), reason="zstandard not installed")
-def test_zstd_round_trip_and_garbage():
-    import zstandard
-    raw = _fb_msg().SerializeToString()
-    assert decompress_zstd(zstandard.ZstdCompressor().compress(raw)) == raw
-    with pytest.raises(WireError, match="zstd"):
-        decompress_zstd(b"not zstd")
-
-
-# ----------------------------------------------------------------- results
 
 def test_forward_backward_result_ragged_datums():
     result = {

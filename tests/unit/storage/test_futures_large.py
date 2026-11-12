@@ -2,7 +2,7 @@
 tensor once, in the proto view."""
 import numpy as np
 
-from tinkercloud.training.proto.wire import forward_backward_json, stored_forward_backward_result
+from tinkercloud.training.proto.response_conv import forward_backward_json, stored_forward_backward_result
 from tinkercloud.training.storage.futures import FuturesStorage
 
 VALUES = 2_000_000

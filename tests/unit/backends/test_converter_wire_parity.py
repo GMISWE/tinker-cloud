@@ -14,7 +14,7 @@ from pydantic import ValidationError
 
 from tinkercloud.training.models.requests import ForwardBackwardRequest
 from tinkercloud.training.proto import tinker_public_pb2 as pb
-from tinkercloud.training.proto.wire import parse_forward_backward_request
+from tinkercloud.training.proto.request_conv import parse_forward_backward_request
 
 TOKENS = [11, 12, 13, 14, 15, 16]
 N = len(TOKENS)

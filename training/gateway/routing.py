@@ -25,7 +25,8 @@ _TINKER_URI = re.compile(r"^tinker://([^/]+)/")
 # this and BODY_ID_OPS to the request models behind the engine's routes
 ID_FIELDS = ("model_id", "request_id", "model_path", "path", "tinker_path")
 PATH_ID = re.compile(r"^/api/v1/(?:retrieve_future|training_runs|external_weights)/([^/?]+)")
-# spelled as training/proto/wire.py spells it; that module needs numpy and the gateway must not
+# spelled as training/proto spells it: the gateway imports nothing from that package
+# (tests/unit/gateway/test_imports.py), and an ASGI header value is bytes
 PROTO_CONTENT_TYPE = b"application/x-protobuf"
 
 

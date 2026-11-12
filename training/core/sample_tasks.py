@@ -6,7 +6,7 @@ import traceback
 from typing import Any, Awaitable, Callable, Dict
 
 from ..models.responses import validate_result
-from ..proto.wire import serialize_result
+from ..proto.response_conv import serialize_result
 from ..storage.sample_futures import SampleFutureStore
 
 logger = logging.getLogger(__name__)
