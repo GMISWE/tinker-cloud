@@ -61,8 +61,9 @@ class GroupScheduler(Generic[P, R]):
     """`run_pass(key, payloads)` executes one coalesced pass and returns one
     result per payload, in order."""
 
-    def __init__(self, name: str, run_pass: RunPass):
+    def __init__(self, name: str, run_pass: RunPass, backend: str):
         self.name = name
+        self.backend = backend
         self._run_pass = run_pass
         self._queue: Deque[Union[_Pass[P], _Barrier]] = deque()
         self._wakeup = asyncio.Event()
@@ -98,7 +99,7 @@ class GroupScheduler(Generic[P, R]):
     def _new_future(self) -> asyncio.Future:
         if self._closed is not None:
             raise BackendError(f"training group {self.name} is closed: {self._closed}",
-                               backend="automodel", operation="schedule")
+                               backend=self.backend, operation="schedule")
         return asyncio.get_running_loop().create_future()
 
     async def _enqueue(self, op: Union[_Pass[P], _Barrier]) -> Any:
@@ -139,7 +140,7 @@ class GroupScheduler(Generic[P, R]):
             results = await self._run_pass(run[0].key, [op.payload for op in run])
             if len(results) != len(run):
                 raise BackendError(f"run_pass returned {len(results)} results for {len(run)} requests",
-                                   backend="automodel", operation=run[0].key.kind)
+                                   backend=self.backend, operation=run[0].key.kind)
         except Exception as e:  # one pass, one fault: every request in it fails with the cause
             for op in run:
                 self._fail(op.future, e)
@@ -171,12 +172,11 @@ class GroupScheduler(Generic[P, R]):
         while self._queue:
             self._fail(self._queue.popleft().future, reason)
 
-    @staticmethod
-    def _fail(future: asyncio.Future, cause: Union[str, Exception]) -> None:
+    def _fail(self, future: asyncio.Future, cause: Union[str, Exception]) -> None:
         if future.done():
             return
         if isinstance(cause, str):
-            cause = BackendError(cause, backend="automodel", operation="schedule")
+            cause = BackendError(cause, backend=self.backend, operation="schedule")
         future.set_exception(cause)
 
 
