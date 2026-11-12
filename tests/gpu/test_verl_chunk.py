@@ -30,7 +30,9 @@ CLIP_LOW, CLIP_HIGH, CLIP_C = 0.2, 0.28, 3.0
 # The second update's gradient norm before the clip, after the first update's step. Read 2026-11-12
 # on this batch through the SDK: 0.7731, 0.7740 and 0.7738 in three runs.
 GRAD_NORM, GRAD_NORM_REL = 0.7731, 0.01
-# Seconds the client waits for the second update's custom pass. Read 2026-11-12: 18.9 s.
+# Seconds the client waits for the second update's custom pass. Read 2026-11-12: 18.9 s, 19.0 s and
+# 19.0 s in three runs, and 37 s on the same pass while the request and its result were still written
+# out as JSON on the way. The limit sits between the two, about 30% above the readings.
 PASS_LIMIT_S = 25.0
 
 
