@@ -22,8 +22,10 @@ from ..core.dependencies import (
     get_auth,
     get_runtime,
     get_config,
+    get_training_service,
 )
 from ..core.task_manager import TaskManager
+from ..services.training_service import TrainingService
 from ..proto.wire import zstd_available
 
 logger = logging.getLogger(__name__)
@@ -58,11 +60,12 @@ async def healthz():
 
 
 @router.post("/api/v1/client/config", response_model=ClientConfigResponse)
-async def client_config(request: Request):
+async def client_config(service: TrainingService = Depends(get_training_service)):
     """Feature flags for the connecting SDK (>= 0.25 fetches this once at
     construction and fails without it). The body carries the SDK version;
     every client gets the same flags."""
     return ClientConfigResponse(
+        fwdbwd_max_chunk_bytes_count=service.backend.FWDBWD_MAX_CHUNK_BYTES,
         proto_compress_fwdbwd=zstd_available(),
         sample_use_retrieve_futures=True,
         sample_join_sampling_session=True,

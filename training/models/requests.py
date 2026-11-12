@@ -8,6 +8,8 @@ from typing import Any, Dict, Iterable, List, Literal, Optional, Union
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StrictInt, ValidationError, validator, model_validator
 
+from .wire_values import is_array, list_or_array
+
 # loss_fn_config values: numbers, or text on the keys core.loss_registry declares
 # as text (the SDK's loss_fn_config_v2 carries both).
 LossFnConfig = Dict[str, Union[float, str]]
@@ -251,10 +253,20 @@ class TelemetryRequest(BaseModel):
 # ============= Tensor Data Models =============
 
 class TensorData(BaseModel):
-    """Tensor serialization format for Tinker API."""
-    data: List[Any] = Field(..., description="Tensor data (flattened)")
+    """Tensor serialization format for Tinker API (`data`, `shape`, `dtype` on the wire).
+
+    `values` holds the flattened values as they arrived: a list from a JSON body, a 1-D numpy array
+    from a proto body. Code that builds a tensor reads `values`; `data` is the same values as a list,
+    which costs a Python number per value when they arrived as an array."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    values: list_or_array(List[Any]) = Field(..., alias="data", description="Tensor data (flattened)")
     shape: Optional[List[int]] = Field(default=None, description="Tensor shape")
     dtype: Optional[str] = Field(default=None, description="Data type")
+
+    @property
+    def data(self) -> List[Any]:
+        return self.values.tolist() if is_array(self.values) else self.values
 
 
 # ============= Forward/Forward-Backward Models =============

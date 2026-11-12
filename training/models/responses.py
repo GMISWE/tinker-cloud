@@ -6,9 +6,10 @@ providing structured responses and documentation.
 """
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from ..checkpoints import CheckpointStatus
+from .wire_values import DEFAULT_TENSOR_DTYPE, batched_layout, is_array, list_or_array
 
 
 class AsyncOperationResponse(BaseModel):
@@ -82,6 +83,7 @@ class ClientConfigResponse(BaseModel):
     sample_use_retrieve_futures: bool = Field(default=True, description="True: sample completions are delivered by per-session /retrieve_futures poller")
     sample_join_sampling_session: bool = Field(default=True, description="True: an unpickled SamplingClient gets its clone id from /join_sampling_session")
     use_pyqwest_transport: bool = Field(default=False, description="False: the SDK uses its httpx default transport")
+    fwdbwd_max_chunk_bytes_count: int = Field(..., description="Estimated request bytes at which the SDK closes a forward/forward_backward chunk; the backend's TrainingBackend.FWDBWD_MAX_CHUNK_BYTES")
 
 class ClientDynamicConfigResponse(BaseModel):
     """Flags the SDK refetches while running (`POST /api/v1/client/dynamic_config`)"""
@@ -107,11 +109,19 @@ class SessionFuturesPollResponse(BaseModel):
 
 
 class TensorData(BaseModel):
-    """Tensor data in serialized format."""
+    """Tensor data in serialized format. A backend returns `data` as a list or as a 1-D numpy
+    array; an array reaches the proto view as its bytes."""
 
-    data: List[float] = Field(..., description="Flattened tensor data")
+    data: list_or_array(List[float]) = Field(..., description="Flattened tensor data")
     shape: List[int] = Field(..., description="Tensor shape")
-    dtype: str = Field(default="float32", description="Data type")
+    dtype: str = Field(default=DEFAULT_TENSOR_DTYPE, description="Data type")
+
+    @model_validator(mode="after")
+    def _an_array_is_flat_and_of_the_stated_dtype(self) -> "TensorData":
+        # the proto view takes an array's bytes as they are, and is then the only copy of its values
+        if is_array(self.data) and (self.data.ndim != 1 or str(self.data.dtype) != self.dtype):
+            raise ValueError(f"an array of shape {self.data.shape} and dtype {self.data.dtype} for a flat {self.dtype} tensor")
+        return self
 
 
 # Per-sample loss function output: named tensors ("logprobs", "logits", ...),
@@ -147,6 +157,14 @@ class ForwardBackwardResult(_Result):
             raise ValueError(
                 f"metric keys {bad} lack a `:reduction` suffix (one of {sorted(METRIC_REDUCTIONS)})")
         return metrics
+
+    @field_validator("loss_fn_outputs")
+    @classmethod
+    def _a_field_is_one_batched_tensor(cls, outputs: List[LossFnOutput]) -> List[LossFnOutput]:
+        """The proto view, the only form the SDK reads, carries a field of all datums as one tensor."""
+        for name in {name for datum in outputs for name in datum}:
+            batched_layout(name, ((datum[name].dtype, datum[name].shape) for datum in outputs if name in datum))
+        return outputs
 
 
 class ForwardResult(ForwardBackwardResult):

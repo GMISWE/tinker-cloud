@@ -3,7 +3,9 @@ Futures storage: the record of every async operation the server has accepted.
 
 One SQLite connection for the process (WAL, guarded by a lock) instead of a
 fresh connection per call; the request payload is never persisted — only its
-sha256 and byte size, which is all seq_id idempotency needs. A bounded
+sha256 and byte size, which is all seq_id idempotency needs. The digest is of
+the payload's canonical JSON, in which a numpy array stands as the sha256 of
+its bytes: a tensor of millions of values is never written out as text. A bounded
 in-memory cache keeps the futures being polled cheap to read without
 retaining every result of a long run.
 
@@ -21,6 +23,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, List, NamedTuple, Optional
 from pydantic import BaseModel
+
+from ..models.wire_values import is_array
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +44,14 @@ def _as_plain(result: Any) -> Any:
     if isinstance(result, BaseModel):
         return result.model_dump()
     return result
+
+def _canonical(value: Any) -> Any:
+    """`json.dumps` default for a payload: an array as the digest of its bytes with its dtype and
+    shape (its `str` leaves values out), anything else as its `str`."""
+    if is_array(value):
+        return {"sha256": hashlib.sha256(value.tobytes()).hexdigest(), "dtype": str(value.dtype), "shape": list(value.shape)}
+    return str(value)
+
 
 class DuplicateSeqId(ValueError):
     """A (model_id, seq_id) pair was reused with a different request; `request_id` is the one filed
@@ -116,7 +128,7 @@ class FuturesStorage:
     @staticmethod
     def payload_digest(payload: Dict[str, Any]) -> "tuple[str, int]":
         """(sha256, byte size) of the canonical JSON form of a request payload."""
-        raw = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":")).encode()
+        raw = json.dumps(payload, sort_keys=True, default=_canonical, separators=(",", ":")).encode()
         return hashlib.sha256(raw).hexdigest(), len(raw)
 
     @classmethod

@@ -406,7 +406,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             placeholder_outputs = []
             for datum in data if loss_fn == "cross_entropy" else []:
                 weights = datum.loss_fn_inputs.get("weights")
-                n = len(weights.data) if weights is not None else 0
+                n = len(weights.values) if weights is not None else 0
                 placeholder_outputs.append({
                     "logprobs": {"data": [0.0] * n, "shape": [n], "dtype": "float32"},
                 })

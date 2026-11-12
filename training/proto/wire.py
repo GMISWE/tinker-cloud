@@ -4,7 +4,8 @@ Requests: `forward_backward` bodies arrive as protobuf (`Content-Type:
 application/x-protobuf`, optionally `Content-Encoding: zstd`); a forward-only
 pass rides the same endpoint via the `forward_only` flag. `parse_forward_backward_request`
 yields the JSON-shaped dict the existing pydantic `ForwardBackwardRequest`
-validates, so the routers keep one request model and one service call.
+validates, so the routers keep one request model and one service call; a
+tensor's values stay the array its bytes decode to.
 
 Results: the SDK retrieves sample and forward/forward_backward results with
 `Accept: application/x-protobuf` and rejects JSON for those two types.
@@ -22,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from google.protobuf.message import DecodeError
 
+from ..models.wire_values import DEFAULT_TENSOR_DTYPE, PROTO_TENSOR_DTYPES, batched_layout, is_array
 from . import tinker_public_pb2 as pb
 
 
@@ -37,11 +39,12 @@ except ImportError:  # optional: the server then advertises proto_compress_fwdbw
 PROTO_CONTENT_TYPE = "application/x-protobuf"
 
 # Operations (TaskManager names) whose completed result has a proto view.
-PROTO_RESULT_OPERATIONS = frozenset({"forward", "forward_backward", "sample", "asample"})
+FORWARD_BACKWARD_OPERATIONS = frozenset({"forward", "forward_backward"})
+PROTO_RESULT_OPERATIONS = FORWARD_BACKWARD_OPERATIONS | {"sample", "asample"}
 
-# Bound on a decompressed body. The SDK caps chunks at ~5 MB before compression but sends
-# a larger datum alone in its chunk, so a legitimate body can be far bigger: one 128k-token
-# datum with top-64 soft targets is ~98 MB. The body is read piece by piece, so the bound
+# Bound on a decompressed body. The SDK caps a chunk at the bytes the server hands it
+# (TrainingBackend.FWDBWD_MAX_CHUNK_BYTES) but sends a larger datum alone in its chunk, so a
+# legitimate body can be far bigger: one 128k-token datum with top-64 soft targets is ~98 MB. The body is read piece by piece, so the bound
 # reserves nothing; it only stops a body that keeps growing.
 MAX_DECOMPRESSED_BODY_BYTES = 1 << 30
 _DECOMPRESS_PIECE_BYTES = 1 << 20
@@ -74,6 +77,7 @@ _TOPK_MASK_LOGPROB = -99999.0
 _STOP_REASON_TO_PROTO = {"stop": pb.STOP_REASON_STOP, "length": pb.STOP_REASON_LENGTH}
 _DTYPE_TO_PROTO = {"float32": pb.DTYPE_FLOAT32, "int64": pb.DTYPE_INT64}
 _DTYPE_TO_NUMPY = {"float32": np.float32, "int64": np.int64}
+assert set(_DTYPE_TO_PROTO) == set(_DTYPE_TO_NUMPY) == PROTO_TENSOR_DTYPES
 # The SDK collapses request tensors to {float32, int64} before writing.
 _PROTO_DTYPE_TO_DTYPE = {pb.DTYPE_FLOAT32: "float32", pb.DTYPE_INT64: "int64"}
 
@@ -164,7 +168,7 @@ def _tensor_from_proto(name: str, tensor: pb.Tensor, sparse_room: _SparseRoom) -
         values = _dense_from_csr(name, tensor, _DTYPE_TO_NUMPY[dtype], sparse_room)
     else:
         raise WireError(f"loss_fn_inputs[{name!r}]: the tensor carries neither dense nor sparse data")
-    out: Dict[str, Any] = {"data": values.tolist(), "dtype": dtype}
+    out: Dict[str, Any] = {"data": values, "dtype": dtype}
     if tensor.shape:
         out["shape"] = list(tensor.shape)
     return out
@@ -217,7 +221,7 @@ def serialize_result(operation: str, result: Dict[str, Any]) -> bytes:
     """Completed result dict (already validated at the futures boundary) -> proto bytes."""
     if operation in ("sample", "asample"):
         return _serialize_sample(result)
-    if operation in ("forward", "forward_backward"):
+    if operation in FORWARD_BACKWARD_OPERATIONS:
         return _serialize_forward_backward(result)
     raise ValueError(f"no proto view for operation {operation!r}")
 
@@ -269,6 +273,39 @@ def _topk_message(rows: List[Optional[List[Tuple[int, float]]]]) -> pb.TopkLogpr
     )
 
 
+def stored_forward_backward_result(result: Dict[str, Any]) -> Tuple[Dict[str, Any], bytes]:
+    """A validated forward or forward_backward result as a futures row keeps it: (the result, its
+    proto view). A per-datum tensor the backend returned as an array is in the proto view only: in
+    the result it keeps its dtype and shape and has no `data`. A tensor returned as a list stays
+    whole, with the backend's own numbers. `forward_backward_json` is the inverse."""
+    result_proto = _serialize_forward_backward(result)
+    outputs = [{name: {key: value for key, value in tensor.items() if key != "data"} if is_array(tensor["data"]) else tensor
+                for name, tensor in datum.items()} for datum in result["loss_fn_outputs"]]
+    return {**result, "loss_fn_outputs": outputs}, result_proto
+
+
+def forward_backward_json(result: Dict[str, Any], result_proto: bytes) -> Dict[str, Any]:
+    """A stored forward or forward_backward result with every tensor's `data` in place, as lists: a
+    tensor stored without it reads its values from `result_proto`."""
+    outputs = result["loss_fn_outputs"]
+    if all("data" in tensor for datum in outputs for tensor in datum.values()):
+        return result
+    proto = pb.ForwardBackwardOutput()
+    proto.ParseFromString(result_proto)
+    (record,) = proto.loss_fn_outputs   # `_serialize_forward_backward` writes one record for all datums
+    filled = []
+    for index, datum in enumerate(outputs):
+        filled.append({})
+        for name, tensor in datum.items():
+            if "data" not in tensor:
+                batched = record.fields[name]
+                start, end = np.frombuffer(batched.offsets, dtype=np.int64)[index:index + 2]
+                values = np.frombuffer(batched.data[start:end], dtype=_DTYPE_TO_NUMPY[_PROTO_DTYPE_TO_DTYPE[batched.dtype]])
+                tensor = {**tensor, "data": values.tolist()}
+            filled[-1][name] = tensor
+    return {**result, "loss_fn_outputs": filled}
+
+
 def _serialize_forward_backward(result: Dict[str, Any]) -> bytes:
     proto = pb.ForwardBackwardOutput()
     proto.loss_fn_output_type = result.get("loss_fn_output_type") or ""
@@ -285,17 +322,9 @@ def _serialize_forward_backward(result: Dict[str, Any]) -> bytes:
     # empty slice (equal adjacent offsets), which the SDK reads back as [].
     for name in dict.fromkeys(n for datum in outputs for n in datum):
         tensors = [datum.get(name) for datum in outputs]
-        dtypes = {t.get("dtype") or "float32" for t in tensors if t is not None}
-        if len(dtypes) > 1:
-            raise ValueError(f"field {name!r} has mixed dtypes across datums: {sorted(dtypes)}")
-        dtype = dtypes.pop()
-        if dtype not in _DTYPE_TO_PROTO:
-            raise ValueError(f"field {name!r}: dtype {dtype!r} has no proto value")
-        # One BatchedTensor carries one trailing shape: datums may be ragged
-        # only in the leading dimension.
-        trailing = {tuple((t.get("shape") or [len(t["data"])])[1:]) for t in tensors if t is not None}
-        if len(trailing) > 1:
-            raise ValueError(f"field {name!r} has mixed trailing shapes across datums: {sorted(trailing)}")
+        # a validated result is dumped without a dtype its backend did not state
+        dtype, trailing = batched_layout(name, ((t.get("dtype") or DEFAULT_TENSOR_DTYPE, t["shape"])
+                                                for t in tensors if t is not None))
         np_dtype = _DTYPE_TO_NUMPY[dtype]
         arrays = [np.asarray(t["data"] if t is not None else [], dtype=np_dtype).ravel() for t in tensors]
         offsets = np.zeros(len(arrays) + 1, dtype=np.int64)
@@ -304,6 +333,6 @@ def _serialize_forward_backward(result: Dict[str, Any]) -> bytes:
             data=b"".join(a.tobytes() for a in arrays),
             offsets=offsets.tobytes(),
             dtype=_DTYPE_TO_PROTO[dtype],
-            trailing_shape=trailing.pop(),
+            trailing_shape=trailing,
         ))
     return proto.SerializeToString()

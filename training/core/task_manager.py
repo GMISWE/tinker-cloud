@@ -18,7 +18,9 @@ from typing import Callable, Dict, Any, Optional, Awaitable
 from ..storage import FuturesStorage
 from ..services import ordering
 from ..models.responses import validate_result
-from ..proto.wire import PROTO_RESULT_OPERATIONS, serialize_result
+from ..proto.wire import (
+    FORWARD_BACKWARD_OPERATIONS, PROTO_RESULT_OPERATIONS, serialize_result, stored_forward_backward_result,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +84,7 @@ class TaskManager:
             request_id: Unique identifier for this request
             operation: Operation name (e.g., "forward_backward", "optim_step")
             model_id: Associated model ID
-            payload: Original request payload for debugging
+            payload: The request; a resend under the same seq_id is compared by its digest
             task_func: Async function that performs the actual work.
                       Must return Dict[str, Any] on success.
 
@@ -128,12 +130,16 @@ class TaskManager:
                 result = validate_result(operation, result)
                 # Sample and forward/forward_backward results have a proto view
                 # (SDK >= 0.25 retrieves them only as proto). Build it once here,
-                # off the event loop, beside the JSON of record; never rebuild it
-                # per poll. A view that fails to build is logged and left to the
-                # retrieve path, which then answers the proto client with 500
-                # while JSON clients still get the result.
+                # off the event loop; never rebuild it per poll. A forward or
+                # forward_backward result is stored in the form that keeps an
+                # array-valued tensor in that view only. A sample view that
+                # fails to build is logged and left to the retrieve path, which
+                # then answers the proto client with 500 while JSON clients
+                # still get the result.
                 result_proto = None
-                if operation in PROTO_RESULT_OPERATIONS:
+                if operation in FORWARD_BACKWARD_OPERATIONS:
+                    result, result_proto = await asyncio.to_thread(stored_forward_backward_result, result)
+                elif operation in PROTO_RESULT_OPERATIONS:
                     try:
                         result_proto = await asyncio.to_thread(serialize_result, operation, result)
                     except Exception as e:

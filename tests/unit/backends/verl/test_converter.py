@@ -31,8 +31,8 @@ def test_nk_values_land_at_their_position_and_column():
 def test_extract_logprobs_returns_nk_in_row_order():
     padded = torch.arange(12, dtype=torch.float32).reshape(2, 3, 2)   # [B, Rmax, K]
     long, short = VerlDataConverter.extract_logprobs(padded, [LONG, SHORT])
-    assert long["logprobs"]["shape"] == [3, 2] and long["logprobs"]["data"] == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
-    assert short["logprobs"]["shape"] == [2, 2] and short["logprobs"]["data"] == [6.0, 7.0, 8.0, 9.0]
+    assert long["logprobs"]["shape"] == [3, 2] and long["logprobs"]["data"].tolist() == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+    assert short["logprobs"]["shape"] == [2, 2] and short["logprobs"]["data"].tolist() == [6.0, 7.0, 8.0, 9.0]
 
 
 def test_an_n_datum_converts_as_it_did_before_nk():
@@ -42,7 +42,7 @@ def test_an_n_datum_converts_as_it_did_before_nk():
     assert out["input_ids"].tolist() == [[5, 6, 7, 9]] and out["responses"].tolist() == [[6, 7, 9]]
     assert out["weights"].tolist() == [[1.0, 0.0, 2.0]]
     (result,) = VerlDataConverter.extract_logprobs(torch.tensor([[-1.0, -2.0, -3.0]]), [datum])
-    assert result["logprobs"] == {"data": [-1.0, -2.0, -3.0], "dtype": "float32", "shape": [3]}
+    assert {**result["logprobs"], "data": result["logprobs"]["data"].tolist()} == {"data": [-1.0, -2.0, -3.0], "dtype": "float32", "shape": [3]}
 
 
 def test_weights_shaped_unlike_target_tokens_are_refused():

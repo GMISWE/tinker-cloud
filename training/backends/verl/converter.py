@@ -30,7 +30,7 @@ def _tensor_data(tensor, dtype) -> Optional[torch.Tensor]:
     """A TensorData -> 1-D tensor; None stays None (the input was not sent)."""
     if tensor is None:
         return None
-    return torch.tensor(tensor.data, dtype=dtype).flatten()
+    return torch.tensor(tensor.values, dtype=dtype).flatten()
 
 
 def _shaped(tensor, dtype, name: str, index: int) -> torch.Tensor:
@@ -42,7 +42,7 @@ def _shaped(tensor, dtype, name: str, index: int) -> torch.Tensor:
     shape = wire_shape(tensor)
     if len(shape) > 2:
         raise ValueError(f"datum {index}: {name} has rank {len(shape)}; the verl backend reads rank 1 or 2")
-    values = torch.tensor(tensor.data, dtype=dtype).reshape(-1)
+    values = torch.tensor(tensor.values, dtype=dtype).reshape(-1)
     if values.numel() != math.prod(shape):
         raise ValueError(f"datum {index}: {name} carries {values.numel()} values for shape {list(shape)}")
     return values.reshape(shape)
@@ -107,11 +107,11 @@ def _extract_tokens(datum: Datum) -> torch.Tensor:
 def _full_tokens(datum: Datum) -> torch.Tensor:
     tokens = _extract_tokens(datum)
     target = _loss_input(datum, "target_tokens")
-    if target is not None and target.data:
+    if target is not None and len(target.values):
         # SFT shape: model tokens are tokens[:-1]; append the final target token.
         # With [N, K] targets that is the last value sent: the appended token
         # is an input whose own output is never read.
-        return torch.cat([tokens, torch.tensor(target.data[-1:], dtype=torch.long)])
+        return torch.cat([tokens, torch.tensor(target.values[-1:], dtype=torch.long)])
     return tokens
 
 
@@ -202,5 +202,5 @@ class VerlDataConverter(DataConverter):
         for i, datum in enumerate(data):
             n = int(_full_tokens(datum).numel())
             lp = padded_logprobs[i, : n - 1].detach().float().cpu()
-            outputs.append({"logprobs": {"data": lp.reshape(-1).tolist(), "dtype": "float32", "shape": list(lp.shape)}})
+            outputs.append({"logprobs": {"data": lp.reshape(-1).numpy(), "dtype": "float32", "shape": list(lp.shape)}})
         return outputs

@@ -100,7 +100,7 @@ def convert_request(data: Sequence[Datum], loss_fn: str) -> RequestRows:
             )
         for key in wanted:
             dtype = torch.float32 if key in _FLOAT_INPUTS else torch.long
-            values = torch.tensor(datum.loss_fn_inputs[key].data, dtype=dtype).reshape(-1)
+            values = torch.tensor(datum.loss_fn_inputs[key].values, dtype=dtype).reshape(-1)
             if values.numel() != ids.numel():
                 raise ValueError(f"datum {i}: {key} has {values.numel()} entries for {ids.numel()} tokens")
             inputs[key].append(values)
