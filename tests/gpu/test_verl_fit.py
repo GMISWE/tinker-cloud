@@ -3,9 +3,10 @@
 
 The input is a recorded batch, `RECORDED_BATCH`: a torch file `{"tensors": {...}}` of 128 padded rows,
 with `prompts` [B, P], `input_ids` and `attention_mask` [B, P + R] (the prompt left-padded, the response
-right-padded) and `student_top_k_ids` [B, R, 16]. Needs that file, 4 GPUs of 80 GB, verl, and the four
-models in the HF cache; starts its own Ray instance. Each test prints seconds and nvidia-smi memory per
-pass (-s shows it).
+right-padded) and `student_top_k_ids` [B, R, 16]. The models load from `MODEL_ROOT`, a directory of
+`<org>/<name>` model directories whose configs carry the RoPE base the batch was recorded at. Needs both,
+the four models' `config.json` in the HF cache, 4 GPUs of 80 GB and verl; starts its own Ray instance.
+Each test prints seconds and nvidia-smi memory per pass (-s shows it).
 
 Run on a GPU pod:
   KX_TIMEOUT=1700 scripts/pod_pytest.sh <pod> tests/gpu/test_verl_fit.py -s -v
@@ -26,10 +27,12 @@ if torch.cuda.device_count() < 4:
     pytest.skip("needs 4 GPUs", allow_module_level=True)
 
 from tinkercloud.training.backends.verl.backend import VerlBackend  # noqa: E402
+from tinkercloud.training.backends.verl.builder import VerlArgumentBuilder  # noqa: E402
 
 from .verl_smollm3 import K, STUDENT, TEACHERS, adam, create_full_weights, datum, gpu_mib, verl_actors  # noqa: E402
 
 RECORDED_BATCH = "/data/runs/mopd/ref/step1.pt"
+MODEL_ROOT = "/data/runs/mopd/model_root_theta2e6"
 SHARDS, SHARD_ROWS, UPDATE_ROWS, UPDATE = 4, 32, 8, 1   # rows [8, 16) of each rank's 32: the batch's second update
 MAX_SEQ_LEN = 18432                                      # 2,048 prompt tokens and 16,384 response tokens
 # What a forward, or an update once the optimizer has state, may leave on a GPU above its memory before
@@ -81,6 +84,11 @@ def backend():
     with pytest.MonkeyPatch.context() as env:
         env.setenv("TINKERCLOUD_VERL_MODELS_PER_GPU", "4")
         env.setenv("TINKERCLOUD_VERL_MAX_SEQ_LEN", str(MAX_SEQ_LEN))
+        env.setenv("TINKERCLOUD_MODEL_ROOT", MODEL_ROOT)
+        # a name the root does not hold falls through to another directory or the hub id, silently
+        for name in (STUDENT, *TEACHERS):
+            resolved = VerlArgumentBuilder.resolve_hf_path(name)
+            assert resolved.startswith(MODEL_ROOT + "/"), resolved
         yield VerlBackend()
     assert verl_actors() == []
 
