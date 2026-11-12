@@ -24,7 +24,7 @@ from threading import Lock
 from typing import Any, Dict, List, NamedTuple, Optional
 from pydantic import BaseModel
 
-from ..models.tensor_values import is_array
+from ..core.array_values import is_array
 
 logger = logging.getLogger(__name__)
 

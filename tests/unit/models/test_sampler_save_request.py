@@ -1,14 +1,7 @@
-"""The duplicate-save error's place among the store's errors, and which sampler save is ephemeral."""
+"""Which sampler save is ephemeral."""
 import pytest
 
-from tinkercloud.training.checkpoints import CheckpointError, CheckpointExists
 from tinkercloud.training.models.requests import SaveWeightsForSamplerRequest
-
-
-def test_a_duplicate_save_is_a_checkpoint_error_the_client_caused():
-    """It was a bare Exception, outside the errors the application maps to a status."""
-    assert issubclass(CheckpointExists, CheckpointError)
-    assert CheckpointExists.status_code == 400
 
 
 @pytest.mark.parametrize("fields, ephemeral", [

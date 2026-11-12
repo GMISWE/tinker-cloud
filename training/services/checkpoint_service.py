@@ -29,6 +29,11 @@ CHECKPOINT_TYPES: Dict[CheckpointKind, CheckpointType] = {
 }
 
 
+def _server_chosen_name(prefix: str) -> str:
+    """The name of a save that names none. It is unique: two such saves in one second are two checkpoints."""
+    return f"{prefix}_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+
+
 class CheckpointService:
     """Service for managing model checkpoints and weights."""
 
@@ -64,8 +69,7 @@ class CheckpointService:
         backend can write) under the name the client chose."""
         client_info = self._client(training_clients, model_id)
         handle = client_info["backend_handle"]
-        # the server's own name is unique: two unnamed saves in one second are two checkpoints
-        name = path or f"checkpoint_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+        name = path or _server_chosen_name("checkpoint")
         ticket = self.store.begin_save(
             model_id, CheckpointKind.WEIGHTS, name,
             options=options, weight_version=handle.weight_version,
@@ -215,7 +219,7 @@ class CheckpointService:
                 "type": "save_weights_for_sampler",
             }
 
-        name = request.path or request.name or f"sampler_{int(time.time())}"
+        name = request.path or request.name or _server_chosen_name("sampler")
         ticket = self.store.begin_save(
             model_id, CheckpointKind.SAMPLER_WEIGHTS, name, weight_version=weight_version,
             options=options,
