@@ -34,6 +34,12 @@ TEXT = (
 )
 
 
+def create_full_weights(loop, backend, model_id: str, base_model: str):
+    """`base_model` created at full weights on NUM_GPUS; the handle."""
+    return loop.run_until_complete(backend.create_model(
+        model_id, "create", base_model, NUM_GPUS, lora_config=FULL_WEIGHTS, optimizer="adamw"))
+
+
 def adam(learning_rate: float) -> AdamParams:
     return AdamParams(learning_rate=learning_rate, beta1=0.9, beta2=0.95, eps=1e-8, weight_decay=0.0,
                       grad_clip_norm=0.0)

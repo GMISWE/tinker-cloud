@@ -53,3 +53,13 @@ def make_synthetic_datum(seq_len: int = 128, response_len: int = 64):
 def make_synthetic_batch(batch_size: int = 4, seq_len: int = 128) -> list:
     """A batch of synthetic wire datums."""
     return [make_synthetic_datum(seq_len=seq_len) for _ in range(batch_size)]
+
+
+def write_csr(tensor, shape, values, crow_indices, col_indices) -> None:
+    """Fill a proto `Tensor` as the SDK writes a sparse CSR one: the listed entries row after row in
+    `values` (their numpy dtype is the tensor's), int64 column indices, int64 row pointers."""
+    import numpy as np
+    tensor.shape.extend(shape)
+    tensor.sparse_csr.values = np.asarray(values).tobytes()
+    tensor.sparse_csr.crow_indices = np.asarray(crow_indices, dtype=np.int64).tobytes()
+    tensor.sparse_csr.col_indices = np.asarray(col_indices, dtype=np.int64).tobytes()

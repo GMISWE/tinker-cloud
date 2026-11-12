@@ -96,6 +96,7 @@ def parse_forward_backward_request(body: bytes) -> Tuple[Dict[str, Any], bool]:
         raise WireError(f"malformed proto forward_backward body: {e}") from None
 
     data = []
+    sparse_room = _SparseRoom()
     for datum in msg.data:
         chunks = []
         for chunk in datum.model_input:
@@ -116,7 +117,7 @@ def parse_forward_backward_request(body: bytes) -> Tuple[Dict[str, Any], bool]:
                 chunks.append(image)
             else:
                 raise WireError(f"unsupported model_input chunk type: {which}")
-        loss_fn_inputs = {name: _tensor_from_proto(name, t) for name, t in datum.loss_fn_inputs.items()}
+        loss_fn_inputs = {name: _tensor_from_proto(name, t, sparse_room) for name, t in datum.loss_fn_inputs.items()}
         data.append({"model_input": {"chunks": chunks}, "loss_fn_inputs": loss_fn_inputs})
 
     loss_fn_config: Optional[Dict[str, Any]] = None
@@ -136,19 +137,78 @@ def parse_forward_backward_request(body: bytes) -> Tuple[Dict[str, Any], bool]:
     return request, msg.forward_only
 
 
-def _tensor_from_proto(name: str, tensor: pb.Tensor) -> Dict[str, Any]:
+class _SparseRoom:
+    """The bytes a request's sparse tensors may still fill once dense. A dense tensor is as large as its
+    bytes in the body; a sparse one of a few bytes can name any shape, so together their dense forms get
+    the bound a decompressed body has."""
+
+    def __init__(self) -> None:
+        self.bytes_left = MAX_DECOMPRESSED_BODY_BYTES
+
+    def take(self, name: str, shape: List[int], nbytes: int) -> None:
+        """Raises WireError when `nbytes` more would pass the bound."""
+        if nbytes > self.bytes_left:
+            raise WireError(f"loss_fn_inputs[{name!r}]: sparse tensor of shape {shape} densifies past the "
+                            f"{MAX_DECOMPRESSED_BODY_BYTES} bytes a request's sparse tensors may fill")
+        self.bytes_left -= nbytes
+
+
+def _tensor_from_proto(name: str, tensor: pb.Tensor, sparse_room: _SparseRoom) -> Dict[str, Any]:
     dtype = _PROTO_DTYPE_TO_DTYPE.get(tensor.dtype)
     if dtype is None:
         raise WireError(f"loss_fn_inputs[{name!r}]: unsupported tensor dtype {tensor.dtype}")
-    if tensor.WhichOneof("encoding") != "dense":
-        raise WireError(f"loss_fn_inputs[{name!r}]: sparse tensors are not supported")
-    out: Dict[str, Any] = {
-        "data": np.frombuffer(tensor.dense, dtype=_DTYPE_TO_NUMPY[dtype]).tolist(),
-        "dtype": dtype,
-    }
+    encoding = tensor.WhichOneof("encoding")
+    if encoding == "dense":
+        values = np.frombuffer(tensor.dense, dtype=_DTYPE_TO_NUMPY[dtype])
+    elif encoding == "sparse_csr":
+        values = _dense_from_csr(name, tensor, _DTYPE_TO_NUMPY[dtype], sparse_room)
+    else:
+        raise WireError(f"loss_fn_inputs[{name!r}]: the tensor carries neither dense nor sparse data")
+    out: Dict[str, Any] = {"data": values.tolist(), "dtype": dtype}
     if tensor.shape:
         out["shape"] = list(tensor.shape)
     return out
+
+
+def _dense_from_csr(name: str, tensor: pb.Tensor, numpy_dtype, room: _SparseRoom) -> np.ndarray:
+    """A sparse CSR tensor as its dense values in row order; an entry the CSR leaves out is 0.
+
+    The SDK sends a 2-D `target_tokens` or `weights` this way when the CSR holds fewer elements than the
+    dense tensor:
+    `values` and int64 `col_indices` hold the listed entries row after row, and row i owns the entries
+    `crow_indices[i]:crow_indices[i + 1]`.
+
+    Raises:
+        WireError: the message is not a valid CSR for its shape, or its dense form does not fit in `room`.
+    """
+    def refuse(why: str) -> WireError:
+        return WireError(f"loss_fn_inputs[{name!r}]: sparse tensor {why}")
+
+    shape = list(tensor.shape)
+    if len(shape) != 2 or min(shape) < 0:
+        raise refuse(f"needs a 2-D shape, got {shape}")
+    rows, cols = shape
+    room.take(name, shape, rows * cols * np.dtype(numpy_dtype).itemsize)
+    csr = tensor.sparse_csr
+    try:
+        values = np.frombuffer(csr.values, dtype=numpy_dtype)
+        crow = np.frombuffer(csr.crow_indices, dtype=np.int64)
+        col = np.frombuffer(csr.col_indices, dtype=np.int64)
+    except ValueError as e:   # a buffer that is not a whole number of items
+        raise refuse(f"has a truncated buffer: {e}") from None
+    per_row = np.diff(crow)
+    if crow.size != rows + 1 or crow[0] != 0 or (per_row < 0).any():
+        raise refuse(f"needs {rows + 1} non-decreasing row pointers from 0, got {crow.size}")
+    if values.size != crow[-1] or col.size != values.size:
+        raise refuse(f"lists {values.size} values and {col.size} column indices for {int(crow[-1])} entries")
+    row = np.repeat(np.arange(rows), per_row)
+    if col.size and (col.min() < 0 or col.max() >= cols):
+        raise refuse(f"has a column index outside [0, {cols})")
+    if ((np.diff(col) <= 0) & (row[1:] == row[:-1])).any():
+        raise refuse("has column indices that do not increase within a row")
+    dense = np.zeros((rows, cols), dtype=numpy_dtype)
+    dense[row, col] = values
+    return dense.reshape(-1)
 
 
 # ------------------------------------------------------------------- results
