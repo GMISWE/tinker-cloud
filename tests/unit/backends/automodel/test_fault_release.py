@@ -6,8 +6,8 @@ import asyncio
 
 import pytest
 
-from tinkercloud.training.backends.automodel.scheduler import GroupScheduler, pass_key
 from tinkercloud.training.backends.base import BackendError
+from tinkercloud.training.backends.common.scheduler import GroupScheduler, pass_key
 from tinkercloud.training.models.requests import AdamParams
 from tests.unit.backends.automodel.test_backend import ADAM, wired
 
@@ -57,7 +57,7 @@ def test_close_after_a_cancelled_worker_returns():
             await gate.wait()
             return list(payloads)
 
-        s = GroupScheduler("g", run_pass)
+        s = GroupScheduler("g", run_pass, "automodel")
         pending = asyncio.ensure_future(s.submit_pass(pass_key("a", FB, "cross_entropy", None), 1))
         for _ in range(50):
             if ran:
@@ -89,7 +89,7 @@ def test_close_waits_for_the_op_in_progress():
             await gate.wait()
             return list(payloads)
 
-        s = GroupScheduler("g", run_pass)
+        s = GroupScheduler("g", run_pass, "automodel")
         first = asyncio.ensure_future(s.submit_pass(pass_key("a", FB, "cross_entropy", None), 1))
         for _ in range(50):
             if ran:
