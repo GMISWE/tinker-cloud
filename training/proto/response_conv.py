@@ -118,11 +118,11 @@ def forward_backward_json(result: Dict[str, Any], result_proto: bytes) -> Dict[s
 
 def _serialize_forward_backward(result: Dict[str, Any]) -> bytes:
     proto = pb.ForwardBackwardOutput()
-    proto.loss_fn_output_type = result.get("loss_fn_output_type") or ""
+    proto.loss_fn_output_type = result["loss_fn_output_type"]
     for name, value in (result.get("metrics") or {}).items():
         proto.metrics[name] = float(value)
 
-    outputs: List[Dict[str, Dict[str, Any]]] = result.get("loss_fn_outputs") or []
+    outputs: List[Dict[str, Dict[str, Any]]] = result["loss_fn_outputs"]
     if not outputs:
         return proto.SerializeToString()
 
