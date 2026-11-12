@@ -27,7 +27,7 @@ fi
 [ ${#PODS[@]} -gt 0 ] || { echo "== no tinkercloud- pod in $NS =="; exit 0; }
 
 # the deployed tree carries no git metadata: compare content hashes of training/*.py
-LOCAL_TREE=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && find training -name '*.py' | sort | xargs sha256sum | cut -d' ' -f1 | sha256sum | cut -c1-12)
+LOCAL_TREE=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && find training -name '*.py' | LC_ALL=C sort | xargs sha256sum | cut -d' ' -f1 | sha256sum | cut -c1-12)
 for pod in "${PODS[@]}"; do
   echo "== $pod =="
   # shellcheck disable=SC2016  # the string runs on the pod; its $ expand there
@@ -38,7 +38,7 @@ for pod in "${PODS[@]}"; do
     echo "  ray:     $(ray status 2>/dev/null | grep -Eo "[0-9.]+/[0-9.]+ GPU" | head -1 || echo "no head")"
     echo "  actors:  $(ray list actors --filter state=ALIVE 2>/dev/null | grep -c ALIVE) alive"
     echo "  pypi:    $(python3 -c "import importlib.metadata as m,sys; print(*(p+\"=\"+m.version(p) for p in sys.argv[1:]))" uvicorn fastapi pydantic httpx 2>/dev/null)"
-    echo "  /app:    training/ tree $(cd /app && find training -name "*.py" 2>/dev/null | sort | xargs sha256sum 2>/dev/null | cut -d" " -f1 | sha256sum | cut -c1-12) (local: '"$LOCAL_TREE"')"
+    echo "  /app:    training/ tree $(cd /app && find training -name "*.py" 2>/dev/null | LC_ALL=C sort | xargs sha256sum 2>/dev/null | cut -d" " -f1 | sha256sum | cut -c1-12) (local: '"$LOCAL_TREE"')"
   ')" 2>/dev/null || echo "  (exec dropped: state unknown)"
   echo "  head:    $(kx exec "$pod" -- bash -c "$(pod_cmd "$(ray_head state)")" 2>/dev/null || echo "unknown (exec dropped)")"
 done
