@@ -52,7 +52,7 @@ def parse_forward_backward_request(body: bytes) -> Tuple[Dict[str, Any], bool]:
             if which == "encoded_text":
                 chunks.append({
                     "type": "encoded_text",
-                    "tokens": np.frombuffer(chunk.encoded_text.tokens, dtype=np.int32).tolist(),
+                    "tokens": _frombuffer(chunk.encoded_text.tokens, np.int32, "model_input encoded_text").tolist(),
                 })
             elif which == "image":
                 image = {
@@ -101,13 +101,21 @@ class _SparseRoom:
         self.bytes_left -= nbytes
 
 
+def _frombuffer(buf: bytes, numpy_dtype: Any, what: str) -> np.ndarray:
+    """Decode a raw byte buffer as `numpy_dtype`, turning a truncated tail into WireError."""
+    try:
+        return np.frombuffer(buf, dtype=numpy_dtype)
+    except ValueError as e:
+        raise WireError(f"{what} has a truncated buffer: {e}") from None
+
+
 def _tensor_from_proto(name: str, tensor: pb.Tensor, sparse_room: _SparseRoom) -> Dict[str, Any]:
     dtype = PROTO_TO_DTYPE.get(tensor.dtype)
     if dtype is None:
         raise WireError(f"loss_fn_inputs[{name!r}]: unsupported tensor dtype {tensor.dtype}")
     encoding = tensor.WhichOneof("encoding")
     if encoding == "dense":
-        values = np.frombuffer(tensor.dense, dtype=DTYPE_TO_NUMPY[dtype])
+        values = _frombuffer(tensor.dense, DTYPE_TO_NUMPY[dtype], f"loss_fn_inputs[{name!r}]")
     elif encoding == "sparse_csr":
         values = _dense_from_csr(name, tensor, DTYPE_TO_NUMPY[dtype], sparse_room)
     else:

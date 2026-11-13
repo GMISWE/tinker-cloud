@@ -82,3 +82,15 @@ def test_unsupported_bodies_are_wire_errors(mutate, match):
 def test_malformed_bytes_are_a_wire_error():
     with pytest.raises(WireError, match="malformed"):
         parse_forward_backward_request(b"\xff\xff\xff")
+
+
+@pytest.mark.parametrize("mutate,match", [
+    (lambda m: m.data[0].model_input[0].encoded_text.__setattr__("tokens", b"\x01\x02\x03"), "encoded_text"),
+    (lambda m: m.data[0].loss_fn_inputs["weights"].__setattr__("dense", b"\x01\x02\x03"), "weights"),
+    (lambda m: m.data[0].loss_fn_inputs["target_tokens"].__setattr__("dense", b"\x01\x02\x03\x04"), "target_tokens"),
+])
+def test_truncated_buffers_are_wire_errors(mutate, match):
+    msg = _fb_msg()
+    mutate(msg)
+    with pytest.raises(WireError, match=match):
+        parse_forward_backward_request(msg.SerializeToString())
