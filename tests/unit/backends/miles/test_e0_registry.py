@@ -10,16 +10,9 @@ import json
 
 import pytest
 
-try:
-    from training.backends.miles.e0_registry import (
-        _REGISTRY_PATH,
-        resolve_e0,
-    )
-except ImportError:  # pragma: no cover  # noqa: TREE002  (#193)
-    resolve_e0 = None
-
-pytestmark = pytest.mark.skipif(
-    resolve_e0 is None, reason="training package not importable"
+from training.backends.miles.e0_registry import (
+    _REGISTRY_PATH,
+    resolve_e0,
 )
 
 
