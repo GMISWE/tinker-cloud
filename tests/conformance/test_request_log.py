@@ -66,6 +66,7 @@ def test_every_finished_pass_request_has_one_line(service_client, server):
 
 
 def test_a_request_with_more_datums_reports_more_body_bytes(service_client, server):
+    """The body bytes are the request's own, not a constant: they grow with what the request carries."""
     tc = service_client.create_lora_training_client(base_model="fake/tiny", rank=2)
     tc.forward([make_datum([1, 2, 3, 4])], "cross_entropy").result()
     tc.forward([make_datum(list(range(i, i + 40))) for i in range(8)], "cross_entropy").result()

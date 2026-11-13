@@ -35,6 +35,8 @@ SAMPLE_TOKENS = 88
 
 
 def test_every_models_pass_runs_with_the_students_sampler_asleep(live_sdk):
+    """The first teacher's forward ran out of memory beside the awake sampler. With the sampler built
+    first, every model's pass completes, and the sampler serves again after them."""
     import tinker
     from tinker import types
 
