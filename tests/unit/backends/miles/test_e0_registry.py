@@ -15,7 +15,7 @@ try:
         _REGISTRY_PATH,
         resolve_e0,
     )
-except ImportError:  # pragma: no cover
+except ImportError:  # pragma: no cover  # noqa: TREE002  (#193)
     resolve_e0 = None
 
 pytestmark = pytest.mark.skipif(

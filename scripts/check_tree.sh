@@ -11,8 +11,9 @@
 #   3. no test imports a sibling test module (`from test_x import`): shared
 #      helpers live in tests/datums.py, tests/fakes/ or a conftest
 #   4. every violation of a rule pyproject.toml's extend-select names, counted with every suppression
-#      switched off, is suppressed on its own line by `# noqa: <rule>  (#<n>)` naming the issue of its
-#      path, and each path holds exactly the count scripts/suppression_baseline.tsv gives it
+#      switched off, and of a rule of scripts/check_ast.py (the syntax tree decides those), is
+#      suppressed on its own line by `# noqa: <rule>  (#<n>)` naming the issue of its path, and each
+#      path holds exactly the count scripts/suppression_baseline.tsv gives it
 set -euo pipefail
 rc=0
 # a path of this repo starts at `tests/`; `other_repo/tests/x.py` is somebody else's
@@ -42,12 +43,13 @@ fi
 # Rule 4. The tracked rules are the ones extend-select names, read from its line, so a rule selected
 # later is tracked from that change on. The line is one line of full rule codes (three digits or
 # more: a prefix such as "BLE" or "B9" selects rules this check could not name) or the check stops.
-# RUF100 stays out: it reports suppressions, not code.
+# RUF100 stays out: it reports suppressions, not code. check_ast.py names its own rules.
 select_line=$(grep -E '^extend-select = ' pyproject.toml || true)   # no such line: the next test says so
 [[ $select_line =~ ^extend-select\ =\ \[(\"[A-Z]+[0-9]{3,}\"(,\ )?)+\]$ ]] \
   || { echo "pyproject.toml: extend-select must be one line of full rule codes; found: ${select_line:-no such line}" >&2; exit 1; }
-tracked=$(grep -oE '[A-Z]+[0-9]+' <<< "$select_line" | grep -vx RUF100 | paste -sd, - || true)
-[ -n "$tracked" ] || { echo "pyproject.toml: extend-select names no rule besides RUF100, so there is no rule to track" >&2; exit 1; }
+ruff_rules=$(grep -oE '[A-Z]+[0-9]+' <<< "$select_line" | grep -vx RUF100 | paste -sd, - || true)
+[ -n "$ruff_rules" ] || { echo "pyproject.toml: extend-select names no rule besides RUF100, so there is no rule to track" >&2; exit 1; }
+tracked=$ruff_rules,$(python3 scripts/check_ast.py --rules)
 baseline=scripts/suppression_baseline.tsv
 declare -A want issue have
 while IFS=$'\t' read -r path count number || [ -n "$path" ]; do   # a last row with no newline is a row
@@ -59,15 +61,19 @@ done < "$baseline"
 # config file (per-file ignores, excludes, nested configs), and naming each file passes ruff's default
 # excludes and .gitignore. ruff exits 0 clean, 1 on violations, 2 on its own error (its documented codes).
 mapfile -d '' -t sources < <(files -path './training/*' -name '*.py' -o -path './tests/*' -name '*.py')
-violations=$(ruff check --isolated --no-cache --select "$tracked" --ignore-noqa --output-format concise "${sources[@]}") \
-  || [ $? -eq 1 ] || { echo "ruff could not count the violations of $tracked" >&2; exit 1; }
+ruff_violations=$(ruff check --isolated --no-cache --select "$ruff_rules" --ignore-noqa --output-format concise "${sources[@]}") \
+  || [ $? -eq 1 ] || { echo "ruff could not count the violations of $ruff_rules" >&2; exit 1; }
+# check_ast.py reads no suppression either; it exits 0 clean, 1 on findings and 2 on its own error
+ast_violations=$(python3 scripts/check_ast.py "${sources[@]}") \
+  || [ $? -eq 1 ] || { echo "scripts/check_ast.py could not check the files" >&2; exit 1; }
 while IFS=: read -r file line _ report; do
   read -r rule _ <<< "$report"
-  # observed on ruff 0.15.11: a file that does not parse gives `invalid-syntax` lines only (one for
-  # `x = (`, two for `def f(:`), exit 1, and no tracked rule, so its violations cannot be counted
+  # A diagnostic that is no tracked rule fails as it stands: `unused-noqa` from check_ast.py, a `noqa`
+  # of its rules on a line that breaks none; and ruff's `invalid-syntax` for a file its parser refuses
+  # and Python's takes (check_ast.py stops the check on the others), whose violations cannot be counted.
   case ",$tracked," in
     *",$rule,"*) ;;
-    *) echo "$file:$line:$report: ruff reports no tracked rule for this file" >&2; rc=1; continue ;;
+    *) echo "$file:$line:$report" >&2; rc=1; continue ;;
   esac
   path=""
   for p in "${!want[@]}"; do
@@ -78,7 +84,7 @@ while IFS=: read -r file line _ report; do
   if ! sed -n "${line}p" "$file" | grep -qE "# noqa: ([A-Z]+[0-9]+, )*$rule(, [A-Z]+[0-9]+)* +\(#${issue[$path]}\)"; then
     echo "$file:$line: $rule must be suppressed on this line with its issue: # noqa: $rule  (#${issue[$path]})" >&2; rc=1
   fi
-done < <(grep -E '^[^:]+:[0-9]+:[0-9]+: ' <<< "$violations" || true)   # every diagnostic line; a clean tree gives none
+done < <(grep -E '^[^:]+:[0-9]+:[0-9]+: ' <<< "$ruff_violations"$'\n'"$ast_violations" || true)   # every diagnostic line; a clean tree gives none
 for p in "${!want[@]}"; do
   if [ "${want[$p]}" -eq 0 ]; then echo "$baseline: the row of $p holds 0; delete it" >&2; rc=1
   elif [ "${have[$p]}" -ne "${want[$p]}" ]; then echo "$p: ${have[$p]} violations in the tree, ${want[$p]} in $baseline" >&2; rc=1; fi

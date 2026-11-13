@@ -14,7 +14,7 @@ import pytest
 try:
     from training.models.requests import AdamParams
     from training.services.training_service import TrainingService
-except ImportError:  # pragma: no cover
+except ImportError:  # pragma: no cover  # noqa: TREE002  (#193)
     TrainingService = None
 
 

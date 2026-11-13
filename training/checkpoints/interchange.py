@@ -54,7 +54,7 @@ def _write_peft_keyed(weights_src: str, weights_dst: str) -> None:
     """
     try:
         from safetensors.torch import load_file, save_file
-    except ImportError:
+    except ImportError:  # noqa: TREE002  (#192)
         logger.warning("safetensors unavailable; publishing adapter keys unmodified")
         shutil.copy2(weights_src, weights_dst)
         return

@@ -45,6 +45,10 @@ extend-exclude = ["training/proto/tinker_public_pb2.py"]
 # scripts/suppression_baseline.tsv holds the count per path and scripts/check_tree.sh compares.
 # That script reads this line and refuses any form but one line of full rule codes.
 extend-select = ["B904", "BLE001", "S110", "PT011", "PT017", "RUF100"]
+# TREE: the rules of scripts/check_ast.py, suppressed and counted the same way. `external` names the
+# prefix for ruff's RUF102 (an unknown code in a `noqa`), which is not selected here: selecting it, or
+# a ruff that reports the same under RUF100, then leaves these comments alone.
+external = ["TREE"]
 
 [tool.ruff.lint.per-file-ignores]
 # tests set up fixtures on one line (`a = x; b = y`); the F rules (undefined
