@@ -11,8 +11,9 @@ steps once.
 
 Rollout: every model is a ModelWorker group (verl's Tinker worker; actor_rollout
 role). Its vLLM server replicas (LLMServerManager) are built at the model's
-first sample, in hybrid timeshare: replicas sleep during training ops and
-wake with a naive weight sync (CheckpointEngineManager) for sampling. A model
+first sample, in hybrid timeshare: replicas sleep during a pass of any of the
+server's models (they share its GPUs) and wake with a naive weight sync
+(CheckpointEngineManager) for sampling. A model
 that never samples (a forward-only teacher) never builds one.
 update_inference_weights is lazy: versions are tracked on the handle and the
 sync happens on the next sample/prepare_for_generation, so pure-training runs
@@ -23,6 +24,7 @@ GPUs: the server's models share one placement group of whole GPUs
 GPU, so several models are resident on the same devices.
 """
 import asyncio
+import contextlib
 import logging
 import math
 import threading
@@ -77,7 +79,7 @@ class VerlHandle(BackendHandle):
     lora_rank: int = 0
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # FIFO per handle
     # Sample concurrency: generates run OUTSIDE _lock so vLLM batches them;
-    # training ops quiesce active samplers first (_quiesce_samplers).
+    # a pass of any model and this model's other operations drain them first (_quiesce_samplers).
     _active_samplers: int = 0
     _samplers_drained: asyncio.Event = field(default_factory=_set_event)
 
@@ -139,7 +141,7 @@ class _SharedGpus:
 class VerlBackend(TrainingBackend[VerlHandle]):
     """Full or LoRA models on verl's FSDP engine. Models share the server's GPUs
     (`models_per_gpu`); a model builds its vLLM sampler at its first sample, and
-    one model per server holds a sampler."""
+    one model per server holds a sampler. The sampler sleeps while any model runs a pass."""
     config: VerlConfig
 
     SUPPORTED_LOSS_FNS = frozenset({"cross_entropy", "importance_sampling", "ppo"})  # losses.LOSS_FNS
@@ -159,7 +161,12 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         self._gpus = _SharedGpus(self.config.models_per_gpu)
         # vLLM server actors are Ray-named by replica rank alone, so one model per Ray
         # cluster can own a sampler: the first to sample or to be prepared for it, until deleted.
-        self._sampler_model_id: Optional[str] = None
+        self._sampler_owner: Optional[VerlHandle] = None
+        # A pass (forward, forward_backward, optimizer step) of any model runs with the sampler asleep.
+        # _sampler_gate serializes a sleep and a wake; a sample wakes the sampler only while no pass runs.
+        self._sampler_gate = asyncio.Lock()
+        self._passes_running = 0
+        self._no_pass_running = _set_event()
 
     @property
     def converter(self):
@@ -252,10 +259,8 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         loss_fn: str,
         loss_fn_config: Optional[Dict[str, float]] = None,
     ) -> Dict[str, Any]:
-        async with handle._lock:
+        async with handle._lock, self._pass():
             try:
-                await self._quiesce_samplers(handle)
-                await asyncio.to_thread(self._ensure_training_ready, handle)
                 await asyncio.to_thread(self._ensure_loss_fn, handle, loss_fn)
                 td = await asyncio.to_thread(self._to_tensordict, handle, data, loss_fn)
                 out = await asyncio.to_thread(_wg_call, handle.worker_group.forward_backward, td)
@@ -279,10 +284,8 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         optim_params: OptimParams,
     ) -> Dict[str, Any]:
         adam = cast(AdamParams, optim_params)   # the only family this backend declares
-        async with handle._lock:
+        async with handle._lock, self._pass():
             try:
-                await self._quiesce_samplers(handle)
-                await asyncio.to_thread(self._ensure_training_ready, handle)
                 params: Dict[str, Any] = {
                     "lr": float(adam.learning_rate),
                     "betas": (float(adam.beta1), float(adam.beta2)),
@@ -320,10 +323,8 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         handle: VerlHandle,
         data: List[Datum],
     ) -> List[Any]:
-        async with handle._lock:
+        async with handle._lock, self._pass():
             try:
-                await self._quiesce_samplers(handle)
-                await asyncio.to_thread(self._ensure_training_ready, handle)
                 # the infer path runs the loss too: the engine's logits hook, which
                 # [N, K] targets need, is the installed loss function
                 await asyncio.to_thread(self._ensure_loss_fn, handle, "cross_entropy")
@@ -404,10 +405,11 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         async with handle._lock:
             try:
                 await self._quiesce_samplers(handle)
-                if self._sampler_model_id == handle.model_id:
-                    # rollout server actors first (they hold engine refs into workers)
-                    await asyncio.to_thread(_kill_named_actors, VLLM_SERVER_NAME_PREFIX)
-                    self._sampler_model_id = None
+                if self._sampler_owner is handle:
+                    async with self._sampler_gate:   # a pass of another model may be putting the sampler to sleep
+                        # rollout server actors first (they hold engine refs into workers)
+                        await asyncio.to_thread(_kill_named_actors, VLLM_SERVER_NAME_PREFIX)
+                        self._sampler_owner = None
                 handle.llm_manager = None
                 handle.llm_client = None
                 handle.ckpt_manager = None
@@ -438,15 +440,15 @@ class VerlBackend(TrainingBackend[VerlHandle]):
                 raise SampleRequestError(
                     "topk_sample_logprobs needs temperature > 0 on the verl backend", backend="verl")
             vllm_sp["topk_log_probs"] = topk_sample_logprobs
-        # Hybrid timeshare: generation must not overlap this model's training
-        # ops. Register as an active sampler under the FIFO lock (which
-        # serializes the wake/weight-sync), then generate WITHOUT the lock so
-        # concurrent sample requests batch inside vLLM; the model's training ops
-        # quiesce samplers via _quiesce_samplers first. Another model's passes
-        # (a teacher's forward) run beside the awake sampler on the same GPUs.
+        # Hybrid timeshare: generation must not overlap a pass of any model. Register as an
+        # active sampler under the FIFO lock (which serializes the wake/weight-sync), then
+        # generate WITHOUT the lock so concurrent sample requests batch inside vLLM; a pass
+        # drains the active samplers first (_pass).
         async with handle._lock:
             try:
-                await self._ready_sampler(handle)
+                async with self._awake_sampler(handle):
+                    handle._active_samplers += 1
+                    handle._samplers_drained.clear()
 
                 if pinned_version is not None and pinned_version != handle.weight_version:
                     # vLLM serves the live (base+adapter) route; a pinned
@@ -462,8 +464,6 @@ class VerlBackend(TrainingBackend[VerlHandle]):
                         "[%s] prompt_logprobs unsupported on verl sample path "
                         "(use forward/get_logprobs); returning None", request_id,
                     )
-                handle._active_samplers += 1
-                handle._samplers_drained.clear()
             except (BackendError, UnsupportedFeatureError):
                 raise
             except Exception as e:
@@ -520,7 +520,8 @@ class VerlBackend(TrainingBackend[VerlHandle]):
     async def prepare_for_generation(self, handle: VerlHandle) -> None:
         async with handle._lock:
             try:
-                await self._ready_sampler(handle)
+                async with self._awake_sampler(handle):
+                    pass
             except BackendError:
                 raise
             except Exception as e:
@@ -562,35 +563,75 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         while h._active_samplers:
             await h._samplers_drained.wait()
 
-    async def _ready_sampler(self, h: VerlHandle) -> None:
-        """Wake `h`'s sampler at its current weights. Call with h._lock HELD.
+    @contextlib.asynccontextmanager
+    async def _pass(self):
+        """Run a pass of any model with the server's sampler asleep: its in-flight samples
+        finish first, and no sample wakes it until every running pass has returned. The
+        models share the GPUs, and an awake sampler holds the memory a pass needs."""
+        self._passes_running += 1
+        self._no_pass_running.clear()
+        try:
+            async with self._sampler_gate:
+                owner = self._sampler_owner
+                if owner is not None:
+                    await self._quiesce_samplers(owner)
+                    try:
+                        await asyncio.to_thread(self._ensure_training_ready, owner)
+                    except Exception as e:
+                        raise BackendError(str(e), backend="verl", operation="sleep_sampler", original_error=e) from e
+            yield
+        finally:
+            self._passes_running -= 1
+            if self._passes_running == 0:
+                self._no_pass_running.set()
+
+    @contextlib.asynccontextmanager
+    async def _awake_sampler(self, h: VerlHandle):
+        """Wake `h`'s sampler at its current weights, once no pass of any model runs. Inside
+        the block the sampler is awake and no pass can start: a sample counts itself in
+        flight there. Call with h._lock HELD.
 
         Raises:
             SampleRequestError: another model holds the server's one sampler
                 (it does until it is deleted); nothing is built for `h`.
         """
         # no await between the check and the claim
-        if self._sampler_model_id not in (None, h.model_id):
+        if self._sampler_owner is not None and self._sampler_owner is not h:
             raise SampleRequestError(
-                f"the verl backend serves one sampling model per server and {self._sampler_model_id} holds "
+                f"the verl backend serves one sampling model per server and {self._sampler_owner.model_id} holds "
                 f"the sampler; {h.model_id} serves forward and training only", backend="verl")
-        self._sampler_model_id = h.model_id
-        build = asyncio.ensure_future(asyncio.to_thread(self._ensure_rollout_ready, h))
+        self._sampler_owner = h
         try:
-            await asyncio.shield(build)
-        except BaseException:   # a cancelled sample too: re-raised below
-            # cancellation does not stop the build thread: judge the sampler after it returns
-            await asyncio.wait([build])
+            while True:
+                await self._no_pass_running.wait()
+                await self._sampler_gate.acquire()
+                if not self._passes_running:
+                    break
+                self._sampler_gate.release()   # a pass started while this waited for the gate
+        except BaseException:   # cancelled while it waited: a claim with no sampler behind it goes
             if h.llm_manager is None:
-                # a failed build can leave server actors behind (verl names them, then launches);
-                # the claim goes only after they do
-                await asyncio.to_thread(_kill_named_actors, VLLM_SERVER_NAME_PREFIX)
-                self._sampler_model_id = None
+                self._sampler_owner = None
             raise
+        try:
+            build = asyncio.ensure_future(asyncio.to_thread(self._ensure_rollout_ready, h))
+            try:
+                await asyncio.shield(build)
+            except BaseException:   # a cancelled sample too: re-raised below
+                # cancellation does not stop the build thread: judge the sampler after it returns
+                await asyncio.wait([build])
+                if h.llm_manager is None:
+                    # a failed build can leave server actors behind (verl names them, then launches);
+                    # the claim goes only after they do
+                    await asyncio.to_thread(_kill_named_actors, VLLM_SERVER_NAME_PREFIX)
+                    self._sampler_owner = None
+                raise
+            yield
+        finally:
+            self._sampler_gate.release()
 
     @staticmethod
     def _ensure_training_ready(h: VerlHandle) -> None:
-        """Hybrid timeshare: sleep vLLM replicas before training ops."""
+        """Hybrid timeshare: sleep `h`'s vLLM replicas before a pass of any model."""
         if h.rollout_awake:
             h.ckpt_manager.sleep_replicas()
             h.rollout_awake = False
@@ -612,7 +653,8 @@ class VerlBackend(TrainingBackend[VerlHandle]):
             from verl.workers.rollout.llm_server import LLMServerManager
 
             full = h.trainer_config
-            llm_manager = LLMServerManager.create(config=full, worker_group=h.worker_group)
+            with _root_logging_kept():
+                llm_manager = LLMServerManager.create(config=full, worker_group=h.worker_group)
             ckpt_manager = CheckpointEngineManager(
                 config=omega_conf_to_dataclass(full.actor_rollout_ref.rollout.checkpoint_engine),
                 actor_wg=h.worker_group,
@@ -684,6 +726,21 @@ def _loss_dispatch(config=None, model_output=None, data=None, dp_group=None, stu
     if student_logits is not None:
         return losses.target_logprob_columns(student_logits, data)
     return losses.get_loss_fn(loss_name)(config, model_output, data, dp_group)
+
+
+@contextlib.contextmanager
+def _root_logging_kept():
+    """Keep the root logger's level and its handlers' levels across the block. Building the sampler
+    imports vLLM's server, and a module it imports (model_hosting_container_standards/logging_config.py)
+    sets both to ERROR: the server then logs no INFO line for the rest of its life."""
+    root = logging.getLogger()
+    level, handler_levels = root.level, [(handler, handler.level) for handler in root.handlers]
+    try:
+        yield
+    finally:
+        root.setLevel(level)
+        for handler, handler_level in handler_levels:
+            handler.setLevel(handler_level)
 
 
 def _wg_call(method, td):
@@ -872,7 +929,7 @@ def _compose_actor_rollout_config(cfg: Dict[str, Any]):
         return compose(config_name="ppo_trainer", overrides=actor_rollout_overrides(cfg))
 
 
-# verl names its vLLM server actors `vllm_server_<replica>_<node>`; one model owns them all (VerlBackend._sampler_model_id)
+# verl names its vLLM server actors `vllm_server_<replica>_<node>`; one model owns them all (VerlBackend._sampler_owner)
 VLLM_SERVER_NAME_PREFIX = "vllm_server_"
 WORKER_NAME_PREFIX = "verl_"
 SHARED_POOL_NAME_PREFIX = "verl_shared_"   # the placement group every model's workers sit in

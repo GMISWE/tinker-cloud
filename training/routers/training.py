@@ -20,6 +20,7 @@ from ..models.requests import ForwardRequest, ForwardBackwardRequest, OptimStepR
 from ..models.responses import AsyncOperationResponse
 from ..services.training_service import TrainingService
 from ..core.task_manager import TaskManager
+from ..core.request_log import RequestSize
 from ..core.dependencies import verify_api_key_dep, get_training_clients, get_futures_storage, get_training_service
 from ..core import loss_registry
 from ..proto import PROTO_CONTENT_TYPE
@@ -53,7 +54,7 @@ def _validate_loss(loss_fn: str, loss_fn_config) -> None:
 
 
 def _submit_pass(
-    *, forward_only: bool, model_id: str, seq_id, batch, payload: Dict,
+    *, forward_only: bool, model_id: str, seq_id, batch, payload: Dict, body_bytes: int,
     service: TrainingService, task_manager: TaskManager, training_clients: Dict,
 ) -> AsyncOperationResponse:
     """Queue a forward or forward_backward pass over `batch` (a ForwardInput /
@@ -85,12 +86,13 @@ def _submit_pass(
         payload=payload,
         seq_id=seq_id,
         task_func=execute,
+        size=RequestSize(datums=len(batch.data), body_bytes=body_bytes),
     )
     return AsyncOperationResponse(request_id=request_id, model_id=model_id)
 
 
-async def _read_forward_backward_request(http_request: Request) -> Tuple[ForwardBackwardRequest, bool]:
-    """The forward_backward body in either wire format -> (request, forward_only).
+async def _read_forward_backward_request(http_request: Request) -> Tuple[ForwardBackwardRequest, bool, int]:
+    """The forward_backward body in either wire format -> (request, forward_only, body bytes as they arrived).
 
     SDK >= 0.25 sends protobuf (`Content-Type: application/x-protobuf`,
     possibly `Content-Encoding: zstd`) and routes forward-only passes here via
@@ -99,13 +101,14 @@ async def _read_forward_backward_request(http_request: Request) -> Tuple[Forward
     422 in FastAPI's own shape, like a body FastAPI parsed itself.
     """
     body = await http_request.body()
+    body_bytes = len(body)
     try:
         if http_request.headers.get("content-encoding", "").strip().lower() == "zstd":
             body = decompress_zstd(body)
         if PROTO_CONTENT_TYPE in http_request.headers.get("content-type", "").lower():
             request_dict, forward_only = parse_forward_backward_request(body)
-            return ForwardBackwardRequest.model_validate(request_dict), forward_only
-        return ForwardBackwardRequest.model_validate_json(body), False
+            return ForwardBackwardRequest.model_validate(request_dict), forward_only, body_bytes
+        return ForwardBackwardRequest.model_validate_json(body), False, body_bytes
     except WireError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
     except ValidationError as e:
@@ -115,6 +118,7 @@ async def _read_forward_backward_request(http_request: Request) -> Tuple[Forward
 @router.post("/api/v1/forward", response_model=AsyncOperationResponse)
 async def forward(
     request: ForwardRequest,
+    http_request: Request,
     _: None = Depends(verify_api_key_dep),
     service: TrainingService = Depends(get_training_service),
     task_manager: TaskManager = Depends(get_task_manager),
@@ -124,7 +128,7 @@ async def forward(
     this: it sends forward-only passes to /api/v1/forward_backward as proto."""
     return _submit_pass(
         forward_only=True, model_id=request.model_id, seq_id=request.seq_id,
-        batch=request.forward_input, payload=request.dict(),
+        batch=request.forward_input, payload=request.dict(), body_bytes=len(await http_request.body()),
         service=service, task_manager=task_manager, training_clients=training_clients,
     )
 
@@ -139,10 +143,10 @@ async def forward_backward(
 ) -> AsyncOperationResponse:
     """Forward-backward pass (accumulate gradients, no optimizer step), or a
     forward-only pass when the proto body asks for it. Proto or JSON body."""
-    request, forward_only = await _read_forward_backward_request(http_request)
+    request, forward_only, body_bytes = await _read_forward_backward_request(http_request)
     return _submit_pass(
         forward_only=forward_only, model_id=request.model_id, seq_id=request.seq_id,
-        batch=request.forward_backward_input, payload=request.dict(),
+        batch=request.forward_backward_input, payload=request.dict(), body_bytes=body_bytes,
         service=service, task_manager=task_manager, training_clients=training_clients,
     )
 
@@ -150,8 +154,8 @@ async def forward_backward(
 @router.post("/api/v1/optim_step", response_model=AsyncOperationResponse)
 async def optim_step(
     request: OptimStepRequest,
+    http_request: Request,
     _: None = Depends(verify_api_key_dep),
-    http_request: Request = None,
     service: TrainingService = Depends(get_training_service),
     task_manager: TaskManager = Depends(get_task_manager),
     training_clients: Dict = Depends(get_training_clients)
@@ -195,7 +199,8 @@ async def optim_step(
         model_id=request.model_id,
         payload=request.dict(),
         seq_id=request.seq_id,
-        task_func=execute_optim_step
+        task_func=execute_optim_step,
+        size=RequestSize(datums=None, body_bytes=len(await http_request.body())),
     )
 
     return AsyncOperationResponse(

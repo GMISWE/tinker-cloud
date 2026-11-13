@@ -14,8 +14,10 @@ This manager encapsulates that pattern (DRY principle).
 """
 import asyncio
 import logging
+import time
 from typing import Callable, Dict, Any, Optional, Awaitable
 from ..storage import FuturesStorage
+from .request_log import RequestLine, RequestSize
 from ..services import ordering
 from ..models.responses import validate_result
 from ..proto.response_conv import (
@@ -70,6 +72,7 @@ class TaskManager:
         payload: Dict[str, Any],
         task_func: Callable[[], Awaitable[Dict[str, Any]]],
         seq_id: Optional[int] = None,
+        size: Optional[RequestSize] = None,
     ) -> str:
         """
         Create and track a background async task with automatic error handling.
@@ -87,6 +90,8 @@ class TaskManager:
             payload: The request; a resend under the same seq_id is compared by its digest
             task_func: Async function that performs the actual work.
                       Must return Dict[str, Any] on success.
+            size: What a pass request carried. With it the finished request gets its
+                  log line (core/request_log.py); None for an operation that gets none.
 
         Example:
             async def do_training():
@@ -102,6 +107,7 @@ class TaskManager:
             )
         """
         # Save future with pending status; a retried seq_id returns the earlier request
+        submitted = time.monotonic()
         owner = self.futures_storage.save_future(
             request_id=request_id,
             operation=operation,
@@ -112,6 +118,26 @@ class TaskManager:
         if owner != request_id:
             return owner
         kind = ordering.KINDS.get(operation)
+        stored = time.monotonic()
+        # monotonic readings of the request's work: when it left the queue, when it returned
+        work: Dict[str, float] = {}
+
+        async def timed_task():
+            work["started"] = time.monotonic()
+            try:
+                return await task_func()
+            finally:
+                work["ended"] = time.monotonic()
+
+        def log_request(outcome: str) -> None:
+            if size is None:
+                return
+            now = time.monotonic()
+            started, ended = work["started"], work["ended"]
+            logger.info(RequestLine(
+                request_id=request_id, operation=operation, model_id=model_id, outcome=outcome, size=size,
+                queued_s=started - stored, backend_s=ended - started, store_s=(stored - submitted) + (now - ended),
+            ).format())
 
         async def wrapped_task():
             """Wrapper that handles success/failure and storage updates"""
@@ -120,9 +146,9 @@ class TaskManager:
 
                 # Execute the actual business logic, in the model's program order
                 if kind is not None:
-                    result = await ordering.queues.run(model_id, kind, task_func)
+                    result = await ordering.queues.run(model_id, kind, timed_task)
                 else:
-                    result = await task_func()
+                    result = await timed_task()
 
                 # A result that the operation's response model rejects fails
                 # the future here, with the offending field named, instead of
@@ -152,6 +178,7 @@ class TaskManager:
                 )
 
                 logger.info(f"[{request_id}] {operation} completed successfully")
+                log_request("completed")
 
             except Exception as e:
                 # Log full traceback for debugging
@@ -165,6 +192,7 @@ class TaskManager:
                     status="failed",
                     result={"error": str(e)}
                 )
+                log_request("failed")
 
             finally:
                 # Cleanup task reference
