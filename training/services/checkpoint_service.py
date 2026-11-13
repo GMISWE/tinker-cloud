@@ -15,7 +15,7 @@ from typing import Dict, Any, List, Optional, Tuple
 
 from ..backends.base import TrainingBackend
 from ..checkpoints import CheckpointKind, CheckpointRef, CheckpointSaveOptions, CheckpointStatus, CheckpointStore, is_expired
-from ..models.requests import OptimizerConfig, SaveWeightsForSamplerRequest
+from ..models.requests import OptimizerConfig
 from ..models.responses import Checkpoint, CheckpointType
 from ..storage import MetadataStorage
 
@@ -189,39 +189,47 @@ class CheckpointService:
             latest[field] = self._checkpoint(rec)
         return latest
 
-    async def save_weights_for_sampler(
+    async def save_ephemeral_sampler(
         self,
-        request: SaveWeightsForSamplerRequest,
+        model_id: str,
         request_id: str,
+        sampling_session_seq_id: int,
         options: CheckpointSaveOptions,
         training_clients: Dict[str, Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """Save sampler weights. For an ephemeral save the weights already reached
-        the inference engine, so the backend writes nothing and the record only
-        names the sampler; the client gets path=None and a sampling_session_id,
-        as the SDK expects."""
-        model_id = request.model_id
+        """Record a sampler that names no checkpoint. Its weights already reached the
+        inference engine, so the backend writes nothing and the record only names the
+        sampler; the client gets path=None and a sampling_session_id, the two fields of the SDK's
+        `SaveWeightsForSamplerResponseInternal` (`types/save_weights_for_sampler_response.py`)."""
         client_info = self._client(training_clients, model_id)
         handle = client_info["backend_handle"]
-        weight_version = handle.weight_version
-
-        if request.ephemeral:
-            name = f"{model_id}_{request.sampling_session_seq_id}_{uuid.uuid4().hex[:8]}"
-            ticket = self.store.begin_save(
-                model_id, CheckpointKind.SAMPLER_WEIGHTS, name, persist=False, weight_version=weight_version,
-                options=options,
-                optimizer_config=client_info["optimizer_config"],
-            )
-            logger.info("[%s] Ephemeral sampler save for %s: %s", request_id, model_id, ticket.ref.uri)
-            await self._save(handle, ticket)
-            return {
-                "path": None, "sampling_session_id": name, "uri": ticket.ref.uri,
-                "type": "save_weights_for_sampler",
-            }
-
-        name = request.path or request.name or _server_chosen_name("sampler")
+        name = f"{model_id}_{sampling_session_seq_id}_{uuid.uuid4().hex[:8]}"
         ticket = self.store.begin_save(
-            model_id, CheckpointKind.SAMPLER_WEIGHTS, name, weight_version=weight_version,
+            model_id, CheckpointKind.SAMPLER_WEIGHTS, name, persist=False, weight_version=handle.weight_version,
+            options=options,
+            optimizer_config=client_info["optimizer_config"],
+        )
+        logger.info("[%s] Ephemeral sampler save for %s: %s", request_id, model_id, ticket.ref.uri)
+        await self._save(handle, ticket)
+        return {
+            "path": None, "sampling_session_id": name, "uri": ticket.ref.uri,
+            "type": "save_weights_for_sampler",
+        }
+
+    async def save_weights_for_sampler(
+        self,
+        model_id: str,
+        request_id: str,
+        name: Optional[str],
+        options: CheckpointSaveOptions,
+        training_clients: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Save sampler weights as a checkpoint, under `name` or a name the server chooses."""
+        client_info = self._client(training_clients, model_id)
+        handle = client_info["backend_handle"]
+        name = name or _server_chosen_name("sampler")
+        ticket = self.store.begin_save(
+            model_id, CheckpointKind.SAMPLER_WEIGHTS, name, weight_version=handle.weight_version,
             options=options,
             optimizer_config=client_info["optimizer_config"],
         )
