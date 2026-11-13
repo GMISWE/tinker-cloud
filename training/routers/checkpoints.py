@@ -167,8 +167,16 @@ async def save_weights_for_sampler(
     )
 
     async def execute():
-        result = await service.save_weights_for_sampler(
-            request, request_id=request_id, options=options, training_clients=training_clients)
+        if request.ephemeral:
+            assert request.sampling_session_seq_id is not None  # ephemeral is True only with it set
+            result = await service.save_ephemeral_sampler(
+                model_id=request.model_id, request_id=request_id,
+                sampling_session_seq_id=request.sampling_session_seq_id,
+                options=options, training_clients=training_clients)
+        else:
+            result = await service.save_weights_for_sampler(
+                model_id=request.model_id, request_id=request_id, name=request.path or request.name,
+                options=options, training_clients=training_clients)
 
         # An ephemeral sampler is the gateway's to route: it learns of it before the SDK does.
         # A snapshot's weight version is pinned at save time so pinned logprob reads are not
