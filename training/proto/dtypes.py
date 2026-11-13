@@ -1,7 +1,7 @@
 """The tensor dtypes the proto schema carries, in the three spellings the conversions need."""
 import numpy as np
 
-from ..models.tensor_values import PROTO_TENSOR_DTYPES
+from ..core.tensor_values import PROTO_TENSOR_DTYPES
 from . import tinker_public_pb2 as pb
 
 DTYPE_TO_PROTO = {"float32": pb.DTYPE_FLOAT32, "int64": pb.DTYPE_INT64}
