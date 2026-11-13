@@ -18,7 +18,8 @@ Set FAKE_BACKEND_TRACE=<path> to append one JSON line per backend call
 ({"op", "model_id", ...args}) — tests read this instead of poking internals.
 Set FAKE_BACKEND_GATE=<dir> to hold a model's create while <dir>/<model_id>.hold
 exists, fail it when <dir>/<model_id>.fail exists, fail a checkpoint load into it
-when <dir>/<model_id>.load.fail exists, and hold its delete while
+when <dir>/<model_id>.load.fail exists, fail a forward of it when
+<dir>/<model_id>.forward.fail exists, and hold its delete while
 <dir>/<model_id>.delete.hold exists.
 """
 import asyncio
@@ -171,6 +172,8 @@ class FakeBackend(TrainingBackend[FakeHandle]):
     async def forward(self, handle: FakeHandle, data: List[Datum], loss_fn: str,
                       loss_fn_config: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
         h = self._handle(handle, "forward")
+        if self._gate and (Path(self._gate) / f"{h.model_id}.forward.fail").exists():
+            raise BackendError(f"forward of {h.model_id} failed by {self._gate}", backend="fake", operation="forward")
         outputs, _ = self._outputs(data)
         self._trace("forward", h.model_id, n=len(data), loss_fn=loss_fn, loss_fn_config=loss_fn_config)
         return {"type": "forward", "loss_fn_output_type": loss_fn, "loss_fn_outputs": outputs, "metrics": {}}

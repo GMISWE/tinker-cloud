@@ -76,6 +76,31 @@ def hf_log_softmax(model_name: str, tokens: list, dtype=torch.float32, device="c
     return torch.log_softmax(logits.float().cpu(), dim=-1)
 
 
+def recorded_update(path: str, shards: int, shard_rows: int, update_rows: int, update: int):
+    """Update number `update` of a recorded batch (the file `test_verl_fit.py` describes: `shards`
+    ranks of `shard_rows` rows, `update_rows` of each rank to an update) as SDK datums with
+    `[N, 16]` targets: (datums, the first row's prompt tokens, each row's prompt length)."""
+    from tinker import types
+
+    rows = [shard_rows * shard + update_rows * update + i for shard in range(shards) for i in range(update_rows)]
+
+    recorded = torch.load(path, weights_only=True)["tensors"]
+    width = recorded["prompts"].shape[1]
+    attention = recorded["attention_mask"].bool()
+    data, prompt_lens = [], []
+    for row in rows:
+        tokens = recorded["input_ids"][row][attention[row]]
+        prompt_len = int(attention[row, :width].sum())
+        targets = torch.zeros(len(tokens) - 1, K, dtype=torch.long)
+        targets[prompt_len - 1:] = recorded["student_top_k_ids"][row, :len(tokens) - prompt_len]
+        data.append(types.Datum(model_input=types.ModelInput.from_ints(tokens[:-1].tolist()),
+                                loss_fn_inputs={"target_tokens": types.TensorData.from_torch(targets)}))
+        prompt_lens.append(prompt_len)
+    first = rows[0]
+    prompt = recorded["input_ids"][first][attention[first]][:prompt_lens[0]].tolist()
+    return data, prompt, prompt_lens
+
+
 def gpu_mib() -> list:
     out = subprocess.run(["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
                          capture_output=True, text=True, check=True).stdout
