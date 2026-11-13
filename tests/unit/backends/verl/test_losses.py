@@ -8,8 +8,8 @@ import torch.nn.functional as F
 
 pytest.importorskip("verl", reason="the loss reads verl's padding helpers")
 
-from tinkercloud.training.backends.verl.backend import VerlBackend, VerlHandle, _loss_dispatch  # noqa: E402
-from .datums import nk_datum, wire_values  # noqa: E402
+from tinkercloud.training.backends.verl.backend import VerlBackend, VerlHandle, _loss_dispatch
+from .datums import nk_datum, wire_values
 
 VOCAB = 50
 ENGINE = {"micro_batch_size_per_gpu": 1, "infer_micro_batch_size_per_gpu": 1, "ulysses_sequence_parallel_size": 1}

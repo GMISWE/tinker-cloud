@@ -7,15 +7,15 @@ import os
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
-import pytest  # noqa: E402
+import pytest
 
 pytest.importorskip("nemo_rl", reason="needs the NeMo RL image")
-import torch  # noqa: E402
+import torch
 
 if torch.cuda.device_count() < 2:
     pytest.skip("needs >= 2 GPUs", allow_module_level=True)
 
-from tests.gpu.nemo_rl_order import check_step_logprobs_follow_the_datums  # noqa: E402
+from tests.gpu.nemo_rl_order import check_step_logprobs_follow_the_datums
 
 
 def test_step_logprobs_follow_the_datums(tmp_path):

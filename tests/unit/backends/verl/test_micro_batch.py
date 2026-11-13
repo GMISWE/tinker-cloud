@@ -3,15 +3,15 @@ set by the backend, and the padding of a request that follows from it."""
 import pytest
 
 pytest.importorskip("verl", reason="composes verl's packaged config")
-from omegaconf import OmegaConf  # noqa: E402
+from omegaconf import OmegaConf
 
-from tinkercloud.training.backends.verl import builder  # noqa: E402
-from tinkercloud.training.backends.verl.backend import (  # noqa: E402
+from tinkercloud.training.backends.verl import builder
+from tinkercloud.training.backends.verl.backend import (
     VerlBackend, VerlHandle, _compose_actor_rollout_config, actor_rollout_overrides,
 )
-from tinkercloud.training.backends.verl.builder import VerlArgumentBuilder  # noqa: E402
+from tinkercloud.training.backends.verl.builder import VerlArgumentBuilder
 
-from .datums import nk_datum  # noqa: E402
+from .datums import nk_datum
 
 # constant of the backend -> the verl key it sets
 KEYS = {

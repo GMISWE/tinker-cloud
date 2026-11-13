@@ -15,20 +15,20 @@ import os
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
-import threading  # noqa: E402
-import time  # noqa: E402
+import threading
+import time
 
-import pytest  # noqa: E402
+import pytest
 
 pytest.importorskip("verl", reason="needs the verl training env")
-import torch  # noqa: E402
+import torch
 
 if torch.cuda.device_count() < 4:
     pytest.skip("needs 4 GPUs", allow_module_level=True)
 
-from tinkercloud.training.backends.verl.backend import VerlBackend  # noqa: E402
+from tinkercloud.training.backends.verl.backend import VerlBackend
 
-from .verl_smollm3 import K, STUDENT, TEACHERS, adam, create_full_weights, datum, gpu_mib, verl_actors  # noqa: E402
+from .verl_smollm3 import K, STUDENT, TEACHERS, adam, create_full_weights, datum, gpu_mib, verl_actors
 
 RECORDED_BATCH = "/data/runs/mopd/ref/step1.pt"
 MODEL_ROOT = "/data/runs/mopd/model_root_theta2e6"

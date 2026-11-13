@@ -11,9 +11,9 @@ import pytest
 
 pytest.importorskip("verl", reason="the backend module imports verl's types")
 
-from tinkercloud.training.backends.verl import backend as verl_backend  # noqa: E402
-from tinkercloud.training.backends.verl.backend import VerlBackend, VerlHandle  # noqa: E402
-from tinkercloud.training.models.requests import AdamParams  # noqa: E402
+from tinkercloud.training.backends.verl import backend as verl_backend
+from tinkercloud.training.backends.verl.backend import VerlBackend, VerlHandle
+from tinkercloud.training.models.requests import AdamParams
 
 ADAM = AdamParams(learning_rate=1e-5, beta1=0.9, beta2=0.95, eps=1e-8, weight_decay=0.0, grad_clip_norm=0.0)
 PASSES = ("forward", "forward_backward", "optim_step")

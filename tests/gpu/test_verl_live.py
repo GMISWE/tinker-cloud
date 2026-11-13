@@ -10,15 +10,15 @@ import os
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
-import pytest  # noqa: E402
+import pytest
 
 pytest.importorskip("verl", reason="needs the verl training env")
-import torch  # noqa: E402
+import torch
 
 if torch.cuda.device_count() < 4:
     pytest.skip("needs 4 GPUs", allow_module_level=True)
 
-from .verl_smollm3 import K, NUM_GPUS, STUDENT, candidate_ids, text_tokens  # noqa: E402
+from .verl_smollm3 import K, NUM_GPUS, STUDENT, candidate_ids, text_tokens
 
 POSITIONS, PROMPT = 160, 120
 

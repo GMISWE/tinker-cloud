@@ -12,21 +12,21 @@ import os
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
-import itertools  # noqa: E402
+import itertools
 
-import pytest  # noqa: E402
+import pytest
 
 pytest.importorskip("verl", reason="needs the verl training env")
-import ray  # noqa: E402
-import torch  # noqa: E402
+import ray
+import torch
 
 if torch.cuda.device_count() < 4:
     pytest.skip("needs 4 GPUs", allow_module_level=True)
 
-from tinkercloud.training.backends.base import SampleRequestError  # noqa: E402
-from tinkercloud.training.backends.verl.backend import VerlBackend  # noqa: E402
+from tinkercloud.training.backends.base import SampleRequestError
+from tinkercloud.training.backends.verl.backend import VerlBackend
 
-from .verl_smollm3 import (  # noqa: E402
+from .verl_smollm3 import (
     K, STUDENT, TEACHERS, adam, candidate_ids, create_full_weights, datum, gpu_mib, live_placement_groups, logprobs_of,
     text_tokens, verl_actors, vllm_actors,
 )

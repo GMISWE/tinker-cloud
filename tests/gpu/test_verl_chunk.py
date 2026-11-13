@@ -15,16 +15,16 @@ import time
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
-import pytest  # noqa: E402
+import pytest
 
 pytest.importorskip("verl", reason="needs the verl training env")
-import torch  # noqa: E402
+import torch
 
 if torch.cuda.device_count() < 4:
     pytest.skip("needs 4 GPUs", allow_module_level=True)
 
-from .test_verl_fit import MAX_SEQ_LEN, MODEL_ROOT, RECORDED_BATCH, SHARD_ROWS, SHARDS, UPDATE_ROWS  # noqa: E402
-from .verl_smollm3 import K, NUM_GPUS, STUDENT  # noqa: E402
+from .test_verl_fit import MAX_SEQ_LEN, MODEL_ROOT, RECORDED_BATCH, SHARD_ROWS, SHARDS, UPDATE_ROWS
+from .verl_smollm3 import K, NUM_GPUS, STUDENT
 
 CLIP_LOW, CLIP_HIGH, CLIP_C = 0.2, 0.28, 3.0
 # The second update's gradient norm before the clip, after the first update's step. Read 2026-11-12

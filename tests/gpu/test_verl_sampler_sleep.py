@@ -16,18 +16,18 @@ import time
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
-import pytest  # noqa: E402
+import pytest
 
 pytest.importorskip("verl", reason="needs the verl training env")
-import torch  # noqa: E402
+import torch
 
 if torch.cuda.device_count() < 4:
     pytest.skip("needs 4 GPUs", allow_module_level=True)
 
-from tinkercloud.training.core.request_log import RequestLine  # noqa: E402
+from tinkercloud.training.core.request_log import RequestLine
 
-from .test_verl_fit import MAX_SEQ_LEN, MODEL_ROOT, RECORDED_BATCH, SHARD_ROWS, SHARDS, UPDATE, UPDATE_ROWS  # noqa: E402
-from .verl_smollm3 import K, NUM_GPUS, STUDENT, TEACHERS, gpu_mib, recorded_update  # noqa: E402
+from .test_verl_fit import MAX_SEQ_LEN, MODEL_ROOT, RECORDED_BATCH, SHARD_ROWS, SHARDS, UPDATE, UPDATE_ROWS
+from .verl_smollm3 import K, NUM_GPUS, STUDENT, TEACHERS, gpu_mib, recorded_update
 
 SAMPLE_TOKENS = 88
 
