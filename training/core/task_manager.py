@@ -119,24 +119,26 @@ class TaskManager:
             return owner
         kind = ordering.KINDS.get(operation)
         stored = time.monotonic()
-        # monotonic readings of the request's work: when it left the queue, when it returned
-        work: Dict[str, float] = {}
+        left_queue_at: Optional[float] = None    # monotonic; set when task_func starts
+        returned_at: Optional[float] = None      # monotonic; set when task_func returns or raises
 
         async def timed_task():
-            work["started"] = time.monotonic()
+            nonlocal left_queue_at, returned_at
+            left_queue_at = time.monotonic()
             try:
                 return await task_func()
             finally:
-                work["ended"] = time.monotonic()
+                returned_at = time.monotonic()
 
         def log_request(outcome: str) -> None:
             if size is None:
                 return
             now = time.monotonic()
-            started, ended = work["started"], work["ended"]
+            assert left_queue_at is not None and returned_at is not None   # the request ran: a cancelled one gets no line
             logger.info(RequestLine(
                 request_id=request_id, operation=operation, model_id=model_id, outcome=outcome, size=size,
-                queued_s=started - stored, backend_s=ended - started, store_s=(stored - submitted) + (now - ended),
+                queued_s=left_queue_at - stored, backend_s=returned_at - left_queue_at,
+                store_s=(stored - submitted) + (now - returned_at),
             ).format())
 
         async def wrapped_task():
