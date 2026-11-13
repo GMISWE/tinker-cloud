@@ -3,7 +3,7 @@ from ..proto.request_conv import MAX_DECOMPRESSED_BODY_BYTES, WireError
 
 try:
     import zstandard
-except ImportError:  # optional: the server then advertises proto_compress_fwdbwd=False
+except ImportError:  # optional: the server then advertises proto_compress_fwdbwd=False  # noqa: TREE002  (#192)
     zstandard = None
 
 # The body is read in pieces, so the bound reserves nothing; it only stops a body that keeps growing.

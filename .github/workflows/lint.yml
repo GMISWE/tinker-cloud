@@ -24,6 +24,8 @@ jobs:
       - run: pyright
       # tree rules ruff cannot see: doc paths exist, test dirs are packages, no sibling-test imports
       - run: scripts/check_tree.sh
+      # that script's own cases, on seeded trees; they read the output of the ruff pinned above
+      - run: scripts/check_tree_test.sh
       # the runner ships shellcheck; `source=` directives resolve from the repo root
       - run: shellcheck -S warning $(git ls-files '*.sh')
 

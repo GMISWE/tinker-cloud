@@ -4,13 +4,13 @@
 training/backends/automodel	2	191
 training/backends/miles	10	189
 training/backends/nemo_rl	4	190
-training/checkpoints	1	192
+training/checkpoints	2	192
 training/core	3	192
 training/gateway	1	192
-training/routers	2	192
+training/routers	3	192
 training/storage	2	192
 tests/conformance	4	193
-tests/unit/backends	3	193
+tests/unit/backends	4	193
 tests/unit/core	3	193
 tests/unit/gateway	4	193
-tests/unit/services	1	193
+tests/unit/services	2	193
