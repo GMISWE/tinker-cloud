@@ -129,6 +129,7 @@ def test_a_pass_of_any_model_puts_the_awake_sampler_to_sleep_first(backend, even
 @pytest.mark.parametrize("operation", PASSES)
 @pytest.mark.parametrize("sampler", ["asleep", "none built"])
 def test_a_pass_makes_no_sleep_call_without_an_awake_sampler(backend, events, operation, sampler):
+    """The branch that must not fire: a sleep call on a sampler that is asleep, or on none."""
     async def scenario():
         a, b = _model("a", events), _model("b", events)
         if sampler == "asleep":
@@ -181,6 +182,7 @@ def test_a_sample_during_another_models_pass_wakes_the_sampler_after_the_pass(ba
 
 
 def test_a_sample_under_two_passes_wakes_the_sampler_after_the_last(backend, events):
+    """The first pass to return must not wake the sampler under the second: the passes are counted."""
     async def scenario():
         a, b, c = _model("a", events), _model("b", events), _model("c", events)
         _with_sampler(backend, a, events, awake=True)
