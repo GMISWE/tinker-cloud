@@ -13,21 +13,21 @@ import os
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
-import asyncio  # noqa: E402
-import math  # noqa: E402
-import time  # noqa: E402
+import asyncio
+import math
+import time
 
-import pytest  # noqa: E402
+import pytest
 
 pytest.importorskip("nemo_automodel", reason="needs the Automodel training env")
-import ray  # noqa: E402
-import torch  # noqa: E402
+import ray
+import torch
 
 if torch.cuda.device_count() < 3:
     pytest.skip("needs >= 3 GPUs", allow_module_level=True)
 
-from tinkercloud.training.backends.automodel.backend import AutomodelBackend  # noqa: E402
-from tinkercloud.training.core import routing  # noqa: E402
+from tinkercloud.training.backends.automodel.backend import AutomodelBackend
+from tinkercloud.training.core import routing
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 CONFIG = dict(train_gpus=2, max_loras=2, max_lora_rank=8, max_cpu_loras=4, micro_batch_rows=2, activation_checkpointing=False)

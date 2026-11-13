@@ -19,30 +19,30 @@ import os
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
-import asyncio  # noqa: E402
-import logging  # noqa: E402
-import re  # noqa: E402
-import socket  # noqa: E402
-import time  # noqa: E402
+import asyncio
+import logging
+import re
+import socket
+import time
 
-import httpx  # noqa: E402
-import pytest  # noqa: E402
+import httpx
+import pytest
 
 pytest.importorskip("nemo_automodel", reason="needs the Automodel training env")
-import ray  # noqa: E402
-import torch  # noqa: E402
+import ray
+import torch
 
 if torch.cuda.device_count() < 3:
     pytest.skip("needs >= 3 GPUs", allow_module_level=True)
 
-from ray.util.placement_group import placement_group, placement_group_table  # noqa: E402
+from ray.util.placement_group import placement_group, placement_group_table
 
-from tinkercloud.training.backends.automodel.backend import AutomodelBackend  # noqa: E402
-from tinkercloud.training.backends.automodel.group import sweep_leftovers  # noqa: E402
-from tinkercloud.training.backends.base import BackendError  # noqa: E402
-from tinkercloud.training.core import routing  # noqa: E402
-from tinkercloud.training.models.requests import AdamParams, Datum  # noqa: E402
-from tests.datums import random_ce_datum  # noqa: E402
+from tinkercloud.training.backends.automodel.backend import AutomodelBackend
+from tinkercloud.training.backends.automodel.group import sweep_leftovers
+from tinkercloud.training.backends.base import BackendError
+from tinkercloud.training.core import routing
+from tinkercloud.training.models.requests import AdamParams, Datum
+from tests.datums import random_ce_datum
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 # two adapter versions coexist while a sample of the older one is in flight

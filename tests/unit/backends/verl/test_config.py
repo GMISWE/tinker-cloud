@@ -3,12 +3,12 @@ are set by the backend, so a moved upstream default cannot change a run."""
 import pytest
 
 pytest.importorskip("verl", reason="composes verl's packaged config")
-from omegaconf import OmegaConf  # noqa: E402
+from omegaconf import OmegaConf
 
-from tinkercloud.training.backends.verl.backend import (  # noqa: E402
+from tinkercloud.training.backends.verl.backend import (
     PINNED_ACTOR_CONFIG, _compose_actor_rollout_config, actor_rollout_overrides,
 )
-from tinkercloud.training.backends.verl.builder import VerlArgumentBuilder  # noqa: E402
+from tinkercloud.training.backends.verl.builder import VerlArgumentBuilder
 
 
 @pytest.fixture(scope="module")

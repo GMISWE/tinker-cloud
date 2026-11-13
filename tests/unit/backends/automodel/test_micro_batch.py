@@ -6,8 +6,8 @@ import torch
 
 pytest.importorskip("nemo_automodel")
 
-from tinkercloud.training.backends.automodel.converter import Batch, LossFn  # noqa: E402
-from tinkercloud.training.backends.automodel.worker import MIN_MICRO_BATCH_WIDTH, _micro_batch  # noqa: E402
+from tinkercloud.training.backends.automodel.converter import Batch, LossFn
+from tinkercloud.training.backends.automodel.worker import MIN_MICRO_BATCH_WIDTH, _micro_batch
 
 
 def _batch(ids, lengths):

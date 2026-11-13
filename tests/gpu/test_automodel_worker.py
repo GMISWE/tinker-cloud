@@ -15,21 +15,21 @@ FlashAttention takes only fp16/bf16.
 import pytest
 
 pytest.importorskip("nemo_automodel", reason="needs the Automodel training env")
-import ray  # noqa: E402
-import torch  # noqa: E402
+import ray
+import torch
 
 if torch.cuda.device_count() < 4:
     pytest.skip("needs >= 4 GPUs", allow_module_level=True)
 
-from tinkercloud.training.backends.automodel.adapter import OPTIMIZER_DIRNAME, OPTIMIZER_FILES, peft_key  # noqa: E402
-from tinkercloud.training.backends.automodel.config import AutomodelConfig  # noqa: E402
-from tinkercloud.training.backends.automodel.converter import coalesce, convert_request, row_sums, shard  # noqa: E402
-from tinkercloud.training.checkpoints import interchange as ci  # noqa: E402
-from tinkercloud.training.backends.automodel.lora import LoraSpec, lora_spec  # noqa: E402
-from tinkercloud.training.backends.automodel.worker import AutomodelWorker  # noqa: E402
-from tinkercloud.training.backends.automodel.errors import NonFiniteGradNorm  # noqa: E402
-from tinkercloud.training.models.requests import AdamParams, LoraConfig  # noqa: E402
-from tests.datums import random_ce_datum  # noqa: E402
+from tinkercloud.training.backends.automodel.adapter import OPTIMIZER_DIRNAME, OPTIMIZER_FILES, peft_key
+from tinkercloud.training.backends.automodel.config import AutomodelConfig
+from tinkercloud.training.backends.automodel.converter import coalesce, convert_request, row_sums, shard
+from tinkercloud.training.checkpoints import interchange as ci
+from tinkercloud.training.backends.automodel.lora import LoraSpec, lora_spec
+from tinkercloud.training.backends.automodel.worker import AutomodelWorker
+from tinkercloud.training.backends.automodel.errors import NonFiniteGradNorm
+from tinkercloud.training.models.requests import AdamParams, LoraConfig
+from tests.datums import random_ce_datum
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 LORA: LoraSpec = lora_spec(LoraConfig(rank=8, alpha=16), "adamw")

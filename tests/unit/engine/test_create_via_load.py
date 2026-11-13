@@ -68,7 +68,7 @@ class _GatewayHandler(http.server.BaseHTTPRequestHandler):
     def address_string(self) -> str:   # a unix socket has no peer address
         return "engine"
 
-    def log_message(self, format, *args) -> None:   # noqa: A002 (the base class's name)
+    def log_message(self, format, *args) -> None:
         pass
 
 

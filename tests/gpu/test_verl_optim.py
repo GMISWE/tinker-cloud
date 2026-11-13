@@ -20,18 +20,18 @@ import os
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
-import pytest  # noqa: E402
+import pytest
 
 pytest.importorskip("verl", reason="needs the verl training env")
-import torch  # noqa: E402
+import torch
 
 if torch.cuda.device_count() < 4:
     pytest.skip("needs 4 GPUs", allow_module_level=True)
 
-from tinkercloud.training.backends.verl.builder import VerlArgumentBuilder  # noqa: E402
-from tinkercloud.training.models.requests import AdamParams  # noqa: E402
+from tinkercloud.training.backends.verl.builder import VerlArgumentBuilder
+from tinkercloud.training.models.requests import AdamParams
 
-from .verl_smollm3 import STUDENT, datum, logprobs_of, text_tokens  # noqa: E402
+from .verl_smollm3 import STUDENT, datum, logprobs_of, text_tokens
 
 POSITIONS = 40
 LINEAR_EPS = 1e6        # far above any gradient element, so the update is lr / eps times the gradient

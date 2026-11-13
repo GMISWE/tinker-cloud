@@ -12,24 +12,24 @@ import os
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
-import math  # noqa: E402
+import math
 
-import pytest  # noqa: E402
+import pytest
 
 pytest.importorskip("nemo_automodel", reason="needs the Automodel training env")
-import ray  # noqa: E402
-from ray.exceptions import RayTaskError  # noqa: E402
-import torch  # noqa: E402
+import ray
+from ray.exceptions import RayTaskError
+import torch
 
 if torch.cuda.device_count() < 4:
     pytest.skip("needs >= 4 GPUs", allow_module_level=True)
 
-from tinkercloud.training.backends.automodel.config import AutomodelConfig  # noqa: E402
-from tinkercloud.training.backends.automodel.converter import coalesce, convert_request, shard  # noqa: E402
-from tinkercloud.training.backends.automodel.lora import lora_spec  # noqa: E402
-from tinkercloud.training.backends.automodel.worker import AutomodelWorker  # noqa: E402
-from tinkercloud.training.models.requests import AdamParams, LoraConfig  # noqa: E402
-from tests.datums import random_ce_datum  # noqa: E402
+from tinkercloud.training.backends.automodel.config import AutomodelConfig
+from tinkercloud.training.backends.automodel.converter import coalesce, convert_request, shard
+from tinkercloud.training.backends.automodel.lora import lora_spec
+from tinkercloud.training.backends.automodel.worker import AutomodelWorker
+from tinkercloud.training.models.requests import AdamParams, LoraConfig
+from tests.datums import random_ce_datum
 
 MODEL = "Qwen/Qwen3.5-9B-Base"
 RANKS = 4
