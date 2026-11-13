@@ -37,8 +37,14 @@ timeout = 120
 extend-exclude = ["training/proto/tinker_public_pb2.py"]
 
 [tool.ruff.lint]
-# a re-raise inside `except` keeps its cause (CODING_STANDARDS rule 5)
-extend-select = ["B904"]
+# B904: a re-raise inside `except` keeps its cause
+# BLE001, S110: a handler names what it catches and does something with it
+# PT011, PT017: a test names the exception it expects and asserts outside `except`
+# RUF100: a `noqa` that suppresses nothing is an error
+# Code that breaks a rule of this list when it is selected carries `# noqa: <rule>  (#<issue>)`;
+# scripts/suppression_baseline.tsv holds the count per path and scripts/check_tree.sh compares.
+# That script reads this line and refuses any form but one line of full rule codes.
+extend-select = ["B904", "BLE001", "S110", "PT011", "PT017", "RUF100"]
 
 [tool.ruff.lint.per-file-ignores]
 # tests set up fixtures on one line (`a = x; b = y`); the F rules (undefined

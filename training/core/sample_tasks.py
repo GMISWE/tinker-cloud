@@ -27,7 +27,7 @@ def start_sample_task(
         except asyncio.CancelledError:
             store.fail(request_id, "cancelled")   # no-op when cancel() already recorded it
             raise
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  (#192)
             logger.error("[%s] %s failed: %s\n%s", request_id, operation, e, traceback.format_exc())
             store.fail(request_id, str(e))
 

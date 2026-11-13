@@ -42,9 +42,9 @@ def test_endpoint_keeps_every_leader_url_in_order():
 
 
 def test_endpoint_must_be_http_urls_and_non_empty():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError):  # noqa: PT011  (#193)
         InferenceEndpoint(("10.0.0.1:30000",))
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError):  # noqa: PT011  (#193)
         InferenceEndpoint(("http://a:1", "b:2"))
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError):  # noqa: PT011  (#193)
         InferenceEndpoint(())

@@ -78,7 +78,7 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
             )
             if is_vlm:
                 logger.info("VLM detected: %s — enforcing sequence_packing=False, cp_size=1", cfg.__class__.__name__)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  (#190)
             logger.debug("model config read skipped (VLM detection): %s", e)
 
         # specs/021: with colocated=False vLLM owns `inference_gpus` of the

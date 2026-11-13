@@ -116,7 +116,7 @@ def _engine_context_length(hf_path: str) -> Optional[int]:
     try:
         from ...utils.model_config import load_model_config
         return int(load_model_config(hf_path)["max_position_embeddings"])
-    except Exception as e:  # noqa: BLE001 - unknown context disables the check, never blocks boot
+    except Exception as e:  # noqa: BLE001  (#189) - unknown context disables the check, never blocks boot
         logger.warning("context_length unknown for %s: %s", hf_path, e)
         return None
 
@@ -405,7 +405,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
         except Exception as e:
             try:
                 await self._pool_run(pool, _rollback)
-            except Exception:
+            except Exception:  # noqa: BLE001  (#189)
                 logger.warning(
                     "[%s] Pool join rollback failed for adapter %s",
                     request_id, adapter_name, exc_info=True,
@@ -594,7 +594,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
                         router_ip, router_port = (
                             await rollout_manager.get_router_address.remote()
                         )
-                    except Exception:
+                    except Exception:  # noqa: BLE001  (#189)
                         logger.error(
                             "[%s] SGLang router address missing from args",
                             request_id,
@@ -698,14 +698,14 @@ class MilesBackend(TrainingBackend[MilesHandle]):
             for actor in getattr(train_group, "_actor_handles", None) or []:
                 try:
                     ray.kill(actor, no_restart=True)
-                except Exception:
+                except Exception:  # noqa: BLE001  (#189)
                     logger.warning("teardown: train actor %r not killed", actor, exc_info=True)
         for key in ("rollout_manager", "controller"):
             actor = cleanup.get(key)
             if actor is not None:
                 try:
                     ray.kill(actor, no_restart=True)
-                except Exception:
+                except Exception:  # noqa: BLE001  (#189)
                     logger.warning("teardown: %s not killed", key, exc_info=True)
         seen = set()
         for pg_tuple in (cleanup.get("pgs") or {}).values():
@@ -714,7 +714,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
                 seen.add(id(pg_obj))
                 try:
                     ray.util.remove_placement_group(pg_obj)
-                except Exception:
+                except Exception:  # noqa: BLE001  (#189)
                     logger.warning("teardown: placement group %r not removed", pg_obj, exc_info=True)
         if cleanup:
             logger.info("create_model failure teardown: released %s", sorted(cleanup))
@@ -779,7 +779,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
                     result = await op.run()
                     if not op.future.done():
                         op.future.set_result(result)
-                except Exception as e:  # noqa: BLE001 — surfaced via the future
+                except Exception as e:  # noqa: BLE001  (#189) — surfaced via the future
                     if not op.future.done():
                         op.future.set_exception(e)
                 continue
@@ -833,7 +833,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
                 for o, r in zip(batch, per_request):
                     if not o.future.done():
                         o.future.set_result(r)
-            except Exception as e:  # noqa: BLE001 — surfaced via the futures
+            except Exception as e:  # noqa: BLE001  (#189) — surfaced via the futures
                 for o in batch:
                     if not o.future.done():
                         o.future.set_exception(e)
@@ -1311,7 +1311,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
             if handle.controller is not None:
                 try:
                     await handle.controller.stop.remote()
-                except Exception:
+                except Exception:  # noqa: BLE001  (#189)
                     logger.warning("Multi-LoRA controller stop failed; killing", exc_info=True)
                 ray.kill(handle.controller, no_restart=True)
                 resources_freed.append("multi_lora_controller")
@@ -1386,7 +1386,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
                 resources_freed = []
                 try:
                     await pool.controller.stop.remote()
-                except Exception:
+                except Exception:  # noqa: BLE001  (#189)
                     logger.warning("Multi-LoRA controller stop failed; killing", exc_info=True)
                 ray.kill(pool.controller, no_restart=True)
                 resources_freed.append("multi_lora_controller")

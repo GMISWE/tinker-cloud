@@ -234,7 +234,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                     from .image_utils import ImagePreprocessor
                     handle.image_preprocessor = ImagePreprocessor(hf_path)
                     logger.info("[%s] VLM detected: %s", request_id, cfg.__class__.__name__)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001  (#190)
                 logger.debug("[%s] VLM detection skipped: %s", request_id, e)
 
             logger.info("[%s] NeMo RL model %s created successfully", request_id, model_id)
@@ -803,7 +803,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                 try:
                     await asyncio.to_thread(handle.policy_generation.shutdown)
                     logger.info("NeMo RL generation shut down for %s", handle.model_id)
-                except Exception:
+                except Exception:  # noqa: BLE001  (#190)
                     # The generation worker group can share actors with the policy,
                     # which was shut down just above; log rather than hide it.
                     logger.warning("delete_model: generation shutdown failed for %s", handle.model_id, exc_info=True)
@@ -1579,7 +1579,7 @@ class _RefLogprobAccumulator:
                 for (_, fut), lp in zip(pending, results):
                     if not fut.done():
                         fut.set_result(lp)
-            except Exception as e:  # propagate to all waiters
+            except Exception as e:  # propagate to all waiters  # noqa: BLE001  (#190)
                 for _, fut in pending:
                     if not fut.done():
                         fut.set_exception(

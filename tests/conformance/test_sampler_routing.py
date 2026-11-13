@@ -47,7 +47,7 @@ def test_pinned_version_travels_with_the_sampler(service_client, server):
 
 
 def test_base_model_only_is_rejected(service_client, server):
-    with pytest.raises(Exception) as ei:
+    with pytest.raises(Exception) as ei:  # noqa: PT011  (#193)
         service_client.create_sampling_client(base_model="fake/tiny").result()
     assert "base-model sampling is not supported" in str(ei.value)
     r = server.post("/api/v1/asample", {"prompt": {"tokens": [1]}, "num_samples": 1, "base_model": "fake/tiny"})

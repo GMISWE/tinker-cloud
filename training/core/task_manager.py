@@ -170,7 +170,7 @@ class TaskManager:
                 elif operation in PROTO_RESULT_OPERATIONS:
                     try:
                         result_proto = await asyncio.to_thread(serialize_result, operation, result)
-                    except Exception as e:
+                    except Exception as e:  # noqa: BLE001  (#192)
                         logger.error(f"[{request_id}] proto view of {operation} result not built: {e}")
                 self.futures_storage.update_status(
                     request_id=request_id,
@@ -182,7 +182,7 @@ class TaskManager:
                 logger.info(f"[{request_id}] {operation} completed successfully")
                 log_request("completed")
 
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001  (#192)
                 # Log full traceback for debugging
                 import traceback
                 logger.error(f"[{request_id}] {operation} failed: {e}")

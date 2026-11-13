@@ -166,6 +166,6 @@ def read_adapter_config(checkpoint_root: str) -> Optional[dict]:
     try:
         with open(path) as f:
             return json.load(f)
-    except Exception:
+    except Exception:  # noqa: BLE001  (#192)
         logger.warning("Unreadable %s", path, exc_info=True)
         return None

@@ -140,7 +140,7 @@ class GroupScheduler(Generic[P, R]):
             if len(results) != len(run):
                 raise BackendError(f"run_pass returned {len(results)} results for {len(run)} requests",
                                    backend="automodel", operation=run[0].key.kind)
-        except Exception as e:  # one pass, one fault: every request in it fails with the cause
+        except Exception as e:  # one pass, one fault: every request in it fails with the cause  # noqa: BLE001  (#191)
             for op in run:
                 self._fail(op.future, e)
             return
@@ -151,7 +151,7 @@ class GroupScheduler(Generic[P, R]):
     async def _run_barrier(self, op: _Barrier) -> None:
         try:
             result = await op.fn()
-        except Exception as e:  # the barrier's own failure, delivered to its submitter
+        except Exception as e:  # the barrier's own failure, delivered to its submitter  # noqa: BLE001  (#191)
             self._fail(op.future, e)
             return
         if not op.future.done():

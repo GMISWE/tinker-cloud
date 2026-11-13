@@ -98,6 +98,6 @@ def test_unknown_model_and_wrong_kind(service_client, server):
     try:
         rest.get_external_weights_urls(p).result()
     except ValueError as e:
-        assert "external weights" in str(e)   # the SDK refuses a weights path before any request
+        assert "external weights" in str(e)   # the SDK refuses a weights path before any request  # noqa: PT017  (#193)
     else:
         raise AssertionError("SDK accepted a weights path for external_weights_urls")
