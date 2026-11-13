@@ -51,7 +51,7 @@ def test_second_engine_is_refused_and_a_new_pid_replaces_the_old_row():
     try:
         registry.register(**{**ROW, "name": "other"})
     except RegistryConflict as exc:
-        assert "fake" in str(exc)
+        assert "fake" in str(exc)  # noqa: PT017  (#193)
     else:
         raise AssertionError("a second engine registered")
     row = registry.register(**{**ROW, "pid": 8})

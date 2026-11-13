@@ -89,7 +89,7 @@ def test_prompt_plus_max_tokens_over_context_is_400(service_client, tmp_path):
     assert len(ok.sequences[0].tokens) == 24
     # A terminally failed future reaches the SDK as a 400 on retrieve_future
     # (not retried), surfaced as ValueError with the server's message.
-    with pytest.raises(ValueError) as ei:
+    with pytest.raises(ValueError) as ei:  # noqa: PT011  (#193)
         sc.sample(prompt=prompt, num_samples=1,
                   sampling_params=types.SamplingParams(max_tokens=25, seed=1)).result()
     msg = str(ei.value)

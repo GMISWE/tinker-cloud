@@ -86,7 +86,7 @@ def test_a_route_that_is_refused_undoes_everything_the_create_recorded(make_serv
     """InferenceEndpoint raises ValueError for a URL that is not http(s); the route is checked before the record is saved."""
     service, clients, runs = make_service(_backend_serving(["engine:8000"])), {}, {}
     storage = MetadataStorage(tmp_path / "meta")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError):  # noqa: PT011  (#193)
         asyncio.run(_create(service, storage, clients, runs))
     assert service.backend._models == {}
     assert clients == {} and runs == {}

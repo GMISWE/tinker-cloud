@@ -230,7 +230,7 @@ class MetadataStorage:
                     continue
 
                 runs.append(metadata)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001  (#192)
                 logger.error(f"Failed to load {metadata_path}: {e}")
                 continue
 
@@ -332,7 +332,7 @@ class MetadataStorage:
             try:
                 with open(checkpoint_path, "r") as f:
                     checkpoints.append(json.load(f))
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001  (#192)
                 logger.error(f"Failed to load {checkpoint_path}: {e}")
                 continue
 

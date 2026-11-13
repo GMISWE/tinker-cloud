@@ -185,7 +185,7 @@ async def retrieve_future(
             await asyncio.wait_for(asyncio.shield(task), timeout=LONG_POLL_HOLD_S)
         except asyncio.TimeoutError:
             pass
-        except Exception:
+        except Exception:  # noqa: BLE001, S110  (#192)
             pass  # task errors are recorded in storage as status=failed
     refreshed = futures_storage.get_future(request_id)
     if refreshed and refreshed["status"] != "pending":

@@ -9,7 +9,7 @@ from tinkercloud.training.models.requests import Datum
 
 def _refusal(labels) -> str:
     datum = Datum.model_validate({"model_input": {"tokens": [5, 6, 7]}, "loss_fn_inputs": {"labels": {"data": labels}}})
-    with pytest.raises(ValueError) as caught:
+    with pytest.raises(ValueError) as caught:  # noqa: PT011  (#193)
         NeMo2ClassificationDataConverter().forward_backward_to_backend([datum], CLASSIFICATION_CE, {"num_labels": 2})
     return str(caught.value)
 

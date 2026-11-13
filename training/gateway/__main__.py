@@ -84,7 +84,7 @@ def supervise(config: TrainingConfig, sockets: List) -> int:
         if pid == 0:
             try:
                 serve(config, sockets)
-            except BaseException:   # the child never returns into the parent's loop: its status and traceback are what it leaves
+            except BaseException:   # the child never returns into the parent's loop: its status and traceback are what it leaves  # noqa: BLE001  (#192)
                 traceback.print_exc()
                 os._exit(1)
             os._exit(0)

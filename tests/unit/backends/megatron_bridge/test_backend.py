@@ -170,7 +170,7 @@ def test_the_error_does_not_echo_a_long_label_list_back_to_the_client():
     conv = NeMo2ClassificationDataConverter()
     long = list(range(5000))
     bad = Datum.model_validate({"model_input": {"tokens": [5, 6, 7]}, "loss_fn_inputs": {"labels": {"data": long}}})
-    with pytest.raises(ValueError) as caught:
+    with pytest.raises(ValueError) as caught:  # noqa: PT011  (#193)
         conv.forward_backward_to_backend([bad], CLASSIFICATION_CE, {"num_labels": 2})
     msg = str(caught.value)
     assert "datum 0" in msg and "5000" in msg and len(msg) < 300   # the count says what was wrong; the values stay out

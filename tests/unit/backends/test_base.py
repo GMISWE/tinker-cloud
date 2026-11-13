@@ -126,7 +126,7 @@ class TestBackendSignatureContract:
                 )
 
     def test_unknown_backend_class_raises(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError):  # noqa: PT011  (#193)
             BackendFactory.backend_class("nope")
 
 

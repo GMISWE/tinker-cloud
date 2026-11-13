@@ -32,7 +32,7 @@ def test_an_unknown_project_is_refused_by_name():
 
 
 def test_user_owner_needs_urns():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError):  # noqa: PT011  (#193)
         SessionSearchRequest.model_validate({"owner": {"type": "user"}})
 
 
@@ -44,6 +44,6 @@ def test_metadata_matches_in_the_encoding_the_sdk_reads():
 
 
 def test_a_naive_cursor_time_is_refused():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError):  # noqa: PT011  (#193)
         SessionSearchRequest.model_validate(
             {"cursor": {"last_created_at": "2026-11-06T00:00:00", "last_session_id": "x"}})

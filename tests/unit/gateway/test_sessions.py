@@ -100,7 +100,7 @@ def test_many_workers_open_one_new_store_file_at_once(tmp_path):
         try:
             go.wait()
             SessionStore(path).close()
-        except BaseException as exc:   # the failure under test: reported, not swallowed
+        except BaseException as exc:   # the failure under test: reported, not swallowed  # noqa: BLE001  (#193)
             errors.append(exc)
     threads = [threading.Thread(target=open_store) for _ in range(8)]
     for t in threads:
