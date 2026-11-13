@@ -12,8 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from ..core.array_values import is_array
-from ..models.tensor_values import DEFAULT_TENSOR_DTYPE, batched_layout
+from ..core.tensor_values import DEFAULT_TENSOR_DTYPE, batched_layout, is_array
 from . import tinker_public_pb2 as pb
 from .dtypes import DTYPE_TO_NUMPY, DTYPE_TO_PROTO, PROTO_TO_DTYPE
 

@@ -1,12 +1,12 @@
 """A wire tensor's values as they arrived or as a backend returned them: a list, or a 1-D numpy array
 whose bytes are never spelled out as Python numbers. This module does not import numpy: the gateway
 process imports the models and must not load it (tests/unit/gateway/test_imports.py). An array can
-exist only where numpy already is."""
+exist only where numpy already is. It imports nothing of ours, so the storage, model and proto
+packages can each import it first."""
+import sys
 from typing import Annotated, Any, Iterable, Sequence, Tuple
 
 from pydantic import PlainValidator, TypeAdapter, WithJsonSchema
-
-from ..core.array_values import is_array
 
 
 # The dtypes a wire tensor may state: the ones the SDK's proto messages carry.
@@ -29,6 +29,11 @@ def batched_layout(name: str, tensors: Iterable[Tuple[str, Sequence[int]]]) -> T
     if len(set(trailing)) > 1:
         raise ValueError(f"field {name!r} has mixed trailing shapes across datums: {sorted(set(trailing))}")
     return dtypes[0], trailing[0]
+
+
+def is_array(values: Any) -> bool:
+    numpy = sys.modules.get("numpy")   # None: numpy is not loaded here, so no array exists
+    return numpy is not None and isinstance(values, numpy.ndarray)
 
 
 def list_or_array(list_type: Any) -> Any:

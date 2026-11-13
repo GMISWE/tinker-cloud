@@ -8,8 +8,7 @@ from typing import Annotated, Any, Dict, Iterable, List, Literal, Optional, Unio
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StrictInt, ValidationError, validator, model_validator
 
-from ..core.array_values import is_array
-from .tensor_values import list_or_array
+from ..core.tensor_values import is_array, list_or_array
 
 # loss_fn_config values: numbers, or text on the keys core.loss_registry declares
 # as text (the SDK's loss_fn_config_v2 carries both).
