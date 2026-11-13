@@ -9,18 +9,8 @@ into metrics; these tests keep that seam checked.
 
 import asyncio
 
-import pytest
-
-try:
-    from training.models.requests import AdamParams
-    from training.services.training_service import TrainingService
-except ImportError:  # pragma: no cover  # noqa: TREE002  (#193)
-    TrainingService = None
-
-
-pytestmark = pytest.mark.skipif(
-    TrainingService is None, reason="training package not importable"
-)
+from training.models.requests import AdamParams
+from training.services.training_service import TrainingService
 
 
 class _StubBackend:
