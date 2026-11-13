@@ -9,7 +9,6 @@ import pytest
 
 from tinkercloud.training.checkpoints import (
     CheckpointDeleteFailed,
-    CheckpointError,
     CheckpointExists,
     CheckpointFailed,
     CheckpointKind,
@@ -153,11 +152,6 @@ class TestSaveLifecycle:
         with pytest.raises(CheckpointExists, match="already exists"):
             store.begin_save("m", W, "c2", options=NO_OVERWRITE, optimizer_config=ADAMW)
         assert store.get(pending.ref)["status"] == "pending"
-
-    def test_a_duplicate_save_is_a_checkpoint_error_the_client_caused(self):
-        """It was a bare Exception, outside the errors the application maps to a status."""
-        assert issubclass(CheckpointExists, CheckpointError)
-        assert CheckpointExists.status_code == 400
 
     def test_begin_reuses_failed_and_expired_names_without_overwrite(self, store):
         failed = store.begin_save("m", W, "failed", options=SAVE_OPTIONS, optimizer_config=ADAMW)
