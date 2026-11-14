@@ -97,9 +97,6 @@ class VerlArgumentBuilder(ArgumentBuilder):
                 "gpu_memory_utilization": float(
                     self.overrides.get("rollout_gpu_memory_utilization", 0.5)
                 ),
-                # eager avoids cudagraph capture at every wake on small gate
-                # models; flip via overrides for throughput runs
-                "enforce_eager": bool(self.overrides.get("enforce_eager", True)),
             },
         }
         return cfg

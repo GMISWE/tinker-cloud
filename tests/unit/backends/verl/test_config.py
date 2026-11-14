@@ -31,3 +31,9 @@ def test_the_backend_sets_the_value_itself(cfg, composed, key, monkeypatch):
     monkeypatch.setitem(PINNED_ACTOR_CONFIG, key, other)
     moved = OmegaConf.select(_compose_actor_rollout_config(cfg), f"actor_rollout_ref.actor.{key}", throw_on_missing=True)
     assert moved == other
+
+
+def test_the_sampler_runs_with_cuda_graphs(cfg):
+    """The builder set eager mode for the sampler, behind an override that nothing passed. Guards
+    against the setting's return, not against verl's default: that is False too."""
+    assert "actor_rollout_ref.rollout.enforce_eager=False" in actor_rollout_overrides(cfg)
