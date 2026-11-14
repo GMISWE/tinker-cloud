@@ -26,6 +26,7 @@ jobs:
       - run: scripts/check_tree.sh
       # that script's own cases, on seeded trees; they read the output of the ruff pinned above
       - run: scripts/check_tree_test.sh
+      - run: scripts/lib/cluster_wait_test.sh
       # the runner ships shellcheck; `source=` directives resolve from the repo root
       - run: shellcheck -S warning $(git ls-files '*.sh')
 
