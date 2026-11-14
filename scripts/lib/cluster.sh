@@ -35,6 +35,26 @@ kx() {
 }
 EX() { kubectl -n "$NS" exec "$POD" -- bash -c "$(pod_cmd "$1")"; }
 EX_TIMEOUT() { timeout "$1" kubectl -n "$NS" exec "$POD" -- bash -c "$(pod_cmd "$2")" || true; }
+# wait_rc <rc file> <pgrep -f pattern> <seconds>: wait for a detached run on $POD that writes its
+# exit status to <rc file> as its last act. Prints the status and returns 0 once the file holds
+# one. Returns 1 when the file is absent and no process matches the pattern: the run was killed and
+# will never write it (a loop that waited on the file alone once polled for 11 hours). Returns 2
+# after <seconds>. The caller brackets a character of the pattern (`prob[e].py`), so the pattern
+# cannot match the exec that carries it. WAIT_RC_POLL is the seconds between polls (default 15).
+wait_rc() {
+  local file=$1 pattern=$2 deadline=$((SECONDS + $3)) state
+  # the run writes the file right after its process ends: a second read covers that gap
+  local poll="cat $file 2>/dev/null || { pgrep -f '$pattern' > /dev/null && echo running; } || { sleep 2; cat $file 2>/dev/null; } || echo gone"
+  while [ $SECONDS -lt $deadline ]; do
+    state=$(EX "$poll") || state=running   # a dropped exec is no verdict
+    case $state in
+      running) sleep "${WAIT_RC_POLL:-15}" ;;
+      gone) echo "wait_rc: no process matches '$pattern' and $file is absent: the run ended without a status" >&2; return 1 ;;
+      *) echo "$state"; return 0 ;;
+    esac
+  done
+  echo "wait_rc: $file is absent after $3 s and the run still matches '$pattern'" >&2; return 2
+}
 
 # Ray is members-only: every Ray process of a deployment runs in token mode with the one
 # token file below (owner-only, never on a command line). This block is the one place that
