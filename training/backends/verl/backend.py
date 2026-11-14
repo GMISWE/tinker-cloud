@@ -21,7 +21,9 @@ never pay for it.
 
 GPUs: the server's models share one placement group of whole GPUs
 (_SharedGpus), verl's own colocation; a worker takes 1/models_per_gpu of its
-GPU, so several models are resident on the same devices.
+GPU, so several models are resident on the same devices. One pass runs at a
+time (VerlBackend._pass), and a pass whose workers fail ends its model
+(VerlBackend._worker_calls).
 """
 import asyncio
 import contextlib
@@ -77,6 +79,8 @@ class VerlHandle(BackendHandle):
     rollout_awake: bool = False
     rollout_synced_version: int = -1  # weight_version last synced to vLLM
     lora_rank: int = 0
+    # "<operation>: <the workers' error>" once a pass failed in the workers; the model then serves delete only
+    failed: Optional[str] = None
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # FIFO per handle
     # Sample concurrency: generates run OUTSIDE _lock so vLLM batches them;
     # a pass of any model and this model's other operations drain them first (_quiesce_samplers).
@@ -141,7 +145,9 @@ class _SharedGpus:
 class VerlBackend(TrainingBackend[VerlHandle]):
     """Full or LoRA models on verl's FSDP engine. Models share the server's GPUs
     (`models_per_gpu`); a model builds its vLLM sampler at its first sample, and
-    one model per server holds a sampler. The sampler sleeps while any model runs a pass."""
+    one model per server holds a sampler. The sampler sleeps while any model runs a pass.
+    The server runs one pass at a time; a model whose pass failed in its workers is stopped:
+    its later passes, samples, saves and loads are refused, and its delete removes it."""
     config: VerlConfig
 
     SUPPORTED_LOSS_FNS = frozenset({"cross_entropy", "importance_sampling", "ppo"})  # losses.LOSS_FNS
@@ -163,10 +169,12 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         # cluster can own a sampler: the first to sample or to be prepared for it, until deleted.
         self._sampler_owner: Optional[VerlHandle] = None
         # A pass (forward, forward_backward, optimizer step) of any model runs with the sampler asleep.
-        # _sampler_gate serializes a sleep and a wake; a sample wakes the sampler only while no pass runs.
+        # _sampler_gate serializes a sleep and a wake; a sample wakes the sampler only while no pass runs
+        # or waits. _pass_turn gives the passes the GPUs one at a time, in the order they arrive.
         self._sampler_gate = asyncio.Lock()
-        self._passes_running = 0
-        self._no_pass_running = _set_event()
+        self._pass_turn = asyncio.Lock()
+        self._passes_pending = 0
+        self._no_pass_pending = _set_event()
 
     @property
     def converter(self):
@@ -259,11 +267,12 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         loss_fn: str,
         loss_fn_config: Optional[Dict[str, float]] = None,
     ) -> Dict[str, Any]:
-        async with handle._lock, self._pass():
+        async with handle._lock, self._pass(handle, "forward_backward"):
             try:
-                await asyncio.to_thread(self._ensure_loss_fn, handle, loss_fn)
                 td = await asyncio.to_thread(self._to_tensordict, handle, data, loss_fn)
-                out = await asyncio.to_thread(_wg_call, handle.worker_group.forward_backward, td)
+                async with self._worker_calls(handle, "forward_backward"):
+                    await asyncio.to_thread(self._ensure_loss_fn, handle, loss_fn)
+                    out = await asyncio.to_thread(_wg_call, handle.worker_group.forward_backward, td)
                 logprobs = await asyncio.to_thread(padded_logprobs, out, td)
                 loss_fn_outputs = self.converter.extract_logprobs(logprobs, data)
                 metrics = _scalar_metrics(out)
@@ -284,7 +293,7 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         optim_params: OptimParams,
     ) -> Dict[str, Any]:
         adam = cast(AdamParams, optim_params)   # the only family this backend declares
-        async with handle._lock, self._pass():
+        async with handle._lock, self._pass(handle, "apply_optimizer_step"):
             try:
                 params: Dict[str, Any] = {
                     "lr": float(adam.learning_rate),
@@ -295,12 +304,13 @@ class VerlBackend(TrainingBackend[VerlHandle]):
                 # 0 means no clipping; the request model refuses a negative value
                 clip = float(adam.grad_clip_norm) if adam.grad_clip_norm > 0 else NO_GRAD_CLIP
 
-                metrics = await asyncio.to_thread(
-                    _wg_scalar_call, handle.worker_group.optimizer_step, params, clip,
-                )
-                handle.weight_version += 1
-                # the update is over: what its backward reserved goes back to the GPU's other models
-                await asyncio.to_thread(handle.worker_group.release_cached_memory)
+                async with self._worker_calls(handle, "apply_optimizer_step"):
+                    metrics = await asyncio.to_thread(
+                        _wg_scalar_call, handle.worker_group.optimizer_step, params, clip,
+                    )
+                    handle.weight_version += 1
+                    # the update is over: what its backward reserved goes back to the GPU's other models
+                    await asyncio.to_thread(handle.worker_group.release_cached_memory)
                 grad_norm = metrics.get("grad_norm")
                 return {"success": True, "grad_norm": grad_norm, "metrics": metrics}
             except BackendError:
@@ -323,15 +333,16 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         handle: VerlHandle,
         data: List[Datum],
     ) -> List[Any]:
-        async with handle._lock, self._pass():
+        async with handle._lock, self._pass(handle, "get_logprobs"):
             try:
-                # the infer path runs the loss too: the engine's logits hook, which
-                # [N, K] targets need, is the installed loss function
-                await asyncio.to_thread(self._ensure_loss_fn, handle, "cross_entropy")
                 td = await asyncio.to_thread(self._to_tensordict, handle, data, "cross_entropy", True)
-                out = await asyncio.to_thread(_wg_call, handle.worker_group.compute_log_prob, td)
-                # a forward-only model would otherwise hold its pass's memory while another trains
-                await asyncio.to_thread(handle.worker_group.release_cached_memory)
+                async with self._worker_calls(handle, "get_logprobs"):
+                    # the infer path runs the loss too: the engine's logits hook, which
+                    # [N, K] targets need, is the installed loss function
+                    await asyncio.to_thread(self._ensure_loss_fn, handle, "cross_entropy")
+                    out = await asyncio.to_thread(_wg_call, handle.worker_group.compute_log_prob, td)
+                    # a forward-only model would otherwise hold its pass's memory while another trains
+                    await asyncio.to_thread(handle.worker_group.release_cached_memory)
                 logprobs = await asyncio.to_thread(padded_logprobs, out, td)
                 return self.converter.extract_logprobs(logprobs, data)
             except BackendError:
@@ -358,9 +369,11 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         step: Optional[int] = None,
         persist: bool = True,
     ) -> None:
+        self._refuse_failed(handle, "save_checkpoint")
         if not persist:
             return  # ephemeral sampler save: the engines already hold the weights
         async with handle._lock:
+            self._refuse_failed(handle, "save_checkpoint")   # the pass this waited behind may have failed
             try:
                 await self._quiesce_samplers(handle)
                 local_path = str(root)
@@ -385,6 +398,7 @@ class VerlBackend(TrainingBackend[VerlHandle]):
             raise BackendError("verl restores weights only; optimizer state is not restored",
                                backend="verl", operation="load_checkpoint")
         async with handle._lock:
+            self._refuse_failed(handle, "load_checkpoint")
             try:
                 await self._quiesce_samplers(handle)
                 local_path = str(root)
@@ -405,17 +419,7 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         async with handle._lock:
             try:
                 await self._quiesce_samplers(handle)
-                if self._sampler_owner is handle:
-                    async with self._sampler_gate:   # a pass of another model may be putting the sampler to sleep
-                        # rollout server actors first (they hold engine refs into workers)
-                        await asyncio.to_thread(_kill_named_actors, VLLM_SERVER_NAME_PREFIX)
-                        self._sampler_owner = None
-                handle.llm_manager = None
-                handle.llm_client = None
-                handle.ckpt_manager = None
-                handle.rollout_awake = False
-                await asyncio.to_thread(_kill_named_actors, worker_name_prefix(handle.model_id))
-                handle.worker_group = None
+                await self._stop_actors(handle)   # nothing is left to stop when a failed pass ended the model
                 await asyncio.to_thread(self._gpus.release, handle.model_id)
             except Exception as e:
                 raise BackendError(str(e), backend="verl", operation="delete_model", original_error=e) from e
@@ -445,6 +449,7 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         # generate WITHOUT the lock so concurrent sample requests batch inside vLLM; a pass
         # drains the active samplers first (_pass).
         async with handle._lock:
+            self._refuse_failed(handle, "sample")
             try:
                 async with self._awake_sampler(handle):
                     handle._active_samplers += 1
@@ -519,6 +524,7 @@ class VerlBackend(TrainingBackend[VerlHandle]):
 
     async def prepare_for_generation(self, handle: VerlHandle) -> None:
         async with handle._lock:
+            self._refuse_failed(handle, "prepare_for_generation")
             try:
                 async with self._awake_sampler(handle):
                     pass
@@ -563,27 +569,77 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         while h._active_samplers:
             await h._samplers_drained.wait()
 
+    @staticmethod
+    def _refuse_failed(h: VerlHandle, operation: str) -> None:
+        """Call with h._lock HELD: a request that waited behind the failing pass is refused too.
+
+        Raises:
+            BackendError: a pass of `h` failed in its workers; the model serves its delete only.
+        """
+        if h.failed is not None:
+            raise BackendError(
+                f"model {h.model_id} is stopped: its workers failed ({h.failed}). Delete it and create it again",
+                backend="verl", operation=operation)
+
+    async def _stop_actors(self, h: VerlHandle) -> None:
+        """Kill `h`'s workers, and the sampler's actors when `h` holds the sampler; their GPU
+        memory is freed. `h` keeps its share of the GPUs. Call with h._lock HELD."""
+        if self._sampler_owner is h:
+            async with self._sampler_gate:   # a pass of another model may be putting the sampler to sleep
+                # rollout server actors first (they hold engine refs into workers)
+                await asyncio.to_thread(_kill_named_actors, VLLM_SERVER_NAME_PREFIX)
+                self._sampler_owner = None
+        h.llm_manager = None
+        h.llm_client = None
+        h.ckpt_manager = None
+        h.rollout_awake = False
+        await asyncio.to_thread(_kill_named_actors, worker_name_prefix(h.model_id))
+        h.worker_group = None
+
     @contextlib.asynccontextmanager
-    async def _pass(self):
-        """Run a pass of any model with the server's sampler asleep: its in-flight samples
-        finish first, and no sample wakes it until every running pass has returned. The
-        models share the GPUs, and an awake sampler holds the memory a pass needs."""
-        self._passes_running += 1
-        self._no_pass_running.clear()
+    async def _worker_calls(self, h: VerlHandle, operation: str):
+        """The worker calls of a pass of `h`. When one raises, the ranks may be left out of step
+        (the next pass of such a model never returned), so the model ends: `h` is marked failed
+        and its actors are stopped before the pass gives up its turn. Call inside `_pass`.
+        A cancelled pass is not handled: its thread would still drive the workers after the
+        turn is given up. Nothing cancels a pass's task (TaskManager.cancel_task has no caller)."""
         try:
-            async with self._sampler_gate:
-                owner = self._sampler_owner
-                if owner is not None:
-                    await self._quiesce_samplers(owner)
-                    try:
-                        await asyncio.to_thread(self._ensure_training_ready, owner)
-                    except Exception as e:
-                        raise BackendError(str(e), backend="verl", operation="sleep_sampler", original_error=e) from e
             yield
+        except Exception as e:
+            h.failed = f"{operation}: {e}"
+            logger.error("verl model %s stopped: its workers failed in %s", h.model_id, operation, exc_info=e)
+            await self._stop_actors(h)
+            raise
+
+    @contextlib.asynccontextmanager
+    async def _pass(self, h: VerlHandle, operation: str):
+        """Run a pass of `h` alone on the GPUs, with the server's sampler asleep. The models
+        share the GPUs: a pass waits for its turn behind the passes that arrived before it,
+        the sampler's in-flight samples finish first, and no sample wakes the sampler until
+        every pass that runs or waits has returned. Call with h._lock HELD.
+
+        Raises:
+            BackendError: an earlier pass of `h` failed in its workers (`_refuse_failed`).
+        """
+        self._refuse_failed(h, operation)
+        self._passes_pending += 1
+        self._no_pass_pending.clear()
+        try:
+            async with self._pass_turn:
+                async with self._sampler_gate:
+                    owner = self._sampler_owner
+                    if owner is not None:
+                        await self._quiesce_samplers(owner)
+                        try:
+                            await asyncio.to_thread(self._ensure_training_ready, owner)
+                        except Exception as e:
+                            raise BackendError(
+                                str(e), backend="verl", operation="sleep_sampler", original_error=e) from e
+                yield
         finally:
-            self._passes_running -= 1
-            if self._passes_running == 0:
-                self._no_pass_running.set()
+            self._passes_pending -= 1
+            if self._passes_pending == 0:
+                self._no_pass_pending.set()
 
     @contextlib.asynccontextmanager
     async def _awake_sampler(self, h: VerlHandle):
@@ -603,9 +659,9 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         self._sampler_owner = h
         try:
             while True:
-                await self._no_pass_running.wait()
+                await self._no_pass_pending.wait()
                 await self._sampler_gate.acquire()
-                if not self._passes_running:
+                if not self._passes_pending:
                     break
                 self._sampler_gate.release()   # a pass started while this waited for the gate
         except BaseException:   # cancelled while it waited: a claim with no sampler behind it goes
