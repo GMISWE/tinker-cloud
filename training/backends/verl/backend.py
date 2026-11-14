@@ -959,7 +959,11 @@ def actor_rollout_overrides(cfg: Dict[str, Any]) -> List[str]:
         f"actor_rollout_ref.rollout.response_length={rollout['response_length']}",
         f"actor_rollout_ref.rollout.tensor_model_parallel_size={rollout['tensor_model_parallel_size']}",
         f"actor_rollout_ref.rollout.gpu_memory_utilization={rollout['gpu_memory_utilization']}",
-        f"actor_rollout_ref.rollout.enforce_eager={rollout['enforce_eager']}",
+        # CUDA graphs on. Read 2026-11-14, one run of each setting, SmolLM3-3B with 128 concurrent
+        # samples on 4 GPUs: a 16,384-token response takes 120 s with graphs and 300 s in eager mode
+        # (55 tokens a second per stream). A wake takes 0.5 s with either; the servers' first boot
+        # takes 69 s with graphs and 41 s in eager mode.
+        "actor_rollout_ref.rollout.enforce_eager=False",
         "actor_rollout_ref.rollout.calculate_log_probs=True",
         "actor_rollout_ref.rollout.free_cache_engine=True",
         # Tinker logprob provenance: sampler must report RAW model logprobs
