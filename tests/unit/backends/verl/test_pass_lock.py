@@ -120,6 +120,48 @@ def test_a_worker_failure_stops_the_model_and_the_next_models_pass_runs(backend,
     asyncio.run(scenario())
 
 
+def test_a_stop_that_fails_keeps_the_workers_error_and_the_model_stopped(backend, events, monkeypatch):
+    """A kill that raised replaced the workers' error in the request's answer: the client saw
+    "kill failed" and not what the pass died of."""
+    async def scenario():
+        a, b = _failing_model(events), _model("b", events)
+
+        def kill(prefix):
+            raise RuntimeError("kill failed")
+
+        with monkeypatch.context() as patched:
+            patched.setattr(verl_backend, "_kill_named_actors", kill)
+            with pytest.raises(BackendError, match=f"{WORKER_ERROR}; then stopping model a's actors failed: kill failed"):
+                await _run_pass(backend, a, "forward")
+        with pytest.raises(BackendError, match="model a is stopped"):
+            await _run_pass(backend, a, "forward")
+        await _run_pass(backend, b, "forward")
+        await backend.delete_model(a)   # repeats the kills
+        assert events == [("workers called", "a"), ("workers called", "b"), ("workers returned", "b"),
+                          ("killed", worker_name_prefix("a"))]
+
+    asyncio.run(scenario())
+
+
+def test_the_kill_passes_over_an_actor_that_died_after_the_listing(monkeypatch):
+    """A rank that is dying of the failure can be gone between the listing and the lookup (read in the
+    code, not seen on a server); the lookup's error would end the kill loop with the other ranks alive."""
+    import ray
+
+    killed = []
+
+    def get_actor(name):
+        if name == "verl_a_1":
+            raise ValueError(f"Failed to look up actor with name '{name}'")
+        return name
+
+    monkeypatch.setattr(ray.util, "list_named_actors", lambda: ["verl_a_0", "verl_a_1", "verl_a_2", "verl_b_0"])
+    monkeypatch.setattr(ray, "get_actor", get_actor)
+    monkeypatch.setattr(ray, "kill", killed.append)
+    verl_backend._kill_named_actors(worker_name_prefix("a"))
+    assert killed == ["verl_a_0", "verl_a_2"]
+
+
 def _later_requests(backend: VerlBackend, handle: VerlHandle) -> dict:
     return {
         "forward": lambda: _run_pass(backend, handle, "forward"),

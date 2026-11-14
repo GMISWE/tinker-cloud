@@ -419,7 +419,7 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         async with handle._lock:
             try:
                 await self._quiesce_samplers(handle)
-                await self._stop_actors(handle)   # nothing is left to stop when a failed pass ended the model
+                await self._stop_actors(handle)   # for a model a failed pass ended: only what that stop left alive
                 await asyncio.to_thread(self._gpus.release, handle.model_id)
             except Exception as e:
                 raise BackendError(str(e), backend="verl", operation="delete_model", original_error=e) from e
@@ -608,7 +608,13 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         except Exception as e:
             h.failed = f"{operation}: {e}"
             logger.error("verl model %s stopped: its workers failed in %s", h.model_id, operation, exc_info=e)
-            await self._stop_actors(h)
+            try:
+                await self._stop_actors(h)
+            except Exception as stop_error:
+                # the request still answers with the workers' error; the model's delete repeats the kills
+                raise BackendError(
+                    f"{e}; then stopping model {h.model_id}'s actors failed: {stop_error}",
+                    backend="verl", operation=operation, original_error=e) from stop_error
             raise
 
     @contextlib.asynccontextmanager
@@ -1015,4 +1021,8 @@ def _kill_named_actors(prefix: str) -> None:
 
     for name in ray.util.list_named_actors():
         if name.startswith(prefix):
-            ray.kill(ray.get_actor(name))
+            try:
+                actor = ray.get_actor(name)
+            except ValueError:   # ray's answer for a name with no live actor: one can die after the listing
+                continue
+            ray.kill(actor)
