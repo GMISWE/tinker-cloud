@@ -186,6 +186,12 @@ def declared_mtp_layers(raw: Dict[str, Any]) -> int:
     return 0
 
 
+def is_vlm_config(raw: Dict[str, Any]) -> bool:
+    """A raw config with a vision tower (`vision_config`) belongs to a vision-language
+    model. Decided from config.json alone: no transformers import, no second hub read."""
+    return "vision_config" in raw
+
+
 def derive_max_seq_len(raw: Dict[str, Any], cap: int, override: Optional[int]) -> int:
     """The sequence length a backend sizes itself for: the operator's explicit
     override, else the model's own context capped by the server ceiling."""

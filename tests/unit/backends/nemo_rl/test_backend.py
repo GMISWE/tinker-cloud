@@ -3,6 +3,9 @@ drain-before-sleep generation lifecycle (specs/019): a sample is admitted and co
 op uses to take the engine; the op waits for admitted samples before sleeping; a refit resets the prefix cache or fails."""
 import asyncio
 import importlib.util
+import logging
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -62,6 +65,108 @@ class FakePolicy:
 def make_handle(log, **kw):
     return NemoRLHandle(model_id="m", backend_type="nemo_rl",
                         policy=FakePolicy(log), policy_generation=FakeGeneration(log), **kw)
+
+
+def test_create_model_detects_a_vlm_from_config_json(monkeypatch):
+    """A VLM the installed transformers cannot name must still get its image preprocessor."""
+    monkeypatch.setattr(nb, "read_raw_hf_config",
+                        lambda _: {"architectures": ["LlamaForCausalLM"], "vision_config": {}})
+    monkeypatch.setattr(nb, "_init_nemo_rl_components", lambda **_: (None, None, None, None, None, None, 1))
+
+    image_utils = ModuleType("tinkercloud.training.backends.nemo_rl.image_utils")
+    image_utils.ImagePreprocessor = lambda hf_path: SimpleNamespace(hf_path=hf_path)
+    monkeypatch.setitem(sys.modules, image_utils.__name__, image_utils)
+    backend = nb.NemoRLBackend()
+    backend._builder = SimpleNamespace(build_args=lambda **_: ({}, "fake/tiny"))
+
+    async def run():
+        handle = await backend.create_model("m", "r", "fake/tiny", 1, optimizer="adamw")
+        await backend.close()
+        return handle
+
+    assert asyncio.run(run()).image_preprocessor is not None
+
+
+def test_delete_model_warns_and_releases_the_cluster_when_generation_reports_failure(caplog):
+    """A generation shutdown that reports False warns; teardown still releases the cluster."""
+    calls = []
+
+    class Policy:
+        def shutdown(self):
+            calls.append("policy")
+
+    class Generation:
+        def shutdown(self):
+            return False
+
+    class Cluster:
+        def shutdown(self):
+            calls.append("cluster")
+
+    handle = NemoRLHandle(model_id="m", backend_type="nemo_rl", policy=Policy(),
+                          policy_generation=Generation(), cluster=Cluster())
+    backend = nb.NemoRLBackend()
+
+    async def run():
+        backend._open_scheduler(handle)
+        await backend.delete_model(handle)
+        await backend.close()
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(run())
+    assert calls == ["policy", "cluster"]
+    assert "generation shutdown failed" in caplog.text
+
+
+def test_delete_model_raises_when_generation_shutdown_raises():
+    """An unexpected generation shutdown error reaches the caller instead of a warning."""
+    calls = []
+
+    class Policy:
+        def shutdown(self):
+            calls.append("policy")
+
+    class Generation:
+        def shutdown(self):
+            raise RuntimeError("worker died")
+
+    class Cluster:
+        def shutdown(self):
+            calls.append("cluster")
+
+    handle = NemoRLHandle(model_id="m", backend_type="nemo_rl", policy=Policy(),
+                          policy_generation=Generation(), cluster=Cluster())
+    backend = nb.NemoRLBackend()
+
+    async def run():
+        backend._open_scheduler(handle)
+        with pytest.raises(BackendError, match="worker died"):
+            await backend.delete_model(handle)
+        await backend.close()
+
+    asyncio.run(run())
+    assert calls == ["policy"]
+
+
+@pytest.mark.parametrize("error", [RuntimeError("reference worker died"), KeyError("reference_logprobs")])
+def test_reference_logprob_failure_reaches_every_waiter(error, caplog):
+    """A failed reference logprob batch is logged and reaches every waiter as a BackendError."""
+    class Backend:
+        async def _run_reference_logprobs(self, handle, prompts):
+            raise error
+
+    async def run():
+        pending = nb._RefLogprobAccumulator(flush_interval_s=0)
+        return await asyncio.wait_for(asyncio.gather(
+            pending.submit(Backend(), None, [1]), pending.submit(Backend(), None, [2]),
+            return_exceptions=True,
+        ), timeout=1)
+
+    with caplog.at_level(logging.ERROR):
+        errors = asyncio.run(run())
+    assert len(errors) == 2
+    assert all(isinstance(e, BackendError) and e.original_error is error for e in errors)
+    assert "reference logprob batch failed" in caplog.text
 
 
 def test_slot_counts_while_the_sample_runs():

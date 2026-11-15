@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 
 from ..base import ArgumentBuilder
 from .config import NemoRLConfig
-from ...utils.model_config import derive_max_seq_len, detect_num_gpus, read_raw_hf_config, remote_code_trusted
+from ...utils.model_config import derive_max_seq_len, detect_num_gpus, is_vlm_config, read_raw_hf_config
 from .loss_config import NO_GRAD_CLIP, TINKER_PG_LOSS_DEFAULTS
 
 logger = logging.getLogger(__name__)
@@ -66,20 +66,10 @@ class NemoRLArgumentBuilder(ArgumentBuilder):
             else f"model context capped at {self.cfg.max_seq_len_cap}",
         )
 
-        # Detect VLM (cheap — reads config.json)
-        is_vlm = False
-        try:
-            from transformers import AutoConfig
-            cfg = AutoConfig.from_pretrained(hf_path, trust_remote_code=remote_code_trusted(hf_path))
-            is_vlm = (
-                hasattr(cfg, "vision_config")
-                or "VL" in cfg.__class__.__name__
-                or "Vision" in cfg.__class__.__name__
-            )
-            if is_vlm:
-                logger.info("VLM detected: %s — enforcing sequence_packing=False, cp_size=1", cfg.__class__.__name__)
-        except Exception as e:  # noqa: BLE001  (#190)
-            logger.debug("model config read skipped (VLM detection): %s", e)
+        # A VLM declares its vision tower in the config already read above.
+        is_vlm = is_vlm_config(raw_config)
+        if is_vlm:
+            logger.info("VLM detected: %s — enforcing sequence_packing=False, cp_size=1", hf_path)
 
         # specs/021: with colocated=False vLLM owns `inference_gpus` of the
         # client's num_gpus and the trainer gets the rest; the train DP is
