@@ -31,6 +31,16 @@ class TestNemoRLArgumentBuilder:
         assert isinstance(hf_path, str)
         assert hf_path == "meta-llama/Llama-3.1-8B"
 
+    def test_a_vision_config_builds_as_a_vlm(self, builder, monkeypatch):
+        """A VLM the installed transformers cannot name must still build as a VLM: config.json decides."""
+        from tinkercloud.training.backends.nemo_rl import builder as mod
+        monkeypatch.setattr(mod, "read_raw_hf_config", lambda base_model: {
+            "architectures": ["LlamaForCausalLM"], "max_position_embeddings": 131072,
+            "vision_config": {},
+        })
+        config, _ = builder.build_args(base_model="meta-llama/Llama-3.1-8B", num_gpus=2)
+        assert config["policy"]["dynamic_batching"]["enabled"] is False
+
     def test_config_has_required_sections(self, builder):
         config_dict, _ = builder.build_args(
             base_model="meta-llama/Llama-3.1-8B",

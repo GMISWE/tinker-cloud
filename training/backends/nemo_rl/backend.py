@@ -25,7 +25,7 @@ import httpx
 
 from ..base import BackendError, BackendHandle, SampleRequestError, TrainingBackend
 from ..common.scheduler import GroupScheduler, PassKey, one_at_a_time, pass_key
-from ...utils.model_config import read_raw_hf_config, remote_code_trusted
+from ...utils.model_config import is_vlm_config, read_raw_hf_config
 from ..objectives import classification_spec
 from ..http_pool import HttpClientPool
 from ...models.requests import Datum, OptimParams
@@ -149,7 +149,8 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         *,
         optimizer: str,
     ) -> NemoRLHandle:
-        classification = classification_spec(await asyncio.to_thread(read_raw_hf_config, base_model))
+        raw_config = await asyncio.to_thread(read_raw_hf_config, base_model)
+        classification = classification_spec(raw_config)
         if classification is not None:
             raise BackendError(
                 f"NeMo RL is a language-modeling backend; {base_model!r} declares a "
@@ -228,21 +229,10 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                 )
 
 
-            # Detect VLM via config (cheap — only reads config.json)
-            try:
-                from transformers import AutoConfig
-                cfg = AutoConfig.from_pretrained(hf_path, trust_remote_code=remote_code_trusted(hf_path))
-                is_vlm = (
-                    hasattr(cfg, "vision_config")
-                    or "VL" in cfg.__class__.__name__
-                    or "Vision" in cfg.__class__.__name__
-                )
-                if is_vlm:
-                    from .image_utils import ImagePreprocessor
-                    handle.image_preprocessor = ImagePreprocessor(hf_path)
-                    logger.info("[%s] VLM detected: %s", request_id, cfg.__class__.__name__)
-            except Exception as e:  # noqa: BLE001  (#190)
-                logger.debug("[%s] VLM detection skipped: %s", request_id, e)
+            if is_vlm_config(raw_config):
+                from .image_utils import ImagePreprocessor
+                handle.image_preprocessor = ImagePreprocessor(hf_path)
+                logger.info("[%s] VLM detected: %s", request_id, hf_path)
 
             self._open_scheduler(handle)
             logger.info("[%s] NeMo RL model %s created successfully", request_id, model_id)
@@ -791,13 +781,11 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                 logger.info("NeMo RL policy shut down for %s", handle.model_id)
 
             if handle.policy_generation is not None and handle.policy_generation is not handle.policy:
-                try:
-                    await asyncio.to_thread(handle.policy_generation.shutdown)
+                # VllmGeneration.shutdown catches its own failures and reports False.
+                if await asyncio.to_thread(handle.policy_generation.shutdown):
                     logger.info("NeMo RL generation shut down for %s", handle.model_id)
-                except Exception:  # noqa: BLE001  (#190)
-                    # The generation worker group can share actors with the policy,
-                    # which was shut down just above; log rather than hide it.
-                    logger.warning("delete_model: generation shutdown failed for %s", handle.model_id, exc_info=True)
+                else:
+                    logger.warning("delete_model: generation shutdown failed for %s", handle.model_id)
 
             # Release the placement groups now; a named group left to the
             # garbage collector blocks the next create_model (BUG-014).
@@ -1651,7 +1639,8 @@ class _RefLogprobAccumulator:
                 for (_, fut), lp in zip(pending, results):
                     if not fut.done():
                         fut.set_result(lp)
-            except Exception as e:  # propagate to all waiters  # noqa: BLE001  (#190)
+            except Exception as e:  # propagate to all waiters
+                logger.exception("reference logprob batch failed")
                 for _, fut in pending:
                     if not fut.done():
                         fut.set_exception(
