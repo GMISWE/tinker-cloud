@@ -20,23 +20,12 @@ import torch
 if torch.cuda.device_count() < 3:
     pytest.skip("needs >= 3 GPUs", allow_module_level=True)
 
+from .pass_memory import ALLOCATED, check_readings_nest, rows
+
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 SERVER = dict(AUTOMODEL_TRAIN_GPUS="2", AUTOMODEL_MAX_LORAS="2", AUTOMODEL_MAX_LORA_RANK="8", AUTOMODEL_MAX_CPU_LORAS="4",
               AUTOMODEL_MICRO_BATCH_ROWS="2", AUTOMODEL_ACTIVATION_CHECKPOINTING="0")
-ALLOCATED, RESERVED, DEVICE = "gpu_allocated_peak_bytes:max", "gpu_reserved_peak_bytes:max", "gpu_device_used_bytes:max"
 ROWS = 4   # one micro-batch of 2 rows on each of the 2 ranks
-
-
-def rows(length: int, generator: torch.Generator):
-    from tinker import types
-
-    out = []
-    for _ in range(ROWS):
-        tokens = torch.randint(100, 20000, (length,), generator=generator)
-        out.append(types.Datum(model_input=types.ModelInput.from_ints(tokens.tolist()), loss_fn_inputs={
-            "target_tokens": types.TensorData.from_torch(tokens.roll(-1)),
-            "weights": types.TensorData.from_torch(torch.full((length,), 1.0 / length))}))
-    return out
 
 
 def test_a_pass_reports_its_ranks_gpu_memory_through_the_sdk(live_sdk):
@@ -50,17 +39,13 @@ def test_a_pass_reports_its_ranks_gpu_memory_through_the_sdk(live_sdk):
     service = live_sdk("automodel", NUM_GPUS=str(torch.cuda.device_count()), **SERVER)
     client = service.create_lora_training_client(base_model=MODEL, rank=8).result()
     generator = torch.Generator().manual_seed(0)
-    short, long = rows(256, generator), rows(2048, generator)
+    short, long = rows(ROWS, 256, generator), rows(ROWS, 2048, generator)
     short_before = dict(client.forward_backward(short, "cross_entropy").result().metrics)
     long_pass = dict(client.forward_backward(long, "cross_entropy").result().metrics)
     short_after = dict(client.forward_backward(short, "cross_entropy").result().metrics)
     long_forward = dict(client.forward(long, "cross_entropy").result().metrics)
     client.optim_step(tinker.AdamParams(learning_rate=0.0)).result()
-    for name, metrics in (("short", short_before), ("long", long_pass), ("short again", short_after), ("forward long", long_forward)):
-        print(f"\n[pass memory] {name}: " + ", ".join(f"{k} {metrics[k] / 2**20:.0f} MiB" for k in (ALLOCATED, RESERVED, DEVICE)))
-
-    for metrics in (short_before, long_pass, short_after, long_forward):
-        assert 0 < metrics[ALLOCATED] <= metrics[RESERVED] <= metrics[DEVICE]
+    check_readings_nest({"short": short_before, "long": long_pass, "short again": short_after, "forward long": long_forward})
     assert long_pass[ALLOCATED] > short_before[ALLOCATED]
     assert short_after[ALLOCATED] < long_pass[ALLOCATED]
     assert long_forward[ALLOCATED] < long_pass[ALLOCATED]
