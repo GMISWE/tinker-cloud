@@ -39,6 +39,14 @@ EX_TIMEOUT() { timeout "$1" kubectl -n "$NS" exec "$POD" -- bash -c "$(pod_cmd "
 # from it under its own umask. A copy (`kubectl cp`) gives the pod file the local file's mode: a
 # 644 local file arrived as 644 and a 600 one as 600 (read on a pod, 2026-11-16).
 EX_STDIN() { kubectl -n "$NS" exec -i "$POD" -- bash -c "$(pod_cmd "$1")"; }
+# secret_write <local file> <pod file> [notice]: writes the local file's bytes to the pod file,
+# owner-only and in one rename; prints <notice> when a file was there. A write that leaves no
+# bytes fails and keeps the old file. EX_STDIN is the caller's transport.
+secret_write() {
+  EX_STDIN "[ ! -e $2 ] || kept=1
+(umask 077; rm -f $2.new; cat > $2.new) && [ -s $2.new ] && mv $2.new $2 || { echo 'ERROR: could not write $2'; rm -f $2.new; exit 1; }
+[ -z \"\$kept\" ] || [ -z '${3:-}' ] || echo '    ${3:-}'" < "$1"
+}
 # wait_rc <rc file> <pgrep -f pattern> <seconds>: wait for a detached run on $POD that writes its
 # exit status to <rc file> as its last act. Prints the status and returns 0 once the file holds
 # one. Returns 1 when the file is absent and no process matches the pattern: the run was killed and
@@ -93,12 +101,13 @@ SERVER_PATTERN='^([^ ]*/)?python[0-9.]*( -[^ ]+)* -m training( |$)'
 # outlived the TERM) or 2 (a bad pattern) fails.
 # shellcheck disable=SC2034  # read by the scripts that source this file
 SERVER_STOP="pkill -f '$SERVER_PATTERN'; sleep 8; pgrep -f '$SERVER_PATTERN' > /dev/null; [ \$? -eq 1 ] || { echo 'ERROR: an API server still runs after pkill, or pgrep failed'; exit 1; }"
-# The HF token file on a pod, and the pod command that fails unless it is non-empty. The deploy
+# The HF token file on a pod, and the pod command that fails unless it is non-empty. It also makes
+# the file owner-only: one that an earlier deploy copied carries its local mode. The deploy
 # and the rotate run it before they stop the running server, since a refusal inside the boot exec
 # cannot fail its caller (EX_TIMEOUT). The boot command runs it again, so a caller that skips
 # that check still starts no server without a token.
 HF_TOKEN_POD_FILE=/tmp/hf_token.txt
-HF_TOKEN_CHECK="[ -s $HF_TOKEN_POD_FILE ] || { echo 'ERROR: $HF_TOKEN_POD_FILE is empty or missing'; exit 1; }"
+HF_TOKEN_CHECK="[ -s $HF_TOKEN_POD_FILE ] && chmod 600 $HF_TOKEN_POD_FILE || { echo 'ERROR: $HF_TOKEN_POD_FILE is empty or missing'; exit 1; }"
 # The API key. A deployment runs on the public dev key unless its operator gives a key as a local
 # file (API_KEY_FILE on the deploy and the rotate). The key then lives in the pod file below,
 # owner-only, and later boots keep it. It is never a KEY=VAL: that would put it on kubectl's
@@ -129,17 +138,14 @@ api_key_file_check() {
   eval "$API_KEY_VALID" || { echo "ERROR: API_KEY_FILE '$1' holds no operator key ($API_KEY_RULE)" >&2; return 1; }
 }
 # api_key_ready [local file]: the key step before a running server is stopped. With a file:
-# checks it, then writes it to the pod file through EX_STDIN (the caller's transport), saying so
-# when it replaced a kept key. Without one: fails unless the pod's own state gives a key.
+# checks it, then writes it to the pod file (secret_write), saying so when it replaced a kept
+# key. Without one: fails unless the pod's own state gives a key.
 # Call it last before the stop: with a file it replaces the key the next boot takes, so a stop
 # that then fails leaves the old server on the old key and the pod file on the new one.
 api_key_ready() {
   if [ -z "${1:-}" ]; then EX "$API_KEY_RESOLVE"; return; fi
   api_key_file_check "$1" || return 1
-  EX_STDIN "[ ! -e $API_KEY_POD_FILE ] || kept=1
-(umask 077; cat > $API_KEY_POD_FILE.new) && [ -s $API_KEY_POD_FILE.new ] && mv $API_KEY_POD_FILE.new $API_KEY_POD_FILE \\
-  || { echo 'ERROR: could not write $API_KEY_POD_FILE'; rm -f $API_KEY_POD_FILE.new; exit 1; }
-[ -z \"\$kept\" ] || echo '    replaced the API key kept in $API_KEY_POD_FILE'" < "$1"
+  secret_write "$1" "$API_KEY_POD_FILE" "replaced the API key kept in $API_KEY_POD_FILE"
 }
 # The variables every server boot exports, in order (server_boot's case table holds each value).
 SERVER_BOOT_KEYS=" PYTHONPATH NUM_GPUS RAY_ADDRESS TRAINING_PORT HF_TOKEN HF_HOME TINKER_API_KEY TINKERCLOUD_BACKEND ALLOW_PARTIAL_BATCHES "

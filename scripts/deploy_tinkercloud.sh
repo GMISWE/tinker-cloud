@@ -51,7 +51,7 @@
 #
 # --code-only  Skip pod/container creation; redeploy code + restart server.
 #
-# HF token: HF_TOKEN_FILE=<path>, copied into the target as HF_TOKEN_POD_FILE (lib/cluster.sh).
+# HF token: HF_TOKEN_FILE=<path>, written into the target as HF_TOKEN_POD_FILE, owner-only (lib/cluster.sh).
 # Unset, it is huggingface_hub's own token file when one exists; otherwise the
 # target's existing HF_TOKEN_POD_FILE is reused (--code-only only).
 # API key: API_KEY_FILE=<path> makes that file's key the server's (lib/cluster.sh). Unset, the
@@ -80,7 +80,7 @@ done
 # Sets per-profile DEFAULTS; every one is overridable by the same-named env var.
 # shellcheck source=scripts/lib/cluster.sh
 # shellcheck disable=SC1091  # sourced by path at run time: KUBECONFIG, NS, DEFAULT_NODE
-. "$SCRIPT_DIR/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE, require_tunnel, kx, EX, EX_TIMEOUT, pod_cmd, ray_head, TRUST_DOMAIN_LABEL, SERVER_PATTERN, SERVER_STOP, API_PORT, HF_TOKEN_POD_FILE, HF_TOKEN_CHECK, DEV_API_KEY, API_KEY_POD_FILE, api_key_file_check, api_key_ready, server_boot, SERVER_BOOT_TIMEOUT, SERVER_HEALTH
+. "$SCRIPT_DIR/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE, require_tunnel, kx, EX, EX_TIMEOUT, pod_cmd, ray_head, TRUST_DOMAIN_LABEL, SERVER_PATTERN, SERVER_STOP, API_PORT, HF_TOKEN_POD_FILE, HF_TOKEN_CHECK, secret_write, DEV_API_KEY, API_KEY_POD_FILE, api_key_file_check, api_key_ready, server_boot, SERVER_BOOT_TIMEOUT, SERVER_HEALTH
 BACKEND_ENV=()   # backend knobs as KEY=VAL, exported to the server process (step 6)
 case "$PROFILE" in
   nemo_rl)
@@ -151,6 +151,7 @@ IMAGE_PULL_SECRET="${IMAGE_PULL_SECRET:-}"   # non-empty only for private-regist
 SERVER_LOG="${SERVER_LOG:-/data/server1.log}"
 HF_TOKEN_FILE="${HF_TOKEN_FILE:-}"
 [ -z "$HF_TOKEN_FILE" ] && [ -s "$HOME/.cache/huggingface/token" ] && HF_TOKEN_FILE="$HOME/.cache/huggingface/token"
+[ -z "$HF_TOKEN_FILE" ] || [ -s "$HF_TOKEN_FILE" ] || { echo "ERROR: HF_TOKEN_FILE '$HF_TOKEN_FILE' is missing or empty"; exit 1; }
 API_KEY_FILE="${API_KEY_FILE:-}"
 if [ -n "$API_KEY_FILE" ]; then
   [ "$RUN_SERVER" = 1 ] || { echo "ERROR: API_KEY_FILE is set, and profile $PROFILE runs no server"; exit 1; }
@@ -452,7 +453,7 @@ echo "==> [3/6] copying code + token into target"
 CP "$TMP/code.tar.gz" /tmp/code.tar.gz
 CP "$SCRIPT_DIR/lib/setup_container.sh" /tmp/setup_container.sh
 if [ -n "$HF_TOKEN_FILE" ]; then
-  CP "$HF_TOKEN_FILE" "$HF_TOKEN_POD_FILE"
+  secret_write "$HF_TOKEN_FILE" "$HF_TOKEN_POD_FILE"
 fi
 if [ "$RUN_SERVER" = 1 ]; then
   EX "$HF_TOKEN_CHECK" || {
