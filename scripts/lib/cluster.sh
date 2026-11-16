@@ -35,8 +35,8 @@ kx() {
 }
 EX() { kubectl -n "$NS" exec "$POD" -- bash -c "$(pod_cmd "$1")"; }
 EX_TIMEOUT() { timeout "$1" kubectl -n "$NS" exec "$POD" -- bash -c "$(pod_cmd "$2")" || true; }
-# EX_STDIN: EX with this shell's stdin as the pod command's. The pod command then creates the
-# file itself, owner-only and in one rename; a copied file would carry the local file's mode.
+# EX_STDIN: EX with this shell's stdin as the pod command's, so a pod command can create a file
+# from it under its own umask.
 EX_STDIN() { kubectl -n "$NS" exec -i "$POD" -- bash -c "$(pod_cmd "$1")"; }
 # wait_rc <rc file> <pgrep -f pattern> <seconds>: wait for a detached run on $POD that writes its
 # exit status to <rc file> as its last act. Prints the status and returns 0 once the file holds
@@ -102,6 +102,8 @@ HF_TOKEN_CHECK="[ -s $HF_TOKEN_POD_FILE ] || { echo 'ERROR: $HF_TOKEN_POD_FILE i
 # file (API_KEY_FILE on the deploy and the rotate). The key then lives in the pod file below,
 # owner-only, and later boots keep it. It is never a KEY=VAL: that would put it on kubectl's
 # command line. This block is the one place in the scripts that knows the path.
+# The file is the only record that a target has an operator key. A target recreated on an empty
+# /data has none and boots on the dev key: give API_KEY_FILE again with that deploy.
 # DEV_API_KEY is training/config.py's value. The key file takes that module's comma list and is
 # stricter than its split_csv_setting: whitespace and an empty entry are refused, not stripped.
 DEV_API_KEY=tml-dev-key
@@ -126,14 +128,14 @@ api_key_file_check() {
     [ "$part" != "$DEV_API_KEY" ] || { echo "ERROR: API_KEY_FILE '$1' holds the dev key, which is public" >&2; return 1; }
   done <<< "$key,"
 }
-# api_key_ready [local file]: the key step before a running server is stopped. With a file:
-# checks it and writes it to the pod file through EX_STDIN (the caller's transport), saying so
-# when it replaced a kept key. Without one: fails unless the pod's own state gives a key.
+# api_key_ready [local file]: the key step before a running server is stopped. With a file,
+# one that api_key_file_check passed: writes it to the pod file through EX_STDIN (the caller's
+# transport), saying so when it replaced a kept key. Without one: fails unless the pod's own
+# state gives a key.
 # Call it last before the stop: with a file it replaces the key the next boot takes, so a stop
 # that then fails leaves the old server on the old key and the pod file on the new one.
 api_key_ready() {
   if [ -z "${1:-}" ]; then EX "$API_KEY_RESOLVE"; return; fi
-  api_key_file_check "$1" || return 1
   EX_STDIN "[ ! -e $API_KEY_POD_FILE ] || kept=1
 (umask 077; cat > $API_KEY_POD_FILE.new) && [ -s $API_KEY_POD_FILE.new ] && mv $API_KEY_POD_FILE.new $API_KEY_POD_FILE \\
   || { echo 'ERROR: could not write $API_KEY_POD_FILE'; rm -f $API_KEY_POD_FILE.new; exit 1; }

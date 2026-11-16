@@ -80,7 +80,7 @@ done
 # Sets per-profile DEFAULTS; every one is overridable by the same-named env var.
 # shellcheck source=scripts/lib/cluster.sh
 # shellcheck disable=SC1091  # sourced by path at run time: KUBECONFIG, NS, DEFAULT_NODE
-. "$SCRIPT_DIR/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE, require_tunnel, kx, EX, EX_TIMEOUT, pod_cmd, ray_head, TRUST_DOMAIN_LABEL, SERVER_PATTERN, SERVER_STOP, API_PORT, HF_TOKEN_POD_FILE, HF_TOKEN_CHECK, DEV_API_KEY, api_key_file_check, api_key_ready, server_boot, SERVER_BOOT_TIMEOUT, SERVER_HEALTH
+. "$SCRIPT_DIR/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE, require_tunnel, kx, EX, EX_TIMEOUT, pod_cmd, ray_head, TRUST_DOMAIN_LABEL, SERVER_PATTERN, SERVER_STOP, API_PORT, HF_TOKEN_POD_FILE, HF_TOKEN_CHECK, DEV_API_KEY, API_KEY_POD_FILE, api_key_file_check, api_key_ready, server_boot, SERVER_BOOT_TIMEOUT, SERVER_HEALTH
 BACKEND_ENV=()   # backend knobs as KEY=VAL, exported to the server process (step 6)
 case "$PROFILE" in
   nemo_rl)
@@ -209,6 +209,8 @@ if [ "$TARGET" = k8s ]; then
         echo "  recreate it: kubectl -n $NS delete pod $POD && POD=$POD GPUS=$gpus IMAGE=$image POD_MEMORY_LIMIT=$mem" \
              "${pvc:+DATA_PVC_SIZE=$pvc }${hf:+HF_CACHE_HOSTPATH=$hf }$0 --profile $PROFILE"
         [ -n "$pvc" ] || echo "  (its /data is an emptyDir: the recreate loses it)"
+        # shellcheck disable=SC2015  # a hint only: a dropped exec prints none
+        EX "[ -e $API_KEY_POD_FILE ]" 2> /dev/null && echo "  (it holds an operator API key: when the recreate loses $API_KEY_POD_FILE, add API_KEY_FILE=<file>)" || true
         exit 1 ;;
       esac
     done
