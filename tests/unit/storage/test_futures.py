@@ -1,8 +1,10 @@
 """FuturesStorage: one connection, payload never persisted, seq_id idempotency, legacy rebuild."""
 import sqlite3
+from datetime import datetime, timedelta
 
 import pytest
 
+from tinkercloud.training.storage import futures
 from tinkercloud.training.storage.futures import DuplicateSeqId, FuturesStorage
 
 
@@ -15,6 +17,19 @@ def store(tmp_path):
 
 def _payload(n):
     return {"model_id": "m", "forward_backward_input": {"data": [{"tokens": list(range(n))}]}}
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    class Clock:
+        now = datetime(2026, 1, 1, 12)
+
+        @classmethod
+        def utcnow(cls):
+            return cls.now
+
+    monkeypatch.setattr(futures, "datetime", Clock)
+    return Clock
 
 
 def test_payload_not_persisted(store, tmp_path):
@@ -102,6 +117,74 @@ def test_a_retry_after_cleanup_is_still_the_first_request(store):
     assert store.cleanup_old_futures(max_age_hours=0) == 0
     assert store.save_future("r2", "optim_step", _payload(3), model_id="m", seq_id=7) == first == "r1"
     assert store.get_future("r2") is None   # the retry filed no second row
+
+
+@pytest.mark.parametrize("cached", [True, False])
+def test_a_just_finished_future_survives_cleanup_and_a_resend(store, clock, cached):
+    first = store.save_future("r1", "optim_step", _payload(3), model_id="m", seq_id=7)
+    clock.now += timedelta(hours=4)
+    result = {"metrics": {"grad_norm": 1.0}}
+    assert store.update_status(first, "completed", result)
+    if not cached:
+        store._cache.clear()
+
+    removed = store.cleanup_old_futures(max_age_hours=3)
+    assert store.save_future("r2", "optim_step", _payload(3), model_id="m", seq_id=7) == first
+    assert removed == 0
+    assert store.get_stats()["in_memory"] == int(cached)
+    assert store.get_future(first)["result"] == result
+    assert store.get_future("r2") is None
+    with pytest.raises(DuplicateSeqId, match="different payload"):
+        store.save_future("r3", "optim_step", _payload(4), model_id="m", seq_id=7)
+
+
+@pytest.mark.parametrize("cached", [True, False])
+def test_cleanup_removes_old_finished_futures_but_keeps_newly_finished_ones(store, clock, cached):
+    store.save_future("old", "optim_step", {}, model_id="old-model", seq_id=1)
+    store.save_future("recent", "optim_step", {}, model_id="recent-model", seq_id=1)
+    store.save_future("pending", "load_weights", {"p": 1}, model_id="s:train:0", seq_id=0)
+    clock.now += timedelta(hours=26)
+    assert store.update_status("old", "completed", {"ok": True})
+    clock.now += timedelta(hours=4)
+    assert store.update_status("recent", "completed", {"ok": True})
+    if not cached:
+        store._cache.clear()
+
+    assert store.cleanup_old_futures(max_age_hours=3) == 1
+    assert store.get_stats()["in_memory"] == (2 if cached else 0)
+    assert store.get_future("old") is None
+    assert store.filed("old-model", 1, "optim_step", {}) is None
+    assert store.get_future("recent")["result"] == {"ok": True}
+    assert store.filed("s:train:0", 0, "load_weights", {"p": 1}).request_id == "pending"
+    assert store.cleanup_old_futures(max_age_hours=3) == 0
+
+
+@pytest.mark.parametrize("cached", [True, False])
+def test_a_30_hour_operation_keeps_its_result_after_default_cleanup(store, clock, cached):
+    store.save_future("long", "forward_backward", _payload(3), model_id="m", seq_id=7)
+    clock.now += timedelta(hours=30)
+    result = {"metrics": {"loss": 0.5}}
+    assert store.update_status("long", "completed", result)
+    if not cached:
+        store._cache.clear()
+
+    assert store.cleanup_old_futures() == 0
+    assert store.get_stats()["in_memory"] == int(cached)
+    assert store.get_future("long")["result"] == result
+    assert store.save_future("retry", "forward_backward", _payload(3), model_id="m", seq_id=7) == "long"
+
+
+@pytest.mark.parametrize("status", ["completed", "failed"])
+def test_cleanup_keeps_a_finished_future_at_the_exact_age_boundary(store, clock, status):
+    store.save_future("r1", "optim_step", {}, model_id="m", seq_id=7)
+    assert store.update_status("r1", status, {"ok": status == "completed"})
+    clock.now += timedelta(hours=3)
+    assert store.cleanup_old_futures(max_age_hours=3) == 0
+    assert store.get_future("r1")["status"] == status
+    clock.now += timedelta(microseconds=1)
+    assert store.cleanup_old_futures(max_age_hours=3) == 1
+    assert store.get_stats()["in_memory"] == 0
+    assert store.get_future("r1") is None
 
 
 def test_filed_returns_the_status_and_the_failed_create_mark_with_the_id(store):

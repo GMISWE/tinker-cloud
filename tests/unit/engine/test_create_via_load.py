@@ -3,14 +3,26 @@ answered with the first one's future, while that create is held in the queue and
 backend creates the model once; another load naming the model is refused."""
 import http.server
 import socketserver
+import sqlite3
 import threading
 import time
+from contextlib import closing
+from datetime import datetime, timedelta, timezone
 
 from .support import SOURCE, done as _done, engine as _engine, traced
 
 
 def _creates(tmp):
     return traced(tmp, "create_model")
+
+
+def _age_future(tmp, request_id):
+    """Age the scratch SQLite row so the engine's cleanup at the allowed minimum reaches it."""
+    old = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=4)).isoformat()
+    with closing(sqlite3.connect(tmp / "meta" / "futures.db")) as conn:
+        assert conn.execute("UPDATE futures SET created_at = ?, updated_at = ? WHERE request_id = ?",
+                            (old, old, request_id)).rowcount == 1
+        conn.commit()
 
 
 def test_a_retried_create_via_load_is_the_first_requests_future(tmp_path):
@@ -112,7 +124,9 @@ def test_a_resend_after_a_cleanup_of_futures_is_still_the_first_request(tmp_path
         hold.touch()
         first = c.post("/api/v1/load_weights", json=load)
         assert first.status_code == 200, first.text
-        assert c.post("/api/v1/cleanup_futures", json={"max_age_hours": 0}).status_code == 200
+        _age_future(tmp_path, first.json()["request_id"])
+        cleanup = c.post("/api/v1/cleanup_futures", json={"max_age_hours": 3})
+        assert cleanup.status_code == 200 and cleanup.json()["futures_cleaned"] == 0, cleanup.text
         retry = c.post("/api/v1/load_weights", json=load)
         assert retry.status_code == 200 and retry.json() == first.json(), retry.text
         hold.unlink()
@@ -155,9 +169,12 @@ def test_a_resend_after_delete_and_a_cleanup_of_futures_is_refused_naming_the_de
     created the deleted model again."""
     with _engine(tmp_path) as (c, path):
         load = {"session_id": "s", "model_seq_id": 1, "path": path, "optimizer": False}
-        _done(c, c.post("/api/v1/load_weights", json=load))
+        first = c.post("/api/v1/load_weights", json=load)
+        _done(c, first)
         assert c.post("/api/v1/delete_model", json={"model_id": "s:train:1"}).status_code == 200
-        assert c.post("/api/v1/cleanup_futures", json={"max_age_hours": 0}).status_code == 200
+        _age_future(tmp_path, first.json()["request_id"])
+        cleanup = c.post("/api/v1/cleanup_futures", json={"max_age_hours": 3})
+        assert cleanup.status_code == 200 and cleanup.json()["futures_cleaned"] == 1, cleanup.text
         retry = c.post("/api/v1/load_weights", json=load)
         assert retry.status_code == 400 and "was deleted" in retry.json()["error"], retry.text
     assert _creates(tmp_path) == [SOURCE, "s:train:1"]

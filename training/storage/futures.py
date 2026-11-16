@@ -299,13 +299,13 @@ class FuturesStorage:
         return row is not None
 
     def cleanup_old_futures(self, max_age_hours: int = 24) -> int:
-        """Delete finished futures created more than `max_age_hours` ago; returns the count. A pending
-        one stays: its operation still runs, and a create-via-load resend is matched against it."""
+        """Delete futures finished more than `max_age_hours` ago, using `updated_at`; returns the count.
+        Pending ones stay. A newly finished result and its seq_id must survive the client's retries."""
         cutoff = (datetime.utcnow() - timedelta(hours=max_age_hours)).isoformat()
         with self._lock:
-            for rid in [r for r, f in self._cache.items() if f["created_at"] < cutoff and f["status"] != "pending"]:
+            for rid in [r for r, f in self._cache.items() if f["updated_at"] < cutoff and f["status"] != "pending"]:
                 del self._cache[rid]
-            removed = self._conn.execute("DELETE FROM futures WHERE created_at < ? AND status != 'pending'",
+            removed = self._conn.execute("DELETE FROM futures WHERE updated_at < ? AND status != 'pending'",
                                          (cutoff,)).rowcount
         if removed:
             logger.info("Cleaned up %d futures older than %dh", removed, max_age_hours)
