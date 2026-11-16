@@ -102,7 +102,7 @@ class _SparseRoom:
 
 
 def _frombuffer(buf: bytes, numpy_dtype: Any, what: str) -> np.ndarray:
-    """Decode a raw byte buffer as `numpy_dtype`, turning a truncated tail into WireError."""
+    """The buffer as an array of `numpy_dtype`; WireError when it is not a whole number of items."""
     try:
         return np.frombuffer(buf, dtype=numpy_dtype)
     except ValueError as e:
@@ -137,8 +137,10 @@ def _dense_from_csr(name: str, tensor: pb.Tensor, numpy_dtype, room: _SparseRoom
     Raises:
         WireError: the message is not a valid CSR for its shape, or its dense form does not fit in `room`.
     """
+    what = f"loss_fn_inputs[{name!r}]: sparse tensor"
+
     def refuse(why: str) -> WireError:
-        return WireError(f"loss_fn_inputs[{name!r}]: sparse tensor {why}")
+        return WireError(f"{what} {why}")
 
     shape = list(tensor.shape)
     if len(shape) != 2 or min(shape) < 0:
@@ -146,12 +148,9 @@ def _dense_from_csr(name: str, tensor: pb.Tensor, numpy_dtype, room: _SparseRoom
     rows, cols = shape
     room.take(name, shape, rows * cols * np.dtype(numpy_dtype).itemsize)
     csr = tensor.sparse_csr
-    try:
-        values = np.frombuffer(csr.values, dtype=numpy_dtype)
-        crow = np.frombuffer(csr.crow_indices, dtype=np.int64)
-        col = np.frombuffer(csr.col_indices, dtype=np.int64)
-    except ValueError as e:   # a buffer that is not a whole number of items
-        raise refuse(f"has a truncated buffer: {e}") from None
+    values = _frombuffer(csr.values, numpy_dtype, what)
+    crow = _frombuffer(csr.crow_indices, np.int64, what)
+    col = _frombuffer(csr.col_indices, np.int64, what)
     per_row = np.diff(crow)
     if crow.size != rows + 1 or crow[0] != 0 or (per_row < 0).any():
         raise refuse(f"needs {rows + 1} non-decreasing row pointers from 0, got {crow.size}")

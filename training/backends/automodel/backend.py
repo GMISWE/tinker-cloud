@@ -125,6 +125,13 @@ def adapter_dir(handle: AutomodelHandle, version: int) -> Path:
     return handle.native_root / ADAPTERS_DIRNAME / f"v{version}"
 
 
+async def _load_tokenizer(base_model: str) -> Any:
+    """The base model's tokenizer. Its repository code runs only for a model the operator listed."""
+    from transformers import AutoTokenizer   # the training env's transformers
+    return await asyncio.to_thread(
+        AutoTokenizer.from_pretrained, base_model, trust_remote_code=remote_code_trusted(base_model))
+
+
 class AutomodelBackend(TrainingBackend[AutomodelHandle]):
     needs_ray = True
     config: AutomodelConfig
@@ -202,9 +209,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
                 group = await self._open_group(key, base_model, lora, model_id, seed, request_id)
 
         try:
-            from transformers import AutoTokenizer   # the training env's transformers
-            tokenizer = await asyncio.to_thread(
-                AutoTokenizer.from_pretrained, base_model, trust_remote_code=remote_code_trusted(base_model))
+            tokenizer = await _load_tokenizer(base_model)
             sampler = await self._sampler_for(base_model, context_length, sampler_rank, request_id)
         except BaseException:   # a failed create cleans up what it started (R5)
             await self._drop_tenant(key, model_id, "create_model", f"create_model of {model_id} failed")
@@ -459,9 +464,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
             raw = await asyncio.to_thread(read_raw_hf_config, base_model)
             context_length = model_context_length(raw)
             rank = vllm_lora_rank(self.config.max_lora_rank * vllm_rank_factor(raw))
-            from transformers import AutoTokenizer   # the training env's transformers
-            tokenizer = await asyncio.to_thread(
-                AutoTokenizer.from_pretrained, base_model, trust_remote_code=remote_code_trusted(base_model))
+            tokenizer = await _load_tokenizer(base_model)
             self._sweep_once()
             sampler = await self._sampler_for(base_model, context_length, rank, key)
             sampler.tenants.add(key)

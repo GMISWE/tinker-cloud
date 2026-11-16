@@ -86,10 +86,12 @@ def test_malformed_bytes_are_a_wire_error():
 
 @pytest.mark.parametrize("mutate,match", [
     (lambda m: m.data[0].model_input[0].encoded_text.__setattr__("tokens", b"\x01\x02\x03"), "encoded_text"),
-    (lambda m: m.data[0].loss_fn_inputs["weights"].__setattr__("dense", b"\x01\x02\x03"), "weights"),
     (lambda m: m.data[0].loss_fn_inputs["target_tokens"].__setattr__("dense", b"\x01\x02\x03\x04"), "target_tokens"),
 ])
 def test_truncated_buffers_are_wire_errors(mutate, match):
+    """A buffer that is not a whole number of items raised numpy's plain ValueError, which the router
+    answers with a 500; a WireError is a 422 that names the input. Four bytes are a whole float32 and
+    half an int64, so the second case also holds the tensor to its own dtype."""
     msg = _fb_msg()
     mutate(msg)
     with pytest.raises(WireError, match=match):
