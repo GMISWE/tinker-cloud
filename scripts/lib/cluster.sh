@@ -115,7 +115,7 @@ API_KEY_VALID='[[ $api_key =~ ^[^[:space:]]+$ && ",$api_key," != *,,* && ",$api_
 API_KEY_RULE="one line without whitespace, no empty entry in a comma list, not the dev key"
 # The pod command that sets api_key to the key the next boot takes and prints its source; it
 # fails on a key file that holds no operator key. server_boot's command runs it and exports
-# api_key; api_key_ready runs it for its verdict alone.
+# TINKER_API_KEY from api_key; api_key_ready runs it for its verdict alone.
 API_KEY_RESOLVE="if [ -e $API_KEY_POD_FILE ]; then
   api_key=\$(cat $API_KEY_POD_FILE) && $API_KEY_VALID || { echo 'ERROR: $API_KEY_POD_FILE holds no operator key ($API_KEY_RULE)'; exit 1; }
   echo '    API key: the operator key in $API_KEY_POD_FILE'
