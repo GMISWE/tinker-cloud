@@ -242,10 +242,15 @@ class CancelFutureRequest(BaseModel):
     """Cancel an in-flight sample the SDK has abandaned."""
     request_id: str = Field(..., description="Sample request to cancel")
 
-class CleanupFuturesRequest(BaseModel):
-    """Request to cleanup old futures."""
+# The SDK gives up after 120 minutes without progress; retain finished futures above that window.
+MIN_CLEANUP_AGE_HOURS = 3
 
-    max_age_hours: int = Field(default=24, ge=0, description="Maximum age in hours")
+
+class CleanupFuturesRequest(BaseModel):
+    """Request to clean up futures aged from their last status update."""
+
+    max_age_hours: int = Field(default=24, ge=MIN_CLEANUP_AGE_HOURS,
+                               description="Finished future retention in hours after the last status update")
 
 
 class TelemetryRequest(BaseModel):
