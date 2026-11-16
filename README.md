@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/tinkercloud-wordmark.svg" alt="TinkerCloud" width="560"></p>
+<p align="center"><img src="docs/tinkercloud-wordmark.svg" alt="TinkerCloud" width="720"></p>
 
 An open training server for the [Tinker](https://thinkingmachines.ai/tinker/) API. Training loops
 written against the Tinker SDK (RL, SFT, DPO, distillation) run unchanged on your own GPUs, on the
