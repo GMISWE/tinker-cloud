@@ -45,6 +45,9 @@ class _Workers:
     def release_cached_memory(self):
         pass
 
+    def pass_memory(self):
+        return [{"gpu_allocated_peak_bytes": 1, "gpu_reserved_peak_bytes": 2, "gpu_device_used_bytes": 3}]
+
 
 class _Sampler:
     """The sampler's two sides: the checkpoint manager that sleeps and wakes it, and its client."""

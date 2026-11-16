@@ -33,10 +33,11 @@ import threading
 from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 import torch
 
+from ..common import gpu_memory
 from ..base import BackendError, BackendHandle, SampleRequestError, TrainingBackend, UnsupportedFeatureError
 from ...utils.model_config import read_raw_hf_config
 from ..objectives import classification_spec
@@ -273,9 +274,10 @@ class VerlBackend(TrainingBackend[VerlHandle]):
                 async with self._worker_calls(handle, "forward_backward"):
                     await asyncio.to_thread(self._ensure_loss_fn, handle, loss_fn)
                     out = await asyncio.to_thread(_wg_call, handle.worker_group.forward_backward, td)
+                    memory = await asyncio.to_thread(_pass_memory, handle.worker_group)
                 logprobs = await asyncio.to_thread(padded_logprobs, out, td)
                 loss_fn_outputs = self.converter.extract_logprobs(logprobs, data)
-                metrics = _scalar_metrics(out)
+                metrics = {**_scalar_metrics(out), **memory}
                 return {
                     "loss_fn_output_type": loss_fn,
                     "loss_fn_outputs": loss_fn_outputs,
@@ -325,14 +327,19 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         loss_fn: str,
         loss_fn_config: Optional[Dict[str, float]] = None,
     ) -> Dict[str, Any]:
-        logprobs = await self.get_logprobs(handle, data)
-        return {"loss_fn_output_type": loss_fn, "loss_fn_outputs": logprobs, "metrics": {}}
+        logprobs, memory = await self._score(handle, data)
+        return {"loss_fn_output_type": loss_fn, "loss_fn_outputs": logprobs, "metrics": memory}
 
     async def get_logprobs(
         self,
         handle: VerlHandle,
         data: List[Datum],
     ) -> List[Any]:
+        logprobs, _ = await self._score(handle, data)
+        return logprobs
+
+    async def _score(self, handle: VerlHandle, data: List[Datum]) -> Tuple[List[Any], Dict[str, int]]:
+        """One forward-only pass: the logprobs of `data` and the pass's GPU memory (`_pass_memory`)."""
         async with handle._lock, self._pass(handle, "get_logprobs"):
             try:
                 td = await asyncio.to_thread(self._to_tensordict, handle, data, "cross_entropy", True)
@@ -341,10 +348,11 @@ class VerlBackend(TrainingBackend[VerlHandle]):
                     # [N, K] targets need, is the installed loss function
                     await asyncio.to_thread(self._ensure_loss_fn, handle, "cross_entropy")
                     out = await asyncio.to_thread(_wg_call, handle.worker_group.compute_log_prob, td)
+                    memory = await asyncio.to_thread(_pass_memory, handle.worker_group)
                     # a forward-only model would otherwise hold its pass's memory while another trains
                     await asyncio.to_thread(handle.worker_group.release_cached_memory)
                 logprobs = await asyncio.to_thread(padded_logprobs, out, td)
-                return self.converter.extract_logprobs(logprobs, data)
+                return self.converter.extract_logprobs(logprobs, data), memory
             except BackendError:
                 raise
             except Exception as e:
@@ -817,6 +825,12 @@ def _wg_call(method, td):
     if not isinstance(out, TensorDictBase) and hasattr(out, "get"):
         out = out.get()
     return out
+
+
+def _pass_memory(worker_group) -> Dict[str, int]:
+    """The ranks' GPU memory for the pass that has just returned, as the pass's metrics
+    (`ModelWorker.pass_memory`, `common/gpu_memory.py`)."""
+    return gpu_memory.largest_over_ranks(worker_group.pass_memory())
 
 
 def _wg_scalar_call(method, *args):

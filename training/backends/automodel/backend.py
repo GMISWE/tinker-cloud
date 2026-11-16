@@ -57,6 +57,7 @@ from ...core.loss_registry import clip_thresholds
 from ...models.requests import Datum, LoraConfig, OptimParams
 from ...utils.model_config import model_context_length, read_raw_hf_config, remote_code_trusted
 from ..base import BackendError, BackendHandle, TrainingBackend, UnsupportedFeatureError
+from ..common import gpu_memory
 from ..common.sampling.generation import sample_over_http
 from ..common.sampling.vllm_client import VllmLoraClient
 from ..common.scheduler import GroupScheduler, PassKey, pass_key
@@ -693,14 +694,14 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
 
 def _per_request(batch: Batch, outs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Rank outputs, in rank order -> one result per request of the batch.
-    The swap and the ranks' memory served the whole pass, so every request reports them:
-    each of a rank's `memory` readings as `<name>:max`, the largest over the ranks."""
+    The swap and the ranks' memory served the whole pass, so every request reports them
+    (the memory as `common/gpu_memory.py` reduces it)."""
     keys = ("row_loss", "logprobs", "elementwise", "clamped")
     if batch.loss_fn is LossFn.GSPO:
         keys += ("seq_log_ratio", "seq_clipped")
     cat = {k: torch.cat([o[k] for o in outs]) for k in keys}
     swap = _swap_seconds(outs)
-    memory = {f"{name}:max": max(o["memory"][name] for o in outs) for name in outs[0]["memory"]}
+    memory = gpu_memory.largest_over_ranks([o["memory"] for o in outs])
     losses = row_sums(batch, cat["row_loss"])
     clamped = row_sums(batch, cat["clamped"])
     logprobs = split_rows(batch, cat["logprobs"])
