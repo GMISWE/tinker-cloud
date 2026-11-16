@@ -4,6 +4,7 @@
 #
 #   pod_rotate_server.sh <server-log-basename> [KEY=VAL ...]
 #   ENV_FILE=<file> pod_rotate_server.sh <log>   (KEY=VAL lines, # comments; arguments win)
+#   API_KEY_FILE=<file> pod_rotate_server.sh <log>   (the server's API key from now on; lib/cluster.sh)
 #
 # e.g. pod_rotate_server.sh q4b_S_guard_server \
 #        TINKERCLOUD_MILES_MULTILORA_SLOTS=8 TINKERCLOUD_MILES_COBATCH_MAX_SAMPLES=2048
@@ -24,7 +25,7 @@ fi
 EXTRA_ENV+=("$@")
 
 # shellcheck source=scripts/lib/cluster.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, require_tunnel, EX, EX_TIMEOUT, ray_head, SERVER_STOP, API_PORT, HF_TOKEN_POD_FILE, HF_TOKEN_CHECK, server_boot, SERVER_BOOT_TIMEOUT, SERVER_HEALTH
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cluster.sh"   # KUBECONFIG, NS, require_tunnel, EX, EX_TIMEOUT, ray_head, SERVER_STOP, API_PORT, EX_STDIN, HF_TOKEN_POD_FILE, HF_TOKEN_CHECK, api_key_ready, server_boot, SERVER_BOOT_TIMEOUT, SERVER_HEALTH
 require_tunnel
 # no defaults: a default pod or backend boots the wrong server on the right pod
 POD="${POD:?set POD (scripts/pod_state.sh lists the pods)}"
@@ -37,6 +38,7 @@ SERVER_LOG="/data/${LOG_NAME}.log"
 # 0. refuse bad input while the running server still serves
 BOOT_CMD=$(server_boot "$GPUS" "$BACKEND" "$SERVER_LOG" "${EXTRA_ENV[@]}")
 EX "$HF_TOKEN_CHECK" || { echo "ERROR: no boot without a non-empty $HF_TOKEN_POD_FILE on $POD (or the exec failed)"; exit 1; }
+api_key_ready "${API_KEY_FILE:-}"
 
 # 1. kill the server (own exec)
 echo "==> killing server"
