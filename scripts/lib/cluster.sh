@@ -128,14 +128,14 @@ api_key_file_check() {
   api_key=$(cat "$1")
   eval "$API_KEY_VALID" || { echo "ERROR: API_KEY_FILE '$1' holds no operator key ($API_KEY_RULE)" >&2; return 1; }
 }
-# api_key_ready [local file]: the key step before a running server is stopped. With a file,
-# one that api_key_file_check passed: writes it to the pod file through EX_STDIN (the caller's
-# transport), saying so when it replaced a kept key. Without one: fails unless the pod's own
-# state gives a key.
+# api_key_ready [local file]: the key step before a running server is stopped. With a file:
+# checks it, then writes it to the pod file through EX_STDIN (the caller's transport), saying so
+# when it replaced a kept key. Without one: fails unless the pod's own state gives a key.
 # Call it last before the stop: with a file it replaces the key the next boot takes, so a stop
 # that then fails leaves the old server on the old key and the pod file on the new one.
 api_key_ready() {
   if [ -z "${1:-}" ]; then EX "$API_KEY_RESOLVE"; return; fi
+  api_key_file_check "$1" || return 1
   EX_STDIN "[ ! -e $API_KEY_POD_FILE ] || kept=1
 (umask 077; cat > $API_KEY_POD_FILE.new) && [ -s $API_KEY_POD_FILE.new ] && mv $API_KEY_POD_FILE.new $API_KEY_POD_FILE \\
   || { echo 'ERROR: could not write $API_KEY_POD_FILE'; rm -f $API_KEY_POD_FILE.new; exit 1; }
