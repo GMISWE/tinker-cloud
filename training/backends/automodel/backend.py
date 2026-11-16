@@ -689,12 +689,14 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
 
 def _per_request(batch: Batch, outs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Rank outputs, in rank order -> one result per request of the batch.
-    The swap served the whole pass, so every request reports it."""
+    The swap and the ranks' memory served the whole pass, so every request reports them:
+    each of a rank's `memory` readings as `<name>:max`, the largest over the ranks."""
     keys = ("row_loss", "logprobs", "elementwise", "clamped")
     if batch.loss_fn is LossFn.GSPO:
         keys += ("seq_log_ratio", "seq_clipped")
     cat = {k: torch.cat([o[k] for o in outs]) for k in keys}
     swap = _swap_seconds(outs)
+    memory = {f"{name}:max": max(o["memory"][name] for o in outs) for name in outs[0]["memory"]}
     losses = row_sums(batch, cat["row_loss"])
     clamped = row_sums(batch, cat["clamped"])
     logprobs = split_rows(batch, cat["logprobs"])
@@ -703,7 +705,8 @@ def _per_request(batch: Batch, outs: List[Dict[str, Any]]) -> List[Dict[str, Any
     for i, (start, end) in enumerate(batch.request_rows):
         outputs = [{"logprobs": _tensor(lp), "elementwise_loss": _tensor(el)}
                    for lp, el in zip(logprobs[i], elementwise[i])]
-        metrics: Dict[str, Any] = {"loss:sum": losses[i], "clamped_positions:sum": int(clamped[i]), "swap_seconds:max": swap}
+        metrics: Dict[str, Any] = {"loss:sum": losses[i], "clamped_positions:sum": int(clamped[i]), "swap_seconds:max": swap,
+                                   **memory}
         if batch.loss_fn is LossFn.GSPO:   # Tinker's gspo diagnostics: means over the request's sequences
             metrics["gspo_sequence_log_ratio:mean"] = float(cat["seq_log_ratio"][start:end].mean())
             metrics["gspo_clipped_fraction:mean"] = float(cat["seq_clipped"][start:end].mean())

@@ -138,7 +138,8 @@ def test_lifecycle_through_the_backend(caplog, tmp_path):
             assert a["loss"] > 0 and b["loss"] > 0
             assert [o["logprobs"]["shape"] for o in a["loss_fn_outputs"]] == [[37], [64], [5]]
             assert all(v <= 0 for o in a["loss_fn_outputs"] for v in o["logprobs"]["data"])
-            assert a["metrics"] == {"loss:sum": a["loss"], "clamped_positions:sum": 0, "swap_seconds:max": 0.0}, \
+            without_memory = {k: v for k, v in a["metrics"].items() if not k.startswith("gpu_")}   # those keys: test_automodel_pass_memory.py
+            assert without_memory == {"loss:sum": a["loss"], "clamped_positions:sum": 0, "swap_seconds:max": 0.0}, \
                 "m was swapped in by at_init's forward; the passes behind it swap nothing"
 
             step = await backend.apply_optimizer_step(handle, AdamParams(learning_rate=1e-3, **ADAM))
