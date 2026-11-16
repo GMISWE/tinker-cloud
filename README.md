@@ -41,7 +41,7 @@ One server process serves one backend. Each implements the same `TrainingBackend
 | `automodel` | NeMo Automodel, FSDP2 | LoRA: many tenants per training group | AdamW and a Muon-family optimizer; one vLLM per base model |
 | `verl` | verl, FSDP | Full fine-tuning; per-candidate `cross_entropy` | Multi-teacher distillation: see [verl backend](#verl-backend) |
 | `miles` | Miles on Megatron | `cross_entropy`, `importance_sampling`, `ppo` | A pool of LoRA adapters per base model |
-| `megatron_bridge` | Megatron-Bridge | `cross_entropy`, `classification_ce` (sequence classification) | |
+| `megatron_bridge` | Megatron-Bridge | `cross_entropy`, `classification_ce` (sequence classification) | Experimental |
 | `fake` | none (CPU) | Deterministic stand-in | Runs the protocol suite without a GPU |
 
 ## Quickstart (NeMo RL)
