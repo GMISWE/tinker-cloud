@@ -7,6 +7,7 @@ Design: specs/007-q5-migration/HANDOFF.md §2.1.
 """
 import json
 import os
+import sys
 
 import pytest
 import torch
@@ -83,6 +84,34 @@ class TestPeftKeyNormalization:
         ci.export_hf_adapter(src, root)
         keys = list(load_file(os.path.join(root, ci.HF_ADAPTER_DIRNAME, ci.ADAPTER_WEIGHTS_FILE)))
         assert keys == [ci.PEFT_PREFIX + BARE_KEY]   # not double-prefixed
+
+
+    def test_missing_safetensors_fails_instead_of_publishing_unnormalized_weights(self, tmp_path, monkeypatch):
+        src = _write_adapter(str(tmp_path / "src"))
+        root = str(tmp_path / "ckpt")
+        monkeypatch.setitem(sys.modules, "safetensors.torch", None)
+
+        with pytest.raises(ImportError, match="safetensors"):
+            ci.export_hf_adapter(src, root)
+        assert ci.find_hf_adapter(root) is None
+        assert not os.path.exists(ci.hf_adapter_dir(root))
+
+
+    def test_missing_safetensors_preserves_the_previously_published_adapter(self, tmp_path, monkeypatch):
+        src = _write_adapter(str(tmp_path / "src"))
+        root = str(tmp_path / "ckpt")
+        ci.export_hf_adapter(src, root)
+        weights = os.path.join(ci.hf_adapter_dir(root), ci.ADAPTER_WEIGHTS_FILE)
+        with open(weights, "rb") as f:
+            published = f.read()
+        _write_adapter(src, value=2.0)
+        monkeypatch.setitem(sys.modules, "safetensors.torch", None)
+
+        with pytest.raises(ImportError, match="safetensors"):
+            ci.export_hf_adapter(src, root)
+        with open(weights, "rb") as f:
+            assert f.read() == published
+        assert list(load_file(weights)) == [ci.PEFT_PREFIX + BARE_KEY]
 
 
 if __name__ == "__main__":
