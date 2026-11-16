@@ -154,7 +154,7 @@ HF_TOKEN_FILE="${HF_TOKEN_FILE:-}"
 API_KEY_FILE="${API_KEY_FILE:-}"
 if [ -n "$API_KEY_FILE" ]; then
   [ "$RUN_SERVER" = 1 ] || { echo "ERROR: API_KEY_FILE is set, and profile $PROFILE runs no server"; exit 1; }
-  api_key_file_check "$API_KEY_FILE"
+  api_key_file_check "$API_KEY_FILE"   # refused here, before anything is created; api_key_ready checks again at the write
 fi
 # k8s: a host directory in HF_HOME layout (hub/models--...) mounted at
 # /data/.cache/huggingface, so weights outlive the pod and are shared by
