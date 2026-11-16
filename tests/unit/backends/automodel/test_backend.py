@@ -881,9 +881,9 @@ def test_a_base_model_the_sampler_cannot_boot_on_is_refused_at_the_check(tmp_pat
         asyncio.run(AutomodelBackend(overrides=CONFIG).check_base_model(str(tmp_path)))
 
 
-def test_create_and_base_sampler_forward_trust_remote_code(monkeypatch, tmp_path):
-    """AutoTokenizer.from_pretrained receives trust_remote_code=remote_code_trusted(base_model)
-    for both create_model and base_model_handle."""
+def test_only_an_operator_listed_model_loads_its_tokenizer_code(monkeypatch, tmp_path):
+    """A listed model whose tokenizer needs its repository code failed to load here, because both
+    tokenizer loads passed no trust flag; an unlisted model must still get False at both."""
     import sys
     import types
     from tinkercloud.training import config as cfg_mod
