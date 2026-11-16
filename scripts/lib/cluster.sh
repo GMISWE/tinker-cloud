@@ -35,6 +35,9 @@ kx() {
 }
 EX() { kubectl -n "$NS" exec "$POD" -- bash -c "$(pod_cmd "$1")"; }
 EX_TIMEOUT() { timeout "$1" kubectl -n "$NS" exec "$POD" -- bash -c "$(pod_cmd "$2")" || true; }
+# EX_STDIN: EX with this shell's stdin as the pod command's. The pod command then creates the
+# file itself, owner-only and in one rename; a copied file would carry the local file's mode.
+EX_STDIN() { kubectl -n "$NS" exec -i "$POD" -- bash -c "$(pod_cmd "$1")"; }
 # wait_rc <rc file> <pgrep -f pattern> <seconds>: wait for a detached run on $POD that writes its
 # exit status to <rc file> as its last act. Prints the status and returns 0 once the file holds
 # one. Returns 1 when the file is absent and no process matches the pattern: the run was killed and
@@ -95,6 +98,47 @@ SERVER_STOP="pkill -f '$SERVER_PATTERN'; sleep 8; pgrep -f '$SERVER_PATTERN' > /
 # that check still starts no server without a token.
 HF_TOKEN_POD_FILE=/tmp/hf_token.txt
 HF_TOKEN_CHECK="[ -s $HF_TOKEN_POD_FILE ] || { echo 'ERROR: $HF_TOKEN_POD_FILE is empty or missing'; exit 1; }"
+# The API key. A deployment runs on the public dev key unless its operator gives a key as a local
+# file (API_KEY_FILE on the deploy and the rotate). The key then lives in the pod file below,
+# owner-only, and later boots keep it. It is never a KEY=VAL: that would put it on kubectl's
+# command line. This block is the one place in the scripts that knows the path.
+# DEV_API_KEY is training/config.py's value. The key file takes that module's comma list and is
+# stricter than its split_csv_setting: whitespace and an empty entry are refused, not stripped.
+DEV_API_KEY=tml-dev-key
+API_KEY_POD_FILE=/data/tinkercloud_api_key
+# The pod command that sets api_key to the key the next boot takes and prints its source; it
+# fails on a key file whose content is not one line without whitespace. server_boot's command
+# runs it and exports api_key; api_key_ready runs it for its verdict alone.
+API_KEY_RESOLVE="if [ -e $API_KEY_POD_FILE ]; then
+  api_key=\$(cat $API_KEY_POD_FILE) && [[ \$api_key =~ ^[^[:space:]]+\$ ]] || { echo 'ERROR: $API_KEY_POD_FILE holds no key (one line without whitespace)'; exit 1; }
+  echo '    API key: the operator key in $API_KEY_POD_FILE'
+else api_key=$DEV_API_KEY; echo '    API key: the dev key (no $API_KEY_POD_FILE)'; fi"
+# api_key_file_check <local file>: refuses, on stderr, a file that cannot be an operator's key:
+# missing or empty, anything but one line without whitespace, an empty key in the comma list,
+# or the dev key in it.
+api_key_file_check() {
+  local key part
+  [ -s "$1" ] || { echo "ERROR: API_KEY_FILE '$1' is missing or empty" >&2; return 1; }
+  key=$(cat "$1")
+  [[ "$key" =~ ^[^[:space:]]+$ ]] || { echo "ERROR: API_KEY_FILE '$1' is not one line without whitespace" >&2; return 1; }
+  while IFS= read -r -d , part; do
+    [ -n "$part" ] || { echo "ERROR: API_KEY_FILE '$1' holds an empty key" >&2; return 1; }
+    [ "$part" != "$DEV_API_KEY" ] || { echo "ERROR: API_KEY_FILE '$1' holds the dev key, which is public" >&2; return 1; }
+  done <<< "$key,"
+}
+# api_key_ready [local file]: the key step before a running server is stopped. With a file:
+# checks it and writes it to the pod file through EX_STDIN (the caller's transport), saying so
+# when it replaced a kept key. Without one: fails unless the pod's own state gives a key.
+# Call it last before the stop: with a file it replaces the key the next boot takes, so a stop
+# that then fails leaves the old server on the old key and the pod file on the new one.
+api_key_ready() {
+  if [ -z "${1:-}" ]; then EX "$API_KEY_RESOLVE"; return; fi
+  api_key_file_check "$1" || return 1
+  EX_STDIN "[ ! -e $API_KEY_POD_FILE ] || kept=1
+(umask 077; cat > $API_KEY_POD_FILE.new) && [ -s $API_KEY_POD_FILE.new ] && mv $API_KEY_POD_FILE.new $API_KEY_POD_FILE \\
+  || { echo 'ERROR: could not write $API_KEY_POD_FILE'; rm -f $API_KEY_POD_FILE.new; exit 1; }
+[ -z \"\$kept\" ] || echo '    replaced the API key kept in $API_KEY_POD_FILE'" < "$1"
+}
 # The variables every server boot exports, in order (server_boot's case table holds each value).
 SERVER_BOOT_KEYS=" PYTHONPATH NUM_GPUS RAY_ADDRESS TRAINING_PORT HF_TOKEN HF_HOME TINKER_API_KEY TINKERCLOUD_BACKEND ALLOW_PARTIAL_BATCHES "
 # The bound on the boot's exec: the command detaches the server and returns after `sleep 2`.
@@ -103,12 +147,13 @@ SERVER_BOOT_TIMEOUT=30
 # server_boot <gpus> <backend> <log> [KEY=VAL ...]: prints the pod command that starts the API
 # server detached, with SERVER_BOOT_KEYS set and then each KEY=VAL quoted with %q, so a value
 # reaches the server unchanged. A KEY=VAL replaces a default (named on stderr), except
-# TRAINING_PORT, which is API_PORT above. Refused before anything is printed: TRAINING_PORT=...,
+# TRAINING_PORT, which is API_PORT above, and TINKER_API_KEY, which is the pod's key file or the dev
+# key. Refused before anything is printed: TRAINING_PORT=..., TINKER_API_KEY=...,
 # an argument that is not a plain KEY=VAL, and a <log> that is not an absolute path of plain
 # [A-Za-z0-9_./-] characters (callers read the log by its bare path). Run it under EX_TIMEOUT
 # $SERVER_BOOT_TIMEOUT and judge the launch by a fresh probe: EX_TIMEOUT drops the exec's exit.
 server_boot() {
-  local gpus=$1 backend=$2 log=$3 kv key val cmd="$HF_TOKEN_CHECK"$'\n'
+  local gpus=$1 backend=$2 log=$3 kv key val cmd="$HF_TOKEN_CHECK"$'\n'"$API_KEY_RESOLVE"$'\n'
   shift 3
   [[ "$log" =~ ^/[A-Za-z0-9_./-]+$ ]] || { echo "ERROR: log path '$log' is not an absolute plain [A-Za-z0-9_./-] path" >&2; return 1; }
   for key in $SERVER_BOOT_KEYS; do
@@ -119,7 +164,7 @@ server_boot() {
       TRAINING_PORT) val=$API_PORT ;;
       HF_TOKEN) val="\$(cat $HF_TOKEN_POD_FILE)" ;;
       HF_HOME) val=/data/.cache/huggingface ;;
-      TINKER_API_KEY) val=tml-dev-key ;;
+      TINKER_API_KEY) val=\$api_key ;;
       TINKERCLOUD_BACKEND) val=$(printf '%q' "$backend") ;;
       ALLOW_PARTIAL_BATCHES) val=true ;;
       *) echo "ERROR: SERVER_BOOT_KEYS names $key, which has no default" >&2; return 1 ;;
@@ -133,6 +178,9 @@ server_boot() {
     fi
     if [ "$key" = TRAINING_PORT ]; then
       echo "ERROR: '$kv': the port is API_PORT in lib/cluster.sh, not a KEY=VAL" >&2; return 1
+    fi
+    if [ "$key" = TINKER_API_KEY ]; then
+      echo "ERROR: TINKER_API_KEY is no KEY=VAL (it would be on a command line): give the key as API_KEY_FILE=<file>" >&2; return 1
     fi
     [[ "$SERVER_BOOT_KEYS" == *" $key "* ]] && echo "==> $key=... replaces the default $key" >&2
     cmd+="export $key=$(printf '%q' "${kv#*=}")"$'\n'

@@ -54,6 +54,8 @@
 # HF token: HF_TOKEN_FILE=<path>, copied into the target as HF_TOKEN_POD_FILE (lib/cluster.sh).
 # Unset, it is huggingface_hub's own token file when one exists; otherwise the
 # target's existing HF_TOKEN_POD_FILE is reused (--code-only only).
+# API key: API_KEY_FILE=<path> makes that file's key the server's (lib/cluster.sh). Unset, the
+# target keeps the key an earlier deploy or rotate gave it; a target that has none runs on the dev key.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -78,7 +80,7 @@ done
 # Sets per-profile DEFAULTS; every one is overridable by the same-named env var.
 # shellcheck source=scripts/lib/cluster.sh
 # shellcheck disable=SC1091  # sourced by path at run time: KUBECONFIG, NS, DEFAULT_NODE
-. "$SCRIPT_DIR/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE, require_tunnel, kx, EX, EX_TIMEOUT, pod_cmd, ray_head, TRUST_DOMAIN_LABEL, SERVER_PATTERN, SERVER_STOP, API_PORT, HF_TOKEN_POD_FILE, HF_TOKEN_CHECK, server_boot, SERVER_BOOT_TIMEOUT, SERVER_HEALTH
+. "$SCRIPT_DIR/lib/cluster.sh"   # KUBECONFIG, NS, DEFAULT_NODE, require_tunnel, kx, EX, EX_TIMEOUT, pod_cmd, ray_head, TRUST_DOMAIN_LABEL, SERVER_PATTERN, SERVER_STOP, API_PORT, HF_TOKEN_POD_FILE, HF_TOKEN_CHECK, DEV_API_KEY, api_key_file_check, api_key_ready, server_boot, SERVER_BOOT_TIMEOUT, SERVER_HEALTH
 BACKEND_ENV=()   # backend knobs as KEY=VAL, exported to the server process (step 6)
 case "$PROFILE" in
   nemo_rl)
@@ -149,6 +151,11 @@ IMAGE_PULL_SECRET="${IMAGE_PULL_SECRET:-}"   # non-empty only for private-regist
 SERVER_LOG="${SERVER_LOG:-/data/server1.log}"
 HF_TOKEN_FILE="${HF_TOKEN_FILE:-}"
 [ -z "$HF_TOKEN_FILE" ] && [ -s "$HOME/.cache/huggingface/token" ] && HF_TOKEN_FILE="$HOME/.cache/huggingface/token"
+API_KEY_FILE="${API_KEY_FILE:-}"
+if [ -n "$API_KEY_FILE" ]; then
+  [ "$RUN_SERVER" = 1 ] || { echo "ERROR: API_KEY_FILE is set, and profile $PROFILE runs no server"; exit 1; }
+  api_key_file_check "$API_KEY_FILE"
+fi
 # k8s: a host directory in HF_HOME layout (hub/models--...) mounted at
 # /data/.cache/huggingface, so weights outlive the pod and are shared by
 # every pod on the node. Blank keeps the cache in the pod's emptyDir.
@@ -180,7 +187,7 @@ trap 'rm -rf "$TMP"' EXIT
 if [ "$TARGET" = k8s ]; then
   require_tunnel
   CP() { kubectl -n "$NS" cp "$1" "$POD:$2"; }
-  # EX, EX_TIMEOUT: lib/cluster.sh's
+  # EX, EX_TIMEOUT, EX_STDIN: lib/cluster.sh's
   # Capabilities the pod spec adds. Kubernetes fixes them at pod creation and
   # `kubectl apply` changes only the image, so an older pod keeps its old set.
   POD_CAPS="SYS_PTRACE"
@@ -213,6 +220,8 @@ elif [ "$TARGET" = docker ]; then
   EX() { $DOCKER exec "$CONTAINER" bash -c "$(pod_cmd "$1")"; }
   # shellcheck disable=SC2086
   EX_TIMEOUT() { timeout "$1" $DOCKER exec "$CONTAINER" bash -c "$(pod_cmd "$2")" || true; }
+  # shellcheck disable=SC2086
+  EX_STDIN() { $DOCKER exec -i "$CONTAINER" bash -c "$(pod_cmd "$1")"; }
 else
   echo "unknown --target $TARGET"; exit 1
 fi
@@ -307,7 +316,7 @@ spec:
     env:
     - {name: PYTHONUNBUFFERED, value: "1"}
     - {name: TOKENIZERS_PARALLELISM, value: "false"}
-    - {name: TINKER_API_KEY, value: tml-dev-key}
+    - {name: TINKER_API_KEY, value: $DEV_API_KEY}
     - {name: TINKERCLOUD_BACKEND, value: $BACKEND}
     - {name: ALLOW_PARTIAL_BATCHES, value: "true"}
     - {name: HF_HOME, value: /data/.cache/huggingface}
@@ -356,7 +365,7 @@ EOF
     $DOCKER run -d --name "$CONTAINER" --init --gpus all -p "$API_PORT:$API_PORT" \
       --shm-size=32g -v "$DATA_DIR:/data" \
       -e PYTHONUNBUFFERED=1 -e TOKENIZERS_PARALLELISM=false \
-      -e TINKER_API_KEY=tml-dev-key -e TINKERCLOUD_BACKEND="$BACKEND" \
+      -e TINKER_API_KEY=$DEV_API_KEY -e TINKERCLOUD_BACKEND="$BACKEND" \
       -e ALLOW_PARTIAL_BATCHES=true -e HF_HOME=/data/.cache/huggingface \
       -e CUDA_DEVICE_MAX_CONNECTIONS=1 -e NCCL_NVLS_ENABLE=0 \
       -e NCCL_IGNORE_DISABLED_P2P=1 \
@@ -452,7 +461,10 @@ fi
 # A running server stops here, once: after every step that can fail without touching the target,
 # before setup replaces its code and packages and step 5 its Ray head. A RUN_SERVER=0 profile runs
 # no server.
-if [ "$RUN_SERVER" = 1 ]; then EX "$SERVER_STOP"; fi
+if [ "$RUN_SERVER" = 1 ]; then
+  api_key_ready "$API_KEY_FILE"
+  EX "$SERVER_STOP"
+fi
 echo "==> [4/6] running in-container setup (profile=$PROFILE)"
 EX "PROFILE=$PROFILE MILES_REPO='${MILES_REPO:-}' MILES_REF='${MILES_REF:-}' bash /tmp/setup_container.sh"
 

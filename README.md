@@ -32,6 +32,7 @@ Common knobs:
 | Var | Meaning |
 |---|---|
 | `HF_TOKEN_FILE` | Local file with the HuggingFace token (required on first deploy) |
+| `API_KEY_FILE` | Local file with the server's API key: one line without whitespace (a comma list gives several keys; a client sends one of them). Unset, the target keeps the key it has; a target with none runs on the public `tml-dev-key`. Also read by `scripts/pod_rotate_server.sh` |
 | `GPUS` | GPUs to request / declare to Ray (default 4) |
 | `IMAGE` | Base image (default `nvcr.io/nvidia/nemo-rl:v0.5.0`) |
 | `TINKER_CLOUD_REF`, `RL_REF`, `TINKER_GMI_REF`, `COOKBOOK_REF` | Pinned git refs, default `main` (`*_REPO` to override URLs) |
@@ -44,6 +45,7 @@ still hold their allocation), or kubelet rejects the pod.
 ### 2. Run a recipe
 
 ```bash
+# a target deployed with API_KEY_FILE: TINKER_API_KEY=$(cut -d, -f1 /data/tinkercloud_api_key) instead
 # docker target (k8s: same command via kubectl -n <namespace> exec <pod> -- bash -c '...')
 docker exec -d tinkercloud-nemorl bash -c '
 export TINKER_API_KEY=tml-dev-key TINKER_BASE_URL=http://localhost:8000
@@ -82,7 +84,7 @@ Server-wide settings (`training/config.py`):
 | `TINKERCLOUD_BACKEND` | `miles`, `nemo_rl`, `verl`, `megatron_bridge`, `fake` (also `python -m training --backend B`) | `miles` |
 | `TINKERCLOUD_BACKEND_OVERRIDES` | JSON object of backend config fields, applied over the environment | unset |
 | `TRAINING_HOST` / `TRAINING_PORT` | Bind address | `0.0.0.0` / `8000` |
-| `TINKER_API_KEY` | API auth key (comma-separated for several); `ENV=production` refuses to start when the list is empty or holds `tml-dev-key` | `tml-dev-key` |
+| `TINKER_API_KEY` | API auth key (comma-separated for several); `ENV=production` refuses to start when the list is empty or holds `tml-dev-key`. The deploy and rotate scripts set it from the key file on the target (given once as `API_KEY_FILE`), else to `tml-dev-key`; never from a KEY=VAL | `tml-dev-key` |
 | `RAY_ADDRESS` / `RAY_NAMESPACE` | Ray cluster endpoint / namespace | auto (local head) / `default` |
 | `RAY_AUTH_MODE` | `token`: every Ray process must hold the deployment's token; `ENV=production` refuses to start with anything else. The deploy and rotate scripts set it | unset |
 | `RAY_AUTH_TOKEN_PATH` | The token file Ray reads in token mode (read by Ray and the deploy scripts, not by `config.py`); the deploy writes one per pod at `/data/ray_auth_token` (mode 600) | unset |
