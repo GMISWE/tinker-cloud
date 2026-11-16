@@ -1,21 +1,25 @@
 """
-The engine scheduler of one training group (R2.2): one FIFO for every tenant
-that shares the group's ranks, run by one worker task.
+A scheduler for the operations that share one set of GPU workers: one FIFO,
+run by one worker task. A backend makes one per group of workers and submits
+two kinds of operation; the head of the queue decides what runs next:
+
+- a pass takes with it the consecutive passes behind it that have an equal
+  PassKey, and `run_pass` receives them as one coalesced pass. A run ends at
+  the first pass of another key and at a barrier, so operations of different
+  keys run in arrival order.
+- a barrier runs alone.
 
 The service's per-model ordering (services/ordering.py) delivers a model's
 passes concurrently and in program order, and a barrier only after its earlier
-passes completed. Here the head of the queue decides what runs next:
+passes completed; this queue keeps that order.
 
-- a pass takes with it the consecutive passes behind it that have the same
-  PassKey (model, kind, loss, loss config), and they run as one coalesced pass.
-  The loss is a per-token sum, so the coalesced gradient is the sum of the
-  separate ones. A run ends at the first op of another model or key: tenants
-  keep arrival order, so adapter swaps follow it.
-- a barrier (optim_step, save, load, delete) runs alone.
+There is no batching window: whatever queued while the previous operation ran
+is the next run. A failure inside a run fails every request in it (one pass,
+one fault), so a backend refuses a bad request before it submits it.
 
-There is no batching window: whatever queued while the previous op ran is the
-next run. A failure inside a run fails every request in it (one pass, one
-fault); validation happens before submit, so a bad request fails alone.
+The backend answers for what coalescing computes: `run_pass` over several
+payloads must return what the separate passes would. Errors raised here carry
+the backend's name, given at construction.
 """
 import asyncio
 import logging
@@ -49,7 +53,6 @@ class _Pass(Generic[P]):
 
 @dataclass
 class _Barrier:
-    model_id: str
     fn: Callable[[], Awaitable[Any]]
     future: asyncio.Future
 
@@ -74,8 +77,8 @@ class GroupScheduler(Generic[P, R]):
     async def submit_pass(self, key: PassKey, payload: P) -> R:
         return await self._enqueue(_Pass(key, payload, self._new_future()))
 
-    async def submit_barrier(self, model_id: str, fn: Callable[[], Awaitable[Any]]) -> Any:
-        return await self._enqueue(_Barrier(model_id, fn, self._new_future()))
+    async def submit_barrier(self, fn: Callable[[], Awaitable[Any]]) -> Any:
+        return await self._enqueue(_Barrier(fn, self._new_future()))
 
     def queued(self) -> int:
         return len(self._queue)

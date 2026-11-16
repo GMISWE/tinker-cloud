@@ -5,7 +5,11 @@ model, and every Tinker primitive run when it is called.
 
 A model's requests reach its group through the group's scheduler: a pass
 coalesces with the consecutive same-key passes behind it (R15); a barrier
-(optimizer step, publish, join, leave, delete) runs alone. The ranks keep one
+(optimizer step, publish, join, leave, delete) runs alone. The loss is a
+per-token sum, so a coalesced pass's gradient is the sum of the separate ones,
+to bf16 noise (`test_rank_count_micro_batching_and_coalescing_are_exact`,
+tests/gpu/test_automodel_worker.py). A run ends at the first pass of another
+tenant (the PassKey holds the model), so adapter swaps follow arrival order. The ranks keep one
 adapter per tenant and swap the op's tenant in (worker.py); a pass or step
 reports the swap's seconds as `swap_seconds`. One pass is: convert each request
 (validated alone, so a bad request fails alone) -> coalesce into one batch
@@ -203,7 +207,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         async with self._membership_lock(key):   # one create at a time per key: the check and the open or join are one step
             if key in self._groups and self._groups[key].lost is None:   # the signature's group is up: join it
                 group = self._groups[key]
-                await group.scheduler.submit_barrier(model_id, lambda: self._join(group, model_id, lora, seed))
+                await group.scheduler.submit_barrier(lambda: self._join(group, model_id, lora, seed))
                 logger.info("[%s] model %s joined training group %s (%d tenants)", request_id, model_id, key, len(group.tenants))
             else:
                 group = await self._open_group(key, base_model, lora, model_id, seed, request_id)
@@ -304,7 +308,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
                                    backend=BACKEND, operation=op, original_error=e) from e
 
         try:
-            await group.scheduler.submit_barrier(model_id, leave)
+            await group.scheduler.submit_barrier(leave)
         except BackendError:
             if ran or group.lost is None:   # the leave's own fault, or a closed scheduler: the caller hears it
                 raise
@@ -406,7 +410,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
             return {"grad_norm": norm, "weight_version": handle.weight_version, "swap_seconds": swap,
                     "metrics": {"swap_seconds": swap}}
 
-        return await group.scheduler.submit_barrier(handle.model_id, step)
+        return await group.scheduler.submit_barrier(step)
 
     async def _submit(self, handle: AutomodelHandle, kind: str, data: List[Datum], loss_fn: str,
                       loss_fn_config: Optional[Dict[str, float]]) -> Dict[str, Any]:
@@ -525,7 +529,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         group = self._live_group(handle, op)
         if handle.generation_synced_version == handle.weight_version:
             return
-        await group.scheduler.submit_barrier(handle.model_id, lambda: self._publish(group, handle))
+        await group.scheduler.submit_barrier(lambda: self._publish(group, handle))
         await self._retire(handle)
 
     async def _publish(self, group: _Group, handle: AutomodelHandle) -> None:
@@ -633,7 +637,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
                 raise BackendError("save_checkpoint failed; the training group was released",
                                    backend=BACKEND, operation="save_checkpoint", original_error=e) from e
 
-        await group.scheduler.submit_barrier(handle.model_id, save)
+        await group.scheduler.submit_barrier(save)
         logger.info("model %s: checkpoint of v%d written under %s", handle.model_id, handle.weight_version, root)
 
     async def load_checkpoint(self, handle: AutomodelHandle, root: Path, optimizer: bool = False) -> None:
@@ -680,7 +684,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
                     f"the checkpoint was loaded (weights at v{handle.weight_version}) but the adapter could not "
                     f"be published to vLLM: {e}", backend=BACKEND, operation="load_checkpoint") from e
 
-        await group.scheduler.submit_barrier(handle.model_id, load)
+        await group.scheduler.submit_barrier(load)
         await self._retire(handle)
         logger.info("model %s: loaded %s from %s; the weights are v%d", handle.model_id,
                     "weights and optimizer state" if optimizer else "weights (the optimizer keeps its state)",

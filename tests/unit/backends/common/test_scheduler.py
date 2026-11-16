@@ -36,6 +36,11 @@ def key(model="a", kind=FB, loss="cross_entropy", cfg=None):
     return pass_key(model, kind, loss, cfg)
 
 
+async def one_result_short(key, payloads):
+    """A run_pass that returns one result fewer than it was given."""
+    return payloads[:-1]
+
+
 async def started(engine, n):
     while len(engine.runs) < n:
         await asyncio.sleep(0)
@@ -101,7 +106,7 @@ def test_barrier_runs_alone_and_splits_runs():
         blocker = asyncio.ensure_future(s.submit_pass(key(), 0))
         await started(e, 1)
         tasks = [asyncio.ensure_future(o) for o in (
-            s.submit_pass(key(), 1), s.submit_barrier("a", e.barrier("a", "optim")),
+            s.submit_pass(key(), 1), s.submit_barrier(e.barrier("a", "optim")),
             s.submit_pass(key(), 2), s.submit_pass(key(), 3))]
         await asyncio.sleep(0)
         e.gate.set()
@@ -174,11 +179,37 @@ def test_close_fails_queued_ops_and_refuses_new_ones():
 
 def test_wrong_result_count_fails_the_run_not_the_worker():
     async def main():
-        async def bad(key, payloads):
-            return payloads[:-1]
-        s = GroupScheduler("g", bad, "test")
+        s = GroupScheduler("g", one_result_short, "test")
         for i in (1, 2):                         # the worker survives the first failure
             with pytest.raises(BackendError, match="returned 0 results for 1 requests"):
                 await asyncio.wait_for(s.submit_pass(key(), i), timeout=5)
         await s.close("test done")
+    run(main())
+
+
+def test_errors_carry_the_name_of_the_backend_that_made_the_scheduler():
+    """The scheduler serves any backend. With a name fixed in the scheduler's module, another backend's
+    failures would be reported as that one's: the three errors the scheduler raises itself
+    (a queued op of an abandoned queue, a submit after the close, a wrong result count)."""
+    async def main():
+        e = Engine()
+        s = GroupScheduler("g", e.run_pass, "some_backend")
+        e.gate.clear()
+        running = asyncio.ensure_future(s.submit_pass(key(), 0))
+        await started(e, 1)
+        queued = asyncio.ensure_future(s.submit_pass(key("b"), 1))
+        await asyncio.sleep(0)
+        s.abandon("gone")
+        with pytest.raises(BackendError) as abandoned:
+            await queued
+        e.gate.set()
+        await running
+        with pytest.raises(BackendError) as closed:
+            await s.submit_pass(key(), 2)
+
+        counted = GroupScheduler("g", one_result_short, "some_backend")
+        with pytest.raises(BackendError) as wrong_count:
+            await asyncio.wait_for(counted.submit_pass(key(), 1), timeout=5)
+        await counted.close("test done")
+        assert [err.value.backend for err in (abandoned, closed, wrong_count)] == ["some_backend"] * 3
     run(main())
