@@ -19,6 +19,10 @@
 # instance, which Ray refuses while a head runs on the pod, so the run stops
 # before the push when one does.
 #
+# A run that passes while pytest skipped a file at collection exits 86 (outside pytest's 0 to 5 and
+# timeout's 124): a skipped file is a run that did not happen. A -q run is not checked (pytest prints no
+# count), and its log verdict says so; the default suites run with -q.
+#
 # Every run appends `date pod args | verdict` to ~/.cache/tinkercloud/pod_pytest.log,
 # also one that stops before pytest (tunnel down, push failed, Ray head up).
 set -euo pipefail
@@ -28,6 +32,7 @@ POD="${1:-tinkercloud-nemorl}"; shift || true
 if [ $# -eq 0 ]; then
   set -- tests/unit tests/conformance -q -p no:cacheprovider
 fi
+SKIPPED_FILES_EXIT=86
 GPU_RUN=0
 case " $* " in
   *" tests/gpu"*) GPU_RUN=1; case " $* " in *" -x "*|*" --maxfail"*) ;; *) set -- "$@" -x ;; esac ;;
@@ -96,5 +101,21 @@ timeout "$KX_TIMEOUT" kubectl -n "$NS" exec "$POD" -- bash -c "cd '$REMOTE/app' 
   | tee "$TMP/run.log" || RC=$?
 # the verdict is pytest's summary line ("N passed, M skipped in ...", "N tests collected", "no tests ran", "ERROR: ...")
 VERDICT="$(grep -E '^(=+ )?([0-9]+ (passed|failed|errors?|skipped|tests? collected|deselected)|no tests ran|ERROR)' "$TMP/run.log" | tail -1 | tr -d '=' | sed 's/^ *//;s/ *$//' || true)"
+# A file skipped at collection (a module it imports is missing on the pod, or a module-level skip) did
+# not run, and pytest still exits 0. Its count is on pytest's collection line, "collected 14 items / 5
+# skipped", also behind "collecting ... " (-v) and "/ 3 deselected" (-k, -m): pytest's
+# TerminalReporter.report_collect. -q drops that line, so a quiet run cannot be checked and says so.
+COLLECTED="$(grep -E 'collected [0-9]+ items?' "$TMP/run.log" | tail -1 || true)"
+if [ "$RC" = 0 ] && [ -z "$COLLECTED" ]; then
+  VERDICT="${VERDICT:-no pytest summary}; files skipped at collection not checked (-q hides pytest's count)"
+elif [ "$RC" = 0 ]; then
+  NOT_RUN="$(sed -n -E 's/.*\/ ([0-9]+) skipped.*/\1/p' <<< "$COLLECTED")"
+  if [ -n "$NOT_RUN" ]; then
+    echo "ERROR: $NOT_RUN test file(s) were skipped at collection on $POD and did not run (exit $SKIPPED_FILES_EXIT)." >&2
+    echo "  Add -rs to see each reason. Run them on a pod where they collect, or leave each out by name (--ignore=<file>)." >&2
+    VERDICT="$NOT_RUN file(s) skipped at collection; ${VERDICT:-no pytest summary}"
+    RC=$SKIPPED_FILES_EXIT
+  fi
+fi
 printf '%s %s %s | %s\n' "$(date -u +%FT%TZ)" "$POD" "$*" "${VERDICT:-no pytest summary (rc $RC)}" >> "$LOG"; LOGGED=1
 exit $RC
