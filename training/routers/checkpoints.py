@@ -8,6 +8,7 @@ Endpoints:
 - POST /api/v1/load_weights - Load a training checkpoint as a model's first request
 - GET  /api/v1/training_runs/{model_id}/checkpoints - List
 - GET  /api/v1/checkpoints - List every run's checkpoints (paginated)
+- POST /api/v1/checkpoints/search - Search by metadata, type and base model (cursor-paginated)
 - DELETE .../checkpoints/{kind}/{name} - Delete one checkpoint of any kind
 - PUT  .../checkpoints/{kind}/{name}/ttl - Set or clear a checkpoint's expiry
 - GET  .../checkpoints/external_weights/{name}/external_weights_urls - Signed per-file URLs
@@ -43,6 +44,7 @@ from ..storage import MetadataStorage, FuturesStorage
 from ..storage.futures import DuplicateSeqId
 from ..models.requests import (
     MAX_PAGE_LIMIT,
+    CheckpointSearchRequest,
     LoadWeightsRequest,
     OptimizerConfig,
     SaveWeightsExternalRequest,
@@ -50,10 +52,12 @@ from ..models.requests import (
     SaveWeightsForSamplerRequest,
     SetCheckpointTTLRequest,
     WeightsInfoRequest,
+    UnknownProject,
 )
 from ..models.responses import (
     AsyncOperationResponse,
     CheckpointsListResponse,
+    CheckpointSearchResponse,
     Cursor,
     SaveWeightsForSamplerResult,
     WeightsInfoResponse,
@@ -445,6 +449,19 @@ _KIND_OF_TYPE = {t: k for k, t in CHECKPOINT_TYPES.items()}
 _TYPES_HELP = "|".join(_KIND_OF_TYPE)
 _KIND_VALUES = {k.value for k in CHECKPOINT_TYPES}
 _KINDS_HELP = "|".join(sorted(_KIND_VALUES))
+
+
+@router.post("/api/v1/checkpoints/search", response_model=CheckpointSearchResponse)
+async def search_checkpoints(
+    request: CheckpointSearchRequest,
+    _: None = Depends(verify_api_key_dep),
+    service: CheckpointService = Depends(get_checkpoint_service),
+):
+    """The SDK's read-only checkpoint search, using the same local owner/project as session search."""
+    try:
+        return service.search_checkpoints(request)
+    except UnknownProject as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
 
 
 def _typed_ref(model_id: str, kind: str, checkpoint_id: str) -> CheckpointRef:

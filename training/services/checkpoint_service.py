@@ -15,8 +15,8 @@ from typing import Dict, Any, List, Optional, Tuple
 
 from ..backends.base import TrainingBackend
 from ..checkpoints import CheckpointKind, CheckpointRef, CheckpointSaveOptions, CheckpointStatus, CheckpointStore, is_expired
-from ..models.requests import OptimizerConfig
-from ..models.responses import Checkpoint, CheckpointType
+from ..models.requests import LOCAL_OWNER, CheckpointSearchCursor, CheckpointSearchRequest, OptimizerConfig, require_known_projects
+from ..models.responses import Checkpoint, CheckpointSearchResponse, CheckpointType
 from ..storage import MetadataStorage
 
 logger = logging.getLogger(__name__)
@@ -32,6 +32,12 @@ CHECKPOINT_TYPES: Dict[CheckpointKind, CheckpointType] = {
 def _server_chosen_name(prefix: str) -> str:
     """The name of a save that names none. It is unique: two such saves in one second are two checkpoints."""
     return f"{prefix}_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+
+
+def _created_at(record: Dict[str, Any]) -> datetime:
+    """The record's creation time as an aware UTC instant, including older naive UTC records."""
+    created = datetime.fromisoformat(record["created_at"])
+    return created.replace(tzinfo=timezone.utc) if created.tzinfo is None else created.astimezone(timezone.utc)
 
 
 class CheckpointService:
@@ -156,13 +162,19 @@ class CheckpointService:
             checkpoint_id=f"{kind.value}/{rec['name']}",
             checkpoint_type=CHECKPOINT_TYPES[kind],
             # created_at is naive UTC (MetadataStorage.save_checkpoint); the SDK CLI compares it with aware dates
-            time=datetime.fromisoformat(rec["created_at"]).replace(tzinfo=timezone.utc).isoformat(),
+            time=_created_at(rec).isoformat(),
             tinker_path=rec["uri"],
             size_bytes=self.store.size_bytes(CheckpointRef.parse(rec["uri"])),
             status=rec["status"],
             expires_at=rec.get("expires_at"),  # absent on records older than ttl support
             user_metadata=rec.get("user_metadata"),  # absent on records older than user_metadata support
+            base_model=self._base_model(rec["model_id"]),
         )
+
+    def _base_model(self, model_id: str) -> Optional[str]:
+        """The stored base model. None for a legacy checkpoint without a training-run record."""
+        run = self.store.metadata.load_training_run(model_id)
+        return run["base_model"] if run is not None else None
 
     def list_checkpoints(self, model_id: str) -> List[Checkpoint]:
         """A training run's checkpoints, newest first."""
@@ -174,6 +186,42 @@ class CheckpointService:
         records = [rec for model_id in self.store.model_ids() for rec in self.store.list(model_id, with_size=False)]
         records.sort(key=lambda r: (r["created_at"], r["uri"]), reverse=True)
         return [self._checkpoint(rec) for rec in records[offset:offset + limit]], len(records)
+
+    def search_checkpoints(self, request: CheckpointSearchRequest) -> CheckpointSearchResponse:
+        """Filter persistent records before paging. A stable URI-derived UUID breaks time ties;
+        file sizes are walked only for the selected page. Owner/project rules match session search."""
+        require_known_projects(request.project_ids or [])
+        if request.owner.type == "user":
+            assert request.owner.owner_urns is not None  # SearchOwner pairs the fields
+            if LOCAL_OWNER not in request.owner.owner_urns:
+                return CheckpointSearchResponse(checkpoints=[])
+        if request.base_models == []:
+            return CheckpointSearchResponse(checkpoints=[])
+
+        matches = []
+        for model_id in self.store.model_ids():
+            if request.base_models is not None and self._base_model(model_id) not in request.base_models:
+                continue
+            for record in self.store.list(model_id, with_size=False):
+                if request.checkpoint_type is not None and CHECKPOINT_TYPES[CheckpointKind(record["kind"])] != request.checkpoint_type:
+                    continue
+                metadata = record.get("user_metadata") or {}  # old records may carry no metadata
+                if not all(k in metadata and metadata[k] == v for k, v in request.user_metadata.items()):
+                    continue
+                created = _created_at(record)
+                checkpoint_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, record["uri"]))
+                if request.cursor is not None and (created, checkpoint_uuid) >= (
+                    request.cursor.last_created_at, request.cursor.last_checkpoint_uuid
+                ):
+                    continue
+                matches.append((created, checkpoint_uuid, record))
+        matches.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+        page = matches[:request.limit]
+        cursor = None
+        if len(matches) > request.limit:
+            created, checkpoint_uuid, _ = page[-1]
+            cursor = CheckpointSearchCursor(last_created_at=created, last_checkpoint_uuid=checkpoint_uuid)
+        return CheckpointSearchResponse(checkpoints=[self._checkpoint(entry[2]) for entry in page], next_cursor=cursor)
 
     def latest_checkpoints(self, model_id: str) -> Dict[str, Optional[Checkpoint]]:
         """A run's newest loadable checkpoint of each kind a TrainingRun names:
