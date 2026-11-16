@@ -52,12 +52,7 @@ def _write_peft_keyed(weights_src: str, weights_dst: str) -> None:
     load. Measured 2026-08-03: unkeyed round-trip corr 0.806 / gap 0.986
     nats vs 0.99964 / 0.0033 after normalization.
     """
-    try:
-        from safetensors.torch import load_file, save_file
-    except ImportError:  # noqa: TREE002  (#192)
-        logger.warning("safetensors unavailable; publishing adapter keys unmodified")
-        shutil.copy2(weights_src, weights_dst)
-        return
+    from safetensors.torch import load_file, save_file
 
     state = load_file(weights_src)
     if any(k.startswith(PEFT_PREFIX) for k in state):
