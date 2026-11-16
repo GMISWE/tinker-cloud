@@ -60,7 +60,7 @@ from ..base import BackendError, BackendHandle, TrainingBackend, UnsupportedFeat
 from ..common import gpu_memory
 from ..common.sampling.generation import sample_over_http
 from ..common.sampling.vllm_client import VllmLoraClient
-from ..common.scheduler import GroupScheduler, PassKey, pass_key
+from ..common.scheduler import GroupScheduler, PassKey, pass_key, same_key
 from ..http_pool import HttpClientPool
 from ..objectives import classification_spec
 from .adapter import OPTIMIZER_DIRNAME, OPTIMIZER_FILES
@@ -258,7 +258,7 @@ class AutomodelBackend(TrainingBackend[AutomodelHandle]):
         except BaseException:
             await ranks.stop()
             raise
-        scheduler = GroupScheduler(key, lambda pk, payloads: self._run_pass(key, pk, payloads), BACKEND)
+        scheduler = GroupScheduler(key, same_key, lambda pk, payloads: self._run_pass(key, pk, payloads), BACKEND)
         group = _Group(key, ranks, scheduler, {model_id})
         self._groups[key] = group   # replaces a group lost under this key; its tenants keep their cause (_lost_tenants)
         logger.info("[%s] training group %s up: LoRA %d elements", request_id, key, lora_numel)
