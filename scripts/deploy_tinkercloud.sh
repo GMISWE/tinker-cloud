@@ -209,8 +209,11 @@ if [ "$TARGET" = k8s ]; then
         echo "  recreate it: kubectl -n $NS delete pod $POD && POD=$POD GPUS=$gpus IMAGE=$image POD_MEMORY_LIMIT=$mem" \
              "${pvc:+DATA_PVC_SIZE=$pvc }${hf:+HF_CACHE_HOSTPATH=$hf }$0 --profile $PROFILE"
         [ -n "$pvc" ] || echo "  (its /data is an emptyDir: the recreate loses it)"
-        # shellcheck disable=SC2015  # a hint only: a dropped exec prints none
-        EX "[ -e $API_KEY_POD_FILE ]" 2> /dev/null && echo "  (it holds an operator API key: when the recreate loses $API_KEY_POD_FILE, add API_KEY_FILE=<file>)" || true
+        case $(EX "[ -e $API_KEY_POD_FILE ] && echo held || echo none" 2> /dev/null) in
+          held) echo "  (it holds an operator API key: when the recreate loses $API_KEY_POD_FILE, add API_KEY_FILE=<file>)" ;;
+          none) ;;
+          *) echo "  (could not read whether it holds an operator API key in $API_KEY_POD_FILE; if it does, add API_KEY_FILE=<file>)" ;;
+        esac
         exit 1 ;;
       esac
     done

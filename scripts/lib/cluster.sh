@@ -36,7 +36,8 @@ kx() {
 EX() { kubectl -n "$NS" exec "$POD" -- bash -c "$(pod_cmd "$1")"; }
 EX_TIMEOUT() { timeout "$1" kubectl -n "$NS" exec "$POD" -- bash -c "$(pod_cmd "$2")" || true; }
 # EX_STDIN: EX with this shell's stdin as the pod command's, so a pod command can create a file
-# from it under its own umask.
+# from it under its own umask. A copy (`kubectl cp`) gives the pod file the local file's mode: a
+# 644 local file arrived as 644 and a 600 one as 600 (read on a pod, 2026-11-16).
 EX_STDIN() { kubectl -n "$NS" exec -i "$POD" -- bash -c "$(pod_cmd "$1")"; }
 # wait_rc <rc file> <pgrep -f pattern> <seconds>: wait for a detached run on $POD that writes its
 # exit status to <rc file> as its last act. Prints the status and returns 0 once the file holds
@@ -108,25 +109,24 @@ HF_TOKEN_CHECK="[ -s $HF_TOKEN_POD_FILE ] || { echo 'ERROR: $HF_TOKEN_POD_FILE i
 # stricter than its split_csv_setting: whitespace and an empty entry are refused, not stripped.
 DEV_API_KEY=tml-dev-key
 API_KEY_POD_FILE=/data/tinkercloud_api_key
+# What an operator key is, as one shell test over $api_key that this shell and the pod both run.
+# shellcheck disable=SC2016  # $api_key is the reader's variable
+API_KEY_VALID='[[ $api_key =~ ^[^[:space:]]+$ && ",$api_key," != *,,* && ",$api_key," != *,'"$DEV_API_KEY"',* ]]'
+API_KEY_RULE="one line without whitespace, no empty entry in a comma list, not the dev key"
 # The pod command that sets api_key to the key the next boot takes and prints its source; it
-# fails on a key file whose content is not one line without whitespace. server_boot's command
-# runs it and exports api_key; api_key_ready runs it for its verdict alone.
+# fails on a key file that holds no operator key. server_boot's command runs it and exports
+# api_key; api_key_ready runs it for its verdict alone.
 API_KEY_RESOLVE="if [ -e $API_KEY_POD_FILE ]; then
-  api_key=\$(cat $API_KEY_POD_FILE) && [[ \$api_key =~ ^[^[:space:]]+\$ ]] || { echo 'ERROR: $API_KEY_POD_FILE holds no key (one line without whitespace)'; exit 1; }
+  api_key=\$(cat $API_KEY_POD_FILE) && $API_KEY_VALID || { echo 'ERROR: $API_KEY_POD_FILE holds no operator key ($API_KEY_RULE)'; exit 1; }
   echo '    API key: the operator key in $API_KEY_POD_FILE'
 else api_key=$DEV_API_KEY; echo '    API key: the dev key (no $API_KEY_POD_FILE)'; fi"
-# api_key_file_check <local file>: refuses, on stderr, a file that cannot be an operator's key:
-# missing or empty, anything but one line without whitespace, an empty key in the comma list,
-# or the dev key in it.
+# api_key_file_check <local file>: refuses, on stderr, a file that holds no operator key.
 api_key_file_check() {
-  local key part
+  local api_key
   [ -s "$1" ] || { echo "ERROR: API_KEY_FILE '$1' is missing or empty" >&2; return 1; }
-  key=$(cat "$1")
-  [[ "$key" =~ ^[^[:space:]]+$ ]] || { echo "ERROR: API_KEY_FILE '$1' is not one line without whitespace" >&2; return 1; }
-  while IFS= read -r -d , part; do
-    [ -n "$part" ] || { echo "ERROR: API_KEY_FILE '$1' holds an empty key" >&2; return 1; }
-    [ "$part" != "$DEV_API_KEY" ] || { echo "ERROR: API_KEY_FILE '$1' holds the dev key, which is public" >&2; return 1; }
-  done <<< "$key,"
+  # shellcheck disable=SC2034  # API_KEY_VALID reads it
+  api_key=$(cat "$1")
+  eval "$API_KEY_VALID" || { echo "ERROR: API_KEY_FILE '$1' holds no operator key ($API_KEY_RULE)" >&2; return 1; }
 }
 # api_key_ready [local file]: the key step before a running server is stopped. With a file,
 # one that api_key_file_check passed: writes it to the pod file through EX_STDIN (the caller's
