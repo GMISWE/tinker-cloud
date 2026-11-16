@@ -4,7 +4,7 @@ import asyncio
 import pytest
 
 from tinkercloud.training.backends.base import BackendError
-from tinkercloud.training.backends.common.scheduler import GroupScheduler, pass_key
+from tinkercloud.training.backends.common.scheduler import GroupScheduler, pass_key, same_key
 
 FB = "forward_backward"
 
@@ -53,7 +53,7 @@ def run(coro):
 def test_passes_queued_behind_a_running_op_coalesce():
     async def main():
         e = Engine()
-        s = GroupScheduler("g", e.run_pass, "test")
+        s = GroupScheduler("g", same_key, e.run_pass, "test")
         e.gate.clear()
         first = asyncio.ensure_future(s.submit_pass(key(), 1))
         await started(e, 1)                      # pass 1 runs alone and blocks
@@ -70,7 +70,7 @@ def test_passes_queued_behind_a_running_op_coalesce():
 def test_run_breaks_at_model_kind_loss_and_config_and_keeps_fifo():
     async def main():
         e = Engine()
-        s = GroupScheduler("g", e.run_pass, "test")
+        s = GroupScheduler("g", same_key, e.run_pass, "test")
         e.gate.clear()
         blocker = asyncio.ensure_future(s.submit_pass(key("z"), 0))
         await started(e, 1)
@@ -101,7 +101,7 @@ def test_run_breaks_at_model_kind_loss_and_config_and_keeps_fifo():
 def test_barrier_runs_alone_and_splits_runs():
     async def main():
         e = Engine()
-        s = GroupScheduler("g", e.run_pass, "test")
+        s = GroupScheduler("g", same_key, e.run_pass, "test")
         e.gate.clear()
         blocker = asyncio.ensure_future(s.submit_pass(key(), 0))
         await started(e, 1)
@@ -120,7 +120,7 @@ def test_barrier_runs_alone_and_splits_runs():
 def test_failure_fails_the_whole_run_only():
     async def main():
         e = Engine()
-        s = GroupScheduler("g", e.run_pass, "test")
+        s = GroupScheduler("g", same_key, e.run_pass, "test")
         e.gate.clear()
         blocker = asyncio.ensure_future(s.submit_pass(key("z"), 0))
         await started(e, 1)
@@ -140,7 +140,7 @@ def test_failure_fails_the_whole_run_only():
 def test_cancelled_submitter_is_skipped():
     async def main():
         e = Engine()
-        s = GroupScheduler("g", e.run_pass, "test")
+        s = GroupScheduler("g", same_key, e.run_pass, "test")
         e.gate.clear()
         blocker = asyncio.ensure_future(s.submit_pass(key(), 0))
         await started(e, 1)
@@ -159,7 +159,7 @@ def test_cancelled_submitter_is_skipped():
 def test_close_fails_queued_ops_and_refuses_new_ones():
     async def main():
         e = Engine()
-        s = GroupScheduler("g", e.run_pass, "test")
+        s = GroupScheduler("g", same_key, e.run_pass, "test")
         e.gate.clear()
         running = asyncio.ensure_future(s.submit_pass(key(), 0))
         await started(e, 1)
@@ -179,7 +179,7 @@ def test_close_fails_queued_ops_and_refuses_new_ones():
 
 def test_wrong_result_count_fails_the_run_not_the_worker():
     async def main():
-        s = GroupScheduler("g", one_result_short, "test")
+        s = GroupScheduler("g", same_key, one_result_short, "test")
         for i in (1, 2):                         # the worker survives the first failure
             with pytest.raises(BackendError, match="returned 0 results for 1 requests"):
                 await asyncio.wait_for(s.submit_pass(key(), i), timeout=5)
@@ -193,7 +193,7 @@ def test_errors_carry_the_name_of_the_backend_that_made_the_scheduler():
     (a queued op of an abandoned queue, a submit after the close, a wrong result count)."""
     async def main():
         e = Engine()
-        s = GroupScheduler("g", e.run_pass, "some_backend")
+        s = GroupScheduler("g", same_key, e.run_pass, "some_backend")
         e.gate.clear()
         running = asyncio.ensure_future(s.submit_pass(key(), 0))
         await started(e, 1)
@@ -207,7 +207,7 @@ def test_errors_carry_the_name_of_the_backend_that_made_the_scheduler():
         with pytest.raises(BackendError) as closed:
             await s.submit_pass(key(), 2)
 
-        counted = GroupScheduler("g", one_result_short, "some_backend")
+        counted = GroupScheduler("g", same_key, one_result_short, "some_backend")
         with pytest.raises(BackendError) as wrong_count:
             await asyncio.wait_for(counted.submit_pass(key(), 1), timeout=5)
         await counted.close("test done")

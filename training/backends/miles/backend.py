@@ -26,6 +26,7 @@ from ...core.loss_registry import clip_thresholds
 from ...checkpoints.interchange import export_hf_adapter
 from .model_setup import detect_torch_dist_path, record_native_checkpoint, resolve_native_checkpoint
 from ..http_pool import HttpClientPool
+from ..common.scheduler import Admit, GroupScheduler, Op, Pass, Run
 from .sglang_client import SGLangClient
 
 logger = logging.getLogger(__name__)
@@ -161,19 +162,13 @@ class MilesHandle(BackendHandle):
 
 
 @dataclass
-class _PoolOp:
-    """One queued pool operation. kind 'fb' ops are mergeable; 'other' ops
-    run their closure; 'stop' ends the dispatcher."""
+class _FbRequest:
+    """One forward_backward request in the pool's queue."""
 
-    kind: str                                   # "fb" | "other" | "stop"
-    future: asyncio.Future = field(default_factory=lambda: asyncio.get_running_loop().create_future())
-    run: Any = None                             # "other": async closure
-    tenant: Optional[str] = None                # model_id; None = barrier op
-    # fb fields:
-    handle: Any = None
-    rollout_data: Any = None
-    loss_fn: Optional[str] = None
-    num_samples: int = 0
+    tenant: str                                 # model_id
+    rollout_data: Any
+    loss_fn: str
+    num_samples: int
     input_lens: Optional[List[int]] = None      # per-datum model_input lengths
 
 
@@ -184,11 +179,11 @@ class MilesPool:
     First create_model boots the pool; later creates register into it;
     delete deregisters, and the last tenant out tears the pool down.
 
-    All GPU-bound ops flow through `queue`, consumed by ONE dispatcher task
-    in strict FIFO — the pool's serializer (was an asyncio.Lock in M2; a
-    queue makes the M3 co-batch merge window explicit). Consecutive queued
-    fb ops with the same loss_fn merge into one mixed-slot train call, up
-    to `cobatch_max_samples` (0 = merging off; batch of 1 == M2 behavior)."""
+    All GPU-bound ops flow through `scheduler`, one queue with one worker:
+    the pool's serializer. Consecutive queued fb ops with the same loss_fn
+    merge into one mixed-slot train call, up to `cobatch_max_samples`
+    (0 = merging off; every fb is its own call). `_pool_admit` holds the
+    merge rules."""
 
     train_group: Any
     rollout_manager: Any
@@ -201,8 +196,7 @@ class MilesPool:
     router_port: Optional[int] = None
     tenants: Dict[str, int] = field(default_factory=dict)   # model_id -> slot
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    queue: "asyncio.Queue[_PoolOp]" = field(default_factory=asyncio.Queue)
-    dispatcher: Optional[asyncio.Task] = None
+    scheduler: GroupScheduler = field(init=False)   # set at pool boot
     cobatch_max_samples: int = 0
     # Reorder drain: the merge window may defer OTHER tenants' non-fb ops
     # (cross-tenant order is not contractual; per-tenant FIFO is preserved
@@ -401,10 +395,10 @@ class MilesBackend(TrainingBackend[MilesHandle]):
             await pool.train_group.reconcile_adapters()
 
         try:
-            await self._pool_run(pool, _load_and_push)
+            await pool.scheduler.submit_barrier(_load_and_push)
         except Exception as e:
             try:
-                await self._pool_run(pool, _rollback)
+                await pool.scheduler.submit_barrier(_rollback)
             except Exception:  # noqa: BLE001  (#189)
                 logger.warning(
                     "[%s] Pool join rollback failed for adapter %s",
@@ -661,7 +655,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
                             if res.source == "registry"
                             else "E0 calibration missing for this config",
                         )
-                pool.dispatcher = asyncio.create_task(self._pool_dispatcher_loop(pool))
+                pool.scheduler = self._pool_scheduler(pool)
                 if pool.cobatch_max_samples > 0:
                     logger.info(
                         "Pool co-batching ON: merging consecutive fb up to %d samples"
@@ -719,126 +713,56 @@ class MilesBackend(TrainingBackend[MilesHandle]):
         if cleanup:
             logger.info("create_model failure teardown: released %s", sorted(cleanup))
 
-    # ---- Pool dispatcher: the pool's serializer + M3 co-batch window ----
+    # ---- Pool queue: the pool's serializer and the co-batch window ----
 
-    async def _pool_submit(self, pool: MilesPool, op: _PoolOp) -> Any:
-        if pool.dispatcher is None or pool.dispatcher.done():
-            raise BackendError(
-                "pool dispatcher not running", backend="miles", operation="pool",
-            )
-        pool.queue.put_nowait(op)
-        return await op.future
+    def _pool_scheduler(self, pool: MilesPool) -> GroupScheduler:
+        return GroupScheduler(
+            "miles-pool",
+            lambda run, nxt: self._pool_admit(pool, run, nxt),
+            lambda _tenant, batch: self._execute_fb_batch(pool, batch),
+            "miles",
+        )
 
-    async def _pool_run(self, pool: MilesPool, run, tenant: Optional[str] = None) -> Any:
-        """Serialize an async closure through the pool queue (strict FIFO).
-        `tenant` marks ownership for the reorder drain; None = barrier."""
-        return await self._pool_submit(pool, _PoolOp(kind="other", run=run, tenant=tenant))
+    async def _pool_fb(self, pool: MilesPool, request: _FbRequest) -> Any:
+        """Queue one forward_backward request; its key is its tenant."""
+        return await pool.scheduler.submit_pass(request.tenant, request)
 
-    async def _pool_dispatcher_loop(self, pool: MilesPool) -> None:
-        """Single consumer of pool.queue. FIFO order is the execution order;
-        the only transformation is merging same-loss_fn fb ops (any tenants)
-        into one mixed-slot train call.
+    async def _pool_stop(self, pool: MilesPool) -> None:
+        """Everything queued ahead of the stop runs; what is still queued when the stop runs fails;
+        then the queue is closed."""
+        async def _stop() -> None:
+            pool.scheduler.abandon("pool stopped")
+        await pool.scheduler.submit_barrier(_stop)
+        await pool.scheduler.close("pool stopped")
 
-        Conservative drain (default): only CONSECUTIVE fb ops merge — an op
-        of any other kind ends the drain, so a step never overtakes or
-        absorbs a later fb. Pipelined recipe traffic (fb+step back-to-back
-        per tenant) therefore never merges: the tenant's own step closes
-        the window microseconds after its fb.
+    def _pool_admit(self, pool: MilesPool, run: Run, nxt: Op) -> Admit:
+        """The merge window; an operation's key is its tenant, None for one that belongs to no tenant.
+        Consecutive fb of one loss_fn merge (any tenants) up to the sample cap,
+        unless the E0 guard refuses: a refusal ends the window. With the reorder drain, any other
+        operation of a tenant waits past the window, and so does everything of that tenant behind it
+        (per-tenant order is exact). An operation with no tenant always ends the window."""
+        if pool.cobatch_max_samples <= 0:
+            return Admit.END
+        batch = [p.payload for p in run.passes]
+        blocked = {op.key for op in run.waiting}
+        if (
+            isinstance(nxt, Pass)
+            and nxt.payload.loss_fn == batch[0].loss_fn
+            and nxt.key not in blocked
+            and sum(o.num_samples for o in batch) + nxt.payload.num_samples <= pool.cobatch_max_samples
+        ):
+            if self.converter.cobatch_preserves_token_bucket(
+                [o.rollout_data for o in batch] + [nxt.payload.rollout_data],
+                _dp_size(pool.args),
+                pool.cobatch_e0_tokens,
+            ):
+                return Admit.JOIN
+            return Admit.END
+        if pool.cobatch_reorder and nxt.key is not None:
+            return Admit.DEFER
+        return Admit.END
 
-        Reorder drain (cobatch_reorder): only PER-TENANT submission order is
-        contractual; cross-tenant order is scheduler freedom (isolation
-        invariant, gate G4). The drain may defer other ops past the merge
-        window and replay them, in order, right after the merged call.
-        Per-tenant FIFO is exact: once ANY op of tenant t is deferred, t is
-        blocked — its later fb cannot join the batch (would overtake the
-        deferred op) and its later ops all defer (keep relative order).
-        Barrier ops (tenant None: stop / pool admin) still end the drain."""
-        carry: Optional[_PoolOp] = None
-        pending: List[_PoolOp] = []       # reorder drain: deferred ops
-        while True:
-            if carry is not None:
-                # carry left the queue after everything now in pending —
-                # append keeps replay order == queue arrival order.
-                pending.append(carry)
-                carry = None
-            if pending:
-                op = pending.pop(0)
-            else:
-                op = await pool.queue.get()
-            if op.kind == "stop":
-                for p in pending:         # drain deferred before stopping
-                    if not p.future.done():
-                        p.future.set_exception(
-                            BackendError("pool stopped", backend="miles", operation="pool")
-                        )
-                if not op.future.done():
-                    op.future.set_result(None)
-                return
-            if op.kind == "other":
-                try:
-                    result = await op.run()
-                    if not op.future.done():
-                        op.future.set_result(result)
-                except Exception as e:  # noqa: BLE001  (#189) — surfaced via the future
-                    if not op.future.done():
-                        op.future.set_exception(e)
-                continue
-            batch = [op]
-            total = op.num_samples
-            blocked = {p.tenant for p in pending}
-            deferred_now = 0
-            while pool.cobatch_max_samples > 0:
-                try:
-                    nxt = pool.queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                if (
-                    nxt.kind == "fb"
-                    and nxt.loss_fn == op.loss_fn
-                    and nxt.tenant not in blocked
-                    and total + nxt.num_samples <= pool.cobatch_max_samples
-                ):
-                    if self.converter.cobatch_preserves_token_bucket(
-                        [o.rollout_data for o in batch] + [nxt.rollout_data],
-                        _dp_size(pool.args),
-                        pool.cobatch_e0_tokens,
-                    ):
-                        batch.append(nxt)
-                        total += nxt.num_samples
-                    else:
-                        # E0 guard refusal ENDS the merge window: deferring a
-                        # refused fb would convoy it behind blocked-tenant
-                        # bookkeeping and replay for no gain (the next window
-                        # re-evaluates it as head).
-                        carry = nxt
-                        break
-                elif (
-                    pool.cobatch_reorder
-                    and nxt.kind != "stop"
-                    and nxt.tenant is not None
-                ):
-                    pending.append(nxt)   # defer; replayed in order after the call
-                    blocked.add(nxt.tenant)
-                    deferred_now += 1
-                else:
-                    carry = nxt   # FIFO: this op becomes the next head
-                    break
-            if deferred_now:
-                logger.info(
-                    "Reorder drain: deferred %d op(s) past the merge window",
-                    deferred_now,
-                )
-            try:
-                per_request = await self._execute_fb_batch(pool, batch)
-                for o, r in zip(batch, per_request):
-                    if not o.future.done():
-                        o.future.set_result(r)
-            except Exception as e:  # noqa: BLE001  (#189) — surfaced via the futures
-                for o in batch:
-                    if not o.future.done():
-                        o.future.set_exception(e)
-
-    async def _execute_fb_batch(self, pool: MilesPool, batch: List[_PoolOp]) -> List[Dict[str, Any]]:
+    async def _execute_fb_batch(self, pool: MilesPool, batch: List[_FbRequest]) -> List[Dict[str, Any]]:
         """One train call for 1..k merged fb requests; split results back."""
         from miles.utils.ray_utils import Box
         from miles.ray.tinker_group import merge_dp_sample_outputs
@@ -862,7 +786,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
             logger.info(
                 "Co-batched fb: %d requests / %d samples / tenants %s",
                 len(batch), sum(o.num_samples for o in batch),
-                sorted({o.handle.model_id for o in batch}),
+                sorted({o.tenant for o in batch}),
             )
 
         results = await pool.train_group.forward_backward_only(0, Box(ray.put(merged)))
@@ -980,7 +904,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
             self._validate_fb(handle, data)
             pool = self._pool
             if handle.adapter_slot is not None and pool is not None:
-                return await self._pool_run(pool, _run, tenant=handle.model_id)
+                return await pool.scheduler.submit_barrier(_run, handle.model_id)
             await handle.lock.acquire()
             try:
                 return await _run()
@@ -1028,15 +952,15 @@ class MilesBackend(TrainingBackend[MilesHandle]):
         pool = self._pool
         if handle.adapter_slot is not None and pool is not None:
             # Pool path: validate + convert here (CPU), then queue the GPU
-            # work — the dispatcher serializes and may co-batch it (M3).
+            # work: the pool queue serializes it and may co-batch it.
             try:
                 self._validate_fb(handle, data)
                 rollout_data = self.converter.forward_backward_to_backend(
                     data, loss_fn, handle.args, adapter_slot=handle.adapter_slot,
                 )
-                return await self._pool_submit(pool, _PoolOp(
-                    kind="fb", handle=handle, rollout_data=rollout_data,
-                    loss_fn=loss_fn, num_samples=len(data), tenant=handle.model_id,
+                return await self._pool_fb(pool, _FbRequest(
+                    tenant=handle.model_id, rollout_data=rollout_data,
+                    loss_fn=loss_fn, num_samples=len(data),
                     input_lens=_model_input_lens(data),
                 ))
             except (BackendError, ValueError):
@@ -1168,7 +1092,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
         try:
             pool = self._pool
             if handle.adapter_slot is not None and pool is not None:
-                return await self._pool_run(pool, _run, tenant=handle.model_id)
+                return await pool.scheduler.submit_barrier(_run, handle.model_id)
             await handle.lock.acquire()
             try:
                 return await _run()
@@ -1189,7 +1113,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
         try:
             pool = self._pool
             if handle.adapter_slot is not None and pool is not None:
-                await self._pool_run(pool, _run, tenant=handle.model_id)
+                await pool.scheduler.submit_barrier(_run, handle.model_id)
                 return
             await handle.lock.acquire()
             try:
@@ -1247,7 +1171,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
         try:
             pool = self._pool
             if handle.adapter_slot is not None and pool is not None:
-                await self._pool_run(pool, _run, tenant=handle.model_id)
+                await pool.scheduler.submit_barrier(_run, handle.model_id)
                 return
             await handle.lock.acquire()
             try:
@@ -1362,7 +1286,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
                     await pool.train_group.reconcile_adapters()
 
                 try:
-                    await self._pool_run(pool, _retire, tenant=h.model_id)
+                    await pool.scheduler.submit_barrier(_retire, h.model_id)
                 except Exception as e:
                     raise BackendError(
                         str(e), backend="miles", operation="delete_model", original_error=e,
@@ -1376,13 +1300,13 @@ class MilesBackend(TrainingBackend[MilesHandle]):
             # Last tenant: the pool dies with it. Null the record even on a
             # partial teardown — a half-dead pool must not accept joins.
             try:
-                # Drain + stop the dispatcher first: FIFO means every
+                # Drain + stop the pool queue first: FIFO means every
                 # already-queued op completes before the stop resolves, so
                 # the kills below never race an in-flight broadcast.
                 try:
-                    await self._pool_submit(pool, _PoolOp(kind="stop"))
+                    await self._pool_stop(pool)
                 except BackendError:
-                    pass  # dispatcher already dead — proceed to kills
+                    pass  # the queue is closed already — proceed to kills
                 resources_freed = []
                 try:
                     await pool.controller.stop.remote()
