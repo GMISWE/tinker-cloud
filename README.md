@@ -1,12 +1,48 @@
 <p align="center"><img src="docs/tinkercloud-mark.svg" alt="tinkercloud" width="640"></p>
 
-FastAPI server that provides an abstraction layer between the Tinker client SDK and
-pluggable training backends (Miles, NeMo RL, Automodel, Megatron-Bridge) — the same
-Tinker API drives any backend, no client changes required.
+An open training server for the [Tinker](https://thinkingmachines.ai/tinker/) API. Training loops
+written against the Tinker SDK (RL, SFT, DPO, distillation) run unchanged on your own GPUs, on the
+training engine you choose.
 
 ```
-Tinker Client --> TinkerCloud --> Miles | NeMo RL | Automodel | Megatron-Bridge --> GPUs
+tinker SDK / tinker-cookbook ──HTTP──▶ TinkerCloud ──▶ one backend ──▶ Ray actors on your GPUs
+                                                        Miles · NeMo RL · Automodel · verl · Megatron-Bridge
 ```
+
+## Why TinkerCloud
+
+- **One API, any engine.** The backend is chosen when the server starts (`--backend <name>`). Client
+  code never changes, whether the engine is Megatron or FSDP and whether it trains adapters or full
+  models.
+- **The Tinker primitives, kept exact.** `forward_backward`, `optim_step`, `sample` and the
+  checkpoint calls keep their documented meaning on every backend. A model's requests run in
+  program order, a retried request is idempotent, and every result is validated against its
+  response model before a client can read it.
+- **Shared GPUs.** Many LoRA tenants train on one model replica set and sample from one vLLM
+  (Automodel). Several full models, a student and its teachers, share the same GPUs (verl).
+- **Checked on real recipes.** The tinker-cookbook recipes below run end to end with their published
+  hyperparameters. The unit suites run on every pull request, and a conformance suite checks the
+  protocol against a CPU backend.
+- **Deployable as it stands.** One script deploys to Kubernetes or docker. Ray runs with token
+  authentication, the pod ships with a NetworkPolicy that admits only the API port, model
+  repository code runs only for models the operator lists, and `ENV=production` refuses the public
+  dev key.
+- **Portable checkpoints.** Adapters are saved in PEFT layout and can be exported through signed
+  download URLs.
+
+## Backends
+
+One server process serves one backend. Each implements the same `TrainingBackend` interface
+(`training/backends/`).
+
+| Backend | Engine | Serves | Notes |
+|---|---|---|---|
+| `nemo_rl` | NeMo RL on Megatron-Bridge | RL, SFT and DPO recipes | The verified recipes below |
+| `automodel` | NeMo Automodel, FSDP2 | LoRA: many tenants per training group | AdamW and a Muon-family optimizer; one vLLM per base model |
+| `verl` | verl, FSDP | Full fine-tuning; per-candidate `cross_entropy` | Multi-teacher distillation: see [verl backend](#verl-backend) |
+| `miles` | Miles on Megatron | `cross_entropy`, `importance_sampling`, `ppo` | A pool of LoRA adapters per base model |
+| `megatron_bridge` | Megatron-Bridge | `cross_entropy`, `classification_ce` (sequence classification) | |
+| `fake` | none (CPU) | Deterministic stand-in | Runs the protocol suite without a GPU |
 
 ## Quickstart (NeMo RL)
 
@@ -75,13 +111,31 @@ Validated end-to-end against this server with each recipe's README hyperparamete
 | preference/dpo | DPO | Llama-3.2-1B | **Pass** (mechanics) — 34 steps error-free, gradients flowing; loss ~ln(2) flat in 34 steps at documented lr=1e-5, longer run needed for convergence verdict |
 
 
+## verl backend
+
+The `verl` backend serves full fine-tuning on [verl](https://github.com/verl-project/verl)'s FSDP
+engine, and the primitives that distillation from several teachers needs:
+
+- **Full models, not only adapters.** Each model is its own worker group; `optim_step` applies
+  the step's AdamW parameters and its `grad_clip_norm`.
+- **Per-candidate cross-entropy.** `cross_entropy` takes `(N, K)` targets and signed weights and
+  returns `(N, K)` logprobs, so a loss over the K best tokens of each position is one call.
+- **Teachers beside the student.** A teacher is a forward-only model on the student's GPUs
+  (`TINKERCLOUD_VERL_MODELS_PER_GPU`). One pass runs at a time, so models never compete for memory.
+- **Top-K sampling.** `sample` returns the K best logprobs at each position. The vLLM sampler
+  sleeps while any model trains and wakes for the next sample.
+
+The tinker-cookbook recipe `recipes/distillation/mopd` uses all four: a 3B student, three teachers
+and one sampler on four GPUs. Start the server with `python -m training --backend verl` inside a
+verl environment; the deploy script has no verl profile yet.
+
 ## Configuration
 
 Server-wide settings (`training/config.py`):
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `TINKERCLOUD_BACKEND` | `miles`, `nemo_rl`, `verl`, `megatron_bridge`, `fake` (also `python -m training --backend B`) | `miles` |
+| `TINKERCLOUD_BACKEND` | `miles`, `nemo_rl`, `automodel`, `verl`, `megatron_bridge`, `fake` (also `python -m training --backend B`) | `miles` |
 | `TINKERCLOUD_BACKEND_OVERRIDES` | JSON object of backend config fields, applied over the environment | unset |
 | `TRAINING_HOST` / `TRAINING_PORT` | Bind address | `0.0.0.0` / `8000` |
 | `TINKER_API_KEY` | API auth key (comma-separated for several); `ENV=production` refuses to start when the list is empty or holds `tml-dev-key`. The deploy and rotate scripts set it from the key file on the target (given once as `API_KEY_FILE`), else to `tml-dev-key`; never from a KEY=VAL | `tml-dev-key` |
