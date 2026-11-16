@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import ray
+from ray.exceptions import RayError
 
 from ..base import BackendError, BackendHandle, SampleRequestError, TrainingBackend, UnsupportedFeatureError
 from ...utils.model_config import read_raw_hf_config
@@ -120,6 +121,15 @@ def _engine_context_length(hf_path: str) -> Optional[int]:
     except Exception as e:  # noqa: BLE001  (#189) - unknown context disables the check, never blocks boot
         logger.warning("context_length unknown for %s: %s", hf_path, e)
         return None
+
+
+async def _stop_controller(controller: Any) -> None:
+    """Stop and kill a multi-LoRA controller. Only a failed Ray call falls back to killing it."""
+    try:
+        await controller.stop.remote()
+    except RayError:
+        logger.warning("Multi-LoRA controller stop failed; killing", exc_info=True)
+    ray.kill(controller, no_restart=True)
 
 
 @dataclass
@@ -1233,11 +1243,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
             # kill the named controller so the next create_model can
             # register a fresh one.
             if handle.controller is not None:
-                try:
-                    await handle.controller.stop.remote()
-                except Exception:  # noqa: BLE001  (#189)
-                    logger.warning("Multi-LoRA controller stop failed; killing", exc_info=True)
-                ray.kill(handle.controller, no_restart=True)
+                await _stop_controller(handle.controller)
                 resources_freed.append("multi_lora_controller")
 
             for actor in handle.train_group._actor_handles:
@@ -1308,11 +1314,7 @@ class MilesBackend(TrainingBackend[MilesHandle]):
                 except BackendError:
                     pass  # the queue is closed already — proceed to kills
                 resources_freed = []
-                try:
-                    await pool.controller.stop.remote()
-                except Exception:  # noqa: BLE001  (#189)
-                    logger.warning("Multi-LoRA controller stop failed; killing", exc_info=True)
-                ray.kill(pool.controller, no_restart=True)
+                await _stop_controller(pool.controller)
                 resources_freed.append("multi_lora_controller")
                 for actor in pool.train_group._actor_handles:
                     ray.kill(actor, no_restart=True)
