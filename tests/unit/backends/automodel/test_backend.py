@@ -26,6 +26,7 @@ ADAM = dict(beta1=0.9, beta2=0.95, eps=1e-8, weight_decay=0.0, grad_clip_norm=0.
 LORA = LoraSpec(rank=8, alpha=16, target_modules=("q_proj",), dropout=0.0, optimizer="adamw")
 VLLM = "http://vllm:1"
 SP = {"temperature": 0.0, "top_p": 1.0, "max_tokens": 4}
+MEMORY = {"gpu_allocated_peak_bytes": 3, "gpu_reserved_peak_bytes": 4, "gpu_device_used_bytes": 5}   # every stand-in rank's reading
 run = asyncio.run
 
 
@@ -101,6 +102,7 @@ class Ranks:
                 "elementwise": valid.float(),
                 "clamped": torch.zeros(s.num_rows),
                 "swap_seconds": self.swap_seconds,
+                "memory": dict(MEMORY),
             })
         return outs
 
@@ -275,7 +277,9 @@ def test_pass_results_are_split_per_request():
         )
         assert a["loss"] == 8.0 and b["loss"] == 2.0
         assert a["loss_fn_output_type"] == LossFn.CROSS_ENTROPY.value
-        assert a["metrics"] == {"loss:sum": 8.0, "clamped_positions:sum": 0, "swap_seconds:max": 0.0}
+        assert a["metrics"] == {"loss:sum": 8.0, "clamped_positions:sum": 0, "swap_seconds:max": 0.0,
+                                "gpu_allocated_peak_bytes:max": 3, "gpu_reserved_peak_bytes:max": 4,
+                                "gpu_device_used_bytes:max": 5}
         assert [o["logprobs"]["shape"] for o in a["loss_fn_outputs"]] == [[3], [5]]
         assert a["loss_fn_outputs"][1]["logprobs"]["data"] == [-1.0] * 5
         assert a["loss_fn_outputs"][0]["elementwise_loss"]["data"] == [1.0] * 3

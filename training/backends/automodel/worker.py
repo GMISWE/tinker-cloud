@@ -24,7 +24,8 @@ loop here (Automodel's recipe owns its loop, Tinker's client owns this one):
   load_state        copies a checkpoint's weights, and its optimizer state when
                     asked, into every rank's shard
 A pass and a step report `swap_seconds`, the time their swap took (0 when
-the tenant was live).
+the tenant was live). A pass also reports `memory`, the levels this rank's
+GPU reached during it (`_pass_memory`).
 
 Lockstep: FSDP2 runs collectives in every forward and backward, so every rank
 must run the same number of them. shard() gives each rank the same row count
@@ -34,13 +35,14 @@ micro-batch of padding rows still runs its forward and backward.
 Rendezvous takes two calls: rank 0's rendezvous_address() picks a port on its
 node, then every rank's setup() joins it and builds the model.
 """
+import contextlib
 import hashlib
 import math
 import socket
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import dion
 import ray
@@ -258,23 +260,27 @@ class AutomodelWorker:
 
     # --- passes and steps ---------------------------------------------------
     def forward_backward(self, tenant: str, shard: Batch, clip: Optional[Tuple[float, float]]) -> Dict[str, Any]:
-        swap = self._swap_to(tenant)
-        self.model.train()
-        if isinstance(self.model, FSDPModule):  # Automodel leaves a 1-rank model unwrapped
-            # optim_step is a later call, so no micro-batch is known to be the
-            # last: every backward reduce-scatters into the sharded grads
-            self.model.set_requires_gradient_sync(True)
-        out = self._run(shard, clip, backward=True)
+        with _pass_memory() as memory:
+            swap = self._swap_to(tenant)
+            self.model.train()
+            if isinstance(self.model, FSDPModule):  # Automodel leaves a 1-rank model unwrapped
+                # optim_step is a later call, so no micro-batch is known to be the
+                # last: every backward reduce-scatters into the sharded grads
+                self.model.set_requires_gradient_sync(True)
+            out = self._run(shard, clip, backward=True)
         out["swap_seconds"] = swap
+        out["memory"] = memory
         return out
 
     def forward(self, tenant: str, shard: Batch, clip: Optional[Tuple[float, float]]) -> Dict[str, Any]:
-        swap = self._swap_to(tenant)
-        self.model.eval()
-        with torch.no_grad():
-            out = self._run(shard, clip, backward=False)
-        _reshard(self.model)
+        with _pass_memory() as memory:
+            swap = self._swap_to(tenant)
+            self.model.eval()
+            with torch.no_grad():
+                out = self._run(shard, clip, backward=False)
+            _reshard(self.model)
         out["swap_seconds"] = swap
+        out["memory"] = memory
         return out
 
     def optim_step(self, tenant: str, params: OptimParams) -> Dict[str, float]:
@@ -431,6 +437,22 @@ class AutomodelWorker:
             out["seq_log_ratio"][start:end] = res.seq_log_ratio.cpu()
             out["seq_clipped"][start:end] = res.seq_clipped.cpu()
         return out
+
+
+@contextlib.contextmanager
+def _pass_memory() -> Iterator[Dict[str, int]]:
+    """A pass runs inside this block; the yielded dict is filled when the block ends, with this
+    rank's GPU memory in bytes. The two peaks are the allocator's highest levels inside the block,
+    the model and the live adapter included: tensors, and tensors with the blocks the allocator
+    keeps. `gpu_device_used_bytes` is the device's total less its free memory at the block's end:
+    every process on the GPU, with what CUDA and its libraries hold outside the allocator."""
+    torch.cuda.reset_peak_memory_stats()
+    memory: Dict[str, int] = {}
+    yield memory
+    free, total = torch.cuda.mem_get_info()
+    memory.update(gpu_allocated_peak_bytes=torch.cuda.max_memory_allocated(),
+                  gpu_reserved_peak_bytes=torch.cuda.max_memory_reserved(),
+                  gpu_device_used_bytes=total - free)
 
 
 def _reshard(model: torch.nn.Module) -> None:
