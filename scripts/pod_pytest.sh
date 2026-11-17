@@ -117,5 +117,14 @@ elif [ "$RC" = 0 ]; then
     RC=$SKIPPED_FILES_EXIT
   fi
 fi
+# A skipped test is a test that did not run here: name each reason with its count (-rs prints them),
+# so a pod that lacks a package says so in one line instead of in a skip count.
+SKIPS="$(sed -n -E 's/^SKIPPED \[([0-9]+)\] [^ ]+:[0-9]+: (.*)/\1\t\2/p' "$TMP/run.log" \
+  | awk -F'\t' '{n[$2] += $1} END {for (r in n) printf "  %d skipped on this pod: %s\n", n[r], r}' || true)"
+if [ -n "$SKIPS" ]; then
+  echo "==> tests that did not run on $POD:" >&2; echo "$SKIPS" >&2
+elif grep -qE '[0-9]+ skipped' <<< "$VERDICT"; then
+  echo "==> tests were skipped on $POD; add -rs to name the reasons" >&2
+fi
 printf '%s %s %s | %s\n' "$(date -u +%FT%TZ)" "$POD" "$*" "${VERDICT:-no pytest summary (rc $RC)}" >> "$LOG"; LOGGED=1
 exit $RC
