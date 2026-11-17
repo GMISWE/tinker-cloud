@@ -26,8 +26,8 @@ def test_a_worker_that_dies_fails_the_queue_with_the_same_message():
         with pytest.raises(BackendError, match=CLOSED) as later:
             await s.submit_pass(key("a"), 2)
         assert str(waited.value) == str(later.value)
-        with pytest.raises(BackendError, match=CLOSED):
-            await asyncio.wait_for(running, timeout=5)
+        # settles the running pass; its error is the next test's
+        await asyncio.wait_for(asyncio.gather(running, return_exceptions=True), timeout=5)
     run(main())
 
 
