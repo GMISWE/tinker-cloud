@@ -350,12 +350,7 @@ class TestNemoRLBackendBuffering:
             backend.forward_backward(handle, make_synthetic_batch(2), "importance_sampling")
         )
         assert len(handle.data_buffer) == 1
-        # delete_model will fail on policy shutdown (no real policy), but
-        # the buffer should be cleared before that error
-        try:
-            run(backend.delete_model(handle))
-        except BackendError:
-            pass  # Expected — no real policy
+        run(backend.delete_model(handle))   # no policy to shut down: the delete succeeds
         assert len(handle.data_buffer) == 0
 
     def test_deferred_result_format(self, backend, handle, run):
@@ -370,7 +365,7 @@ class TestNemoRLBackendBuffering:
         }
 
     def test_concurrent_forward_backward_thread_safe(self, backend, handle, run):
-        """Concurrent forward_backward() calls all reach the buffer, one at a time on the model's scheduler (CHK018)."""
+        """Concurrent forward_backward() calls all reach the buffer, one at a time on the model's scheduler."""
         async def run_concurrent():
             tasks = [
                 backend.forward_backward(handle, make_synthetic_batch(2), "importance_sampling")

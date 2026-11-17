@@ -86,6 +86,10 @@ class NemoRLHandle(BackendHandle):
                                          # True the per-step prepare_for_training (BUG-005,
                                          # ~0.35 s/call, Q3-R2 phase decomposition) is skipped.
                                          # Invalidated by every offload path (refit, ckpt load).
+    # The model's training operations, one at a time in arrival order; set by create_model, so a
+    # handle built otherwise has none. It stays closed after the delete, for as long as the handle.
+    scheduler: GroupScheduler = field(init=False, repr=False)
+    torn_down: bool = False              # the delete's teardown completed
 
 
 class NemoRLBackend(TrainingBackend[NemoRLHandle]):
@@ -105,12 +109,8 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         self.config, self.overrides = NemoRLConfig.split_overrides(overrides)
         self._converter = None
         self._builder = None
-        # One scheduler per model, opened at create_model and kept closed after its delete:
-        # the model's training operations run one at a time, in arrival order.
-        self._schedulers: Dict[str, GroupScheduler] = {}
-        # Models whose delete failed half-way: their scheduler is closed, and the service keeps
-        # them registered, so a retried delete tears down directly. A delete that succeeds erases it.
-        self._failed_deletes: set[str] = set()
+        # Every model's scheduler, for close(); a deleted model's goes with its handle.
+        self._schedulers: "weakref.WeakSet[GroupScheduler]" = weakref.WeakSet()
         # One persistent connection pool per vLLM worker server this process
         # samples from. Keep-alive expiry sits under uvicorn's 5 s so a reused
         # connection is never one the worker already closed; no read timeout,
@@ -277,7 +277,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                 _maybe_pad_batch, batched_data, dp_size, mbs, handle.image_preprocessor,
             )
 
-            result = await self._scheduler(handle).submit_pass(
+            result = await handle.scheduler.submit_pass(
                 pass_key(handle.model_id, "forward", loss_fn, loss_fn_config), batched_data)
 
             # No refit after forward(): read-only pass, inference weights already in
@@ -329,7 +329,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                     handle.model_id,
                 )
                 # through the scheduler all the same: a deleted model refuses it with the closed error
-                await self._scheduler(handle).submit_barrier(_nothing)
+                await handle.scheduler.submit_barrier(_nothing)
                 return {
                     "loss_fn_output_type": loss_fn,
                     "metrics": {},
@@ -345,7 +345,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             )
             _dt_conv = time.time() - _t_conv
 
-            buffer_len = await self._scheduler(handle).submit_pass(
+            buffer_len = await handle.scheduler.submit_pass(
                 pass_key(handle.model_id, "forward_backward", loss_fn, loss_fn_config), batched_data)
 
             logger.info(
@@ -391,7 +391,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             ) from e
 
     async def apply_optimizer_step(self, handle: NemoRLHandle, optim_params: OptimParams) -> Dict[str, Any]:
-        return await self._scheduler(handle).submit_barrier(lambda: self._apply_optimizer_step(handle, optim_params))
+        return await handle.scheduler.submit_barrier(lambda: self._apply_optimizer_step(handle, optim_params))
 
     async def _apply_optimizer_step(
         self,
@@ -611,7 +611,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             ) from e
 
     async def update_inference_weights(self, handle: NemoRLHandle) -> None:
-        return await self._scheduler(handle).submit_barrier(lambda: self._update_inference_weights(handle))
+        return await handle.scheduler.submit_barrier(lambda: self._update_inference_weights(handle))
 
     async def _update_inference_weights(self, handle: NemoRLHandle) -> None:
         """Sync weights between training policy and inference engine."""
@@ -641,7 +641,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         if not persist:
             # ephemeral sampler save: the refit already delivered the weights, so it waits for no step
             return
-        await self._scheduler(handle).submit_barrier(lambda: self._save_checkpoint(handle, root, step))
+        await handle.scheduler.submit_barrier(lambda: self._save_checkpoint(handle, root, step))
 
     async def _save_checkpoint(self, handle: NemoRLHandle, root: Path, step: Optional[int]) -> None:
         try:
@@ -692,7 +692,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
     ) -> None:
         """Load checkpoint weights (and, on request, optimizer state) into the
         policy workers, then sync to the inference engine."""
-        await self._scheduler(handle).submit_barrier(lambda: self._load_checkpoint(handle, root, optimizer))
+        await handle.scheduler.submit_barrier(lambda: self._load_checkpoint(handle, root, optimizer))
 
     async def _load_checkpoint(self, handle: NemoRLHandle, root: Path, optimizer: bool) -> None:
         import os
@@ -747,22 +747,23 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         """Tear down NeMo RL Policy and release GPU resources. The model's scheduler
         closes with the delete, failed or not: what is queued behind it, and what
         is submitted after it, gets the scheduler's closed error."""
-        if handle.model_id in self._failed_deletes:
-            await self._tear_down(handle)   # nothing else runs on a closed scheduler
-            self._failed_deletes.discard(handle.model_id)
-            return
-        await self._scheduler(handle).submit_barrier(lambda: self._delete_model(handle))
+        try:
+            await handle.scheduler.submit_barrier(lambda: self._delete_model(handle))
+        except BackendError as e:
+            if e.operation != "schedule" or handle.torn_down:
+                raise
+            # The scheduler closed before this delete ran: an earlier delete failed half-way (the
+            # service keeps such a model, so its retry lands here) or the worker died. Nothing runs
+            # on a closed scheduler, so the teardown runs here, or the placement groups stay held.
+            await self._tear_down(handle)
 
     async def _delete_model(self, handle: NemoRLHandle) -> None:
         try:
             await self._tear_down(handle)
-        except BaseException:   # re-raised: the mark lets the service's retry reach the teardown
-            self._failed_deletes.add(handle.model_id)
-            raise
         finally:
             # a teardown that failed half-way leaves no policy fit to train on
             # the reason is the whole message of what was queued, so it says the group closed
-            self._schedulers[handle.model_id].abandon("model deleted, training group closed")
+            handle.scheduler.abandon("model deleted, training group closed")
 
     async def _tear_down(self, handle: NemoRLHandle) -> None:
         try:
@@ -798,6 +799,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                 if cluster is not None:
                     await asyncio.to_thread(cluster.shutdown)
 
+            handle.torn_down = True
             logger.info("NeMo RL model %s deleted", handle.model_id)
 
         except Exception as e:
@@ -957,15 +959,9 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         return results
 
     def _open_scheduler(self, handle: NemoRLHandle) -> None:
-        # The scheduler outlives its model's delete, closed; a weak reference lets the deleted
-        # handle (policy, clusters, tokenizer) go. A run holds the handle its caller passed.
-        ref = weakref.ref(handle)
-        self._schedulers[handle.model_id] = GroupScheduler(
-            handle.model_id, _one_at_a_time, lambda key, payloads: self._run_pass(_alive(ref), key, payloads),
-            "nemo_rl")
-
-    def _scheduler(self, handle: NemoRLHandle) -> GroupScheduler:
-        return self._schedulers[handle.model_id]   # opened by create_model, the only source of handles
+        handle.scheduler = GroupScheduler(
+            handle.model_id, _one_at_a_time, lambda key, payloads: self._run_pass(handle, key, payloads), "nemo_rl")
+        self._schedulers.add(handle.scheduler)
 
     async def _run_pass(self, handle: NemoRLHandle, key: PassKey, payloads: List[Any]) -> List[Any]:
         """The scheduler's run_pass. `_one_at_a_time` joins nothing, so a run holds one request and a
@@ -976,7 +972,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         return [_buffer(handle, key, p) for p in payloads]
 
     async def close(self) -> None:
-        for scheduler in self._schedulers.values():
+        for scheduler in list(self._schedulers):
             await scheduler.close("server shutdown")
         await self._http_pool.aclose()
 
@@ -994,13 +990,6 @@ async def _nothing() -> None:
     pass
 
 
-def _alive(ref: "weakref.ReferenceType[NemoRLHandle]") -> NemoRLHandle:
-    handle = ref()
-    if handle is None:
-        raise BackendError("a run outlived its model's handle", backend="nemo_rl", operation="schedule")
-    return handle
-
-
 def _one_at_a_time(run: Run, nxt: Op) -> Admit:
     """Admission that joins nothing: every operation runs as its own run, in arrival order."""
     return Admit.END
@@ -1013,9 +1002,9 @@ async def _forward_pass(handle: NemoRLHandle, batched_data: Any) -> Any:
     # the sampling path's wake and refit off the workers mid-pass.
     async with handle._training_lock:
         await _take_engine_for_training(handle)
-        # prepare_for_training(), not prepare_for_lp_inference(): the latter offloads
-        # the optimizer, which the next step then lacks. train vs eval mode gives
-        # identical logprobs (no dropout).
+        # prepare_for_training(), not prepare_for_lp_inference(): the latter moves the
+        # optimizer and grads to CPU (the Megatron worker's prepare_for_lp_inference), a round
+        # trip the next step pays back. train vs eval mode gives identical logprobs (no dropout).
         if not handle.training_resident:
             await asyncio.to_thread(handle.policy.prepare_for_training)
             handle.training_resident = True
