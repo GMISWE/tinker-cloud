@@ -70,7 +70,7 @@ Common knobs:
 | `HF_TOKEN_FILE` | Local file with the HuggingFace token (required on first deploy) |
 | `API_KEY_FILE` | Local file with the server's API key: one line without whitespace (a comma list gives several keys; a client sends one of them). Unset, the target keeps the key it has; a target with none runs on the public `tml-dev-key`. The key lives under the target's `/data`: a target recreated on an empty `/data` needs `API_KEY_FILE` again. Also read by `scripts/pod_rotate_server.sh` |
 | `GPUS` | GPUs to request / declare to Ray (default 4) |
-| `IMAGE` | Base image (default `nvcr.io/nvidia/nemo-rl:v0.5.0`) |
+| `IMAGE` | Base image (default `nvcr.io/nvidia/nemo-rl:v0.7.0`) |
 | `TINKER_CLOUD_REF`, `RL_REF`, `TINKER_GMI_REF`, `COOKBOOK_REF` | Pinned git refs, default `main` (`*_REPO` to override URLs) |
 | `KUBECONFIG`, `NS`, `POD`, `NODE` | k8s target placement: kubeconfig path, namespace, pod name, node name |
 | `CONTAINER`, `DATA_DIR`, `DOCKER` | docker target: container name, host data dir mounted at `/data`, docker command (`DOCKER="sg docker -c"` if your shell lacks the docker group) |

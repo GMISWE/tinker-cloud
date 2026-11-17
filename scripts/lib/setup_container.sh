@@ -99,6 +99,10 @@ if [ "$PROFILE" = nemo_rl ]; then
     [ -d "$MBPKG" ] || { echo "ERROR: the image's Megatron-Bridge is not at $MBPKG"; exit 1; }
     cp -r "$MBSRC/." "$MBPKG/"
   fi
+  # the overlaid checkout must import on this image's packages (an older image's transformers
+  # lacks names the checkout imports): fail the deploy here, not the first test or create_model
+  python3 -c 'import nemo_rl.models.policy' \
+    || { echo "ERROR: the RL checkout does not import on this image; deploy an image that matches it (IMAGE=...)"; exit 1; }
 elif [ "$PROFILE" = miles ]; then
   # Overlay the GMI miles fork onto the image's editable install: the base image's
   # baked miles predates the Tinker Ray-orchestration interface (forward_backward_only,
