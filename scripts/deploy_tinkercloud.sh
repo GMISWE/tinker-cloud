@@ -84,7 +84,7 @@ done
 BACKEND_ENV=()   # backend knobs as KEY=VAL, exported to the server process (step 6)
 case "$PROFILE" in
   nemo_rl)
-    IMAGE="${IMAGE:-nvcr.io/nvidia/nemo-rl:v0.5.0}"
+    IMAGE="${IMAGE:-nvcr.io/nvidia/nemo-rl:v0.7.0}"
     BACKEND="${BACKEND:-nemo_rl}"
     GPUS="${GPUS:-4}"
     NODE="${NODE:-$DEFAULT_NODE}"
