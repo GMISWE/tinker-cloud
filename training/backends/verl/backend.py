@@ -681,34 +681,28 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         yield
 
     async def _register_sample(self, h: VerlHandle) -> None:
-        """Wake `h`'s sampler on the scheduler and count one sample in flight. A sample cancelled
-        before its wake starts wakes nothing; one cancelled during its wake gives its count back
-        once the wake ends: a count with no sample behind it would keep every later pass waiting."""
-        gave_up = asyncio.Event()
-        registration = asyncio.ensure_future(
-            self._shared_scheduler().submit_barrier(lambda: self._wake_for_sample(h, gave_up), key=h.model_id))
+        """Wake `h`'s sampler on the scheduler, in arrival order, and count one sample in flight.
+        A sample cancelled while it waits is skipped by the scheduler. One cancelled while its wake
+        runs is not counted, or gives its count back: a count with no sample behind it would keep
+        every later pass waiting."""
+        gave_up = counted = False
+
+        async def wake() -> None:
+            nonlocal counted
+            await self._awake_sampler(h, "sample")
+            if gave_up:   # the caller was cancelled during the wake
+                return
+            h._active_samplers += 1
+            h._samplers_drained.clear()
+            counted = True
+
         try:
-            # the shield keeps the cancel from the scheduler, so a running wake can report its count;
-            # gave_up stands in for the scheduler's own skip of a cancelled operation
-            await asyncio.shield(registration)
+            await self._shared_scheduler().submit_barrier(wake, key=h.model_id)
         except asyncio.CancelledError:
-            gave_up.set()
-            registration.add_done_callback(lambda done: self._uncount_if_counted(h, done))
+            gave_up = True
+            if counted:   # the wake ended just before the cancel reached this task
+                self._uncount_sample(h)
             raise
-
-    async def _wake_for_sample(self, h: VerlHandle, gave_up: asyncio.Event) -> bool:
-        """Whether the sample was counted in flight."""
-        if gave_up.is_set():
-            return False
-        await self._awake_sampler(h, "sample")
-        h._active_samplers += 1
-        h._samplers_drained.clear()
-        return True
-
-    def _uncount_if_counted(self, h: VerlHandle, registration: asyncio.Future) -> None:
-        # a failed wake counted nothing; its error went to a submitter that is gone
-        if not registration.cancelled() and registration.exception() is None and registration.result():
-            self._uncount_sample(h)
 
     @staticmethod
     def _uncount_sample(h: VerlHandle) -> None:

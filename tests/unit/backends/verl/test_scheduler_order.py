@@ -104,6 +104,21 @@ def test_a_sample_between_two_passes_wakes_between_them(backend, events):
     asyncio.run(scenario())
 
 
+def test_a_sample_called_before_a_pass_wakes_before_it(backend, events):
+    """A sample's wake entered the queue one loop step after its call, so a pass called right behind
+    the sample, in the same step, ran first."""
+    async def scenario():
+        a, b = _model("a", events), _model("b", events)
+        _with_sampler(backend, a, events, awake=False)
+        sample = asyncio.ensure_future(_sample(backend, a))
+        run_b = asyncio.ensure_future(_run_pass(backend, b, "forward"))
+        await asyncio.wait_for(asyncio.gather(sample, run_b), timeout=WAIT_S)
+        assert events == [("wake", 0), "sample started", "sample returned", "sleep",
+                          ("workers called", "b"), ("workers returned", "b")]
+
+    asyncio.run(scenario())
+
+
 def test_a_sample_cancelled_during_its_wake_leaves_no_sample_counted(backend, events):
     """A sample cancelled while its wake ran stayed counted in flight, and every later pass waited for it."""
     async def scenario():
@@ -120,6 +135,30 @@ def test_a_sample_cancelled_during_its_wake_leaves_no_sample_counted(backend, ev
             await sample
         await asyncio.wait_for(_run_pass(backend, b, "forward"), timeout=WAIT_S)
         assert a._active_samplers == 0
+        assert events[-2:] == [("workers called", "b"), ("workers returned", "b")]
+
+    asyncio.run(scenario())
+
+
+def test_a_sample_cancelled_as_its_wake_counts_it_gives_the_count_back(backend, events):
+    """A cancel that lands when the wake has just counted the sample left the count behind, and every
+    later pass waited for a sample that was gone."""
+    async def scenario():
+        a, b = _model("a", events), _model("b", events)
+        _with_sampler(backend, a, events, awake=False)
+
+        class _CancelsTheSample(asyncio.Event):
+            def clear(self):   # the wake's last step: the sample is counted, its caller not yet resumed
+                super().clear()
+                sample.cancel()
+
+        a._samplers_drained = _CancelsTheSample()
+        a._samplers_drained.set()
+        sample = asyncio.ensure_future(_sample(backend, a))
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(sample, timeout=WAIT_S)
+        assert a._active_samplers == 0
+        await asyncio.wait_for(_run_pass(backend, b, "forward"), timeout=WAIT_S)
         assert events[-2:] == [("workers called", "b"), ("workers returned", "b")]
 
     asyncio.run(scenario())
