@@ -769,8 +769,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             await self._tear_down(handle)
         finally:
             # a teardown that failed half-way leaves no policy fit to train on
-            # the reason is the whole message of what was queued, so it says the group closed
-            handle.scheduler.abandon("model deleted, training group closed")
+            handle.scheduler.abandon("model deleted")
 
     async def _tear_down(self, handle: NemoRLHandle) -> None:
         try:
