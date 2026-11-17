@@ -86,7 +86,7 @@ class NemoRLHandle(BackendHandle):
                                          # True the per-step prepare_for_training (BUG-005,
                                          # ~0.35 s/call, Q3-R2 phase decomposition) is skipped.
                                          # Invalidated by every offload path (refit, ckpt load).
-    # The model's training operations, one at a time in arrival order; set by create_model, so a
+    # The model's training operations, each alone, in arrival order; set by create_model, so a
     # handle built otherwise has none. It stays closed after the delete, for as long as the handle.
     scheduler: GroupScheduler = field(init=False, repr=False)
     torn_down: bool = False              # the delete's teardown completed
@@ -312,7 +312,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         "loss_fn_outputs": []}. Real metrics at optim_step time.
 
         Ordering: the append runs on the model's scheduler, so concurrent
-        forward_backward calls reach the buffer one at a time, in arrival order,
+        forward_backward calls reach the buffer each alone, in arrival order,
         and one submitted during an optimizer step lands in the next step's buffer.
 
         Constraints:
@@ -970,7 +970,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         self._schedulers.add(handle.scheduler)
 
     async def _run_pass(self, handle: NemoRLHandle, key: PassKey, payloads: List[Any]) -> List[Any]:
-        """The scheduler's run_pass. `one_at_a_time` joins nothing, so a run holds one request and a
+        """Runs a pass the scheduler hands over. Its admission joins nothing, so a run holds one request and a
         refusal fails that request alone. The buffer's refusals (full, other fields, other loss) run
         here, not before the submit: they read the buffer, which only the scheduler's worker touches."""
         if key.kind == "forward":

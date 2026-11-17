@@ -659,11 +659,12 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         """The server's one FIFO over the shared GPUs. Built at the first operation: its worker
         is a task of the running event loop."""
         if self._scheduler is None:
+            # no operation ran yet: built here, in the running loop, since its worker is a task
             self._scheduler = GroupScheduler("verl", one_at_a_time, self._run_pass, "verl")
         return self._scheduler
 
     async def _run_pass(self, key: PassKey, payloads: List[_PassInput]) -> List[Any]:
-        """The scheduler's run_pass. `one_at_a_time` joins nothing, so a run holds one request."""
+        """Runs a pass the scheduler hands over. Its admission joins nothing, so a run holds one request."""
         if key.kind == "forward":
             return [await self._forward_only(p.handle, p.data) for p in payloads]
         return [await self._forward_backward(p.handle, p.data, key.loss_fn) for p in payloads]
