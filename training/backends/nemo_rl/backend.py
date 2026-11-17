@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from ..base import BackendError, BackendHandle, SampleRequestError, TrainingBackend
-from ..common.scheduler import Admit, GroupScheduler, Op, PassKey, Run, pass_key
+from ..common.scheduler import GroupScheduler, PassKey, one_at_a_time, pass_key
 from ...utils.model_config import read_raw_hf_config, remote_code_trusted
 from ..objectives import classification_spec
 from ..http_pool import HttpClientPool
@@ -966,11 +966,11 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
 
     def _open_scheduler(self, handle: NemoRLHandle) -> None:
         handle.scheduler = GroupScheduler(
-            handle.model_id, _one_at_a_time, lambda key, payloads: self._run_pass(handle, key, payloads), "nemo_rl")
+            handle.model_id, one_at_a_time, lambda key, payloads: self._run_pass(handle, key, payloads), "nemo_rl")
         self._schedulers.add(handle.scheduler)
 
     async def _run_pass(self, handle: NemoRLHandle, key: PassKey, payloads: List[Any]) -> List[Any]:
-        """The scheduler's run_pass. `_one_at_a_time` joins nothing, so a run holds one request and a
+        """The scheduler's run_pass. `one_at_a_time` joins nothing, so a run holds one request and a
         refusal fails that request alone. The buffer's refusals (full, other fields, other loss) run
         here, not before the submit: they read the buffer, which only the scheduler's worker touches."""
         if key.kind == "forward":
@@ -994,11 +994,6 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
 
 async def _nothing() -> None:
     pass
-
-
-def _one_at_a_time(run: Run, nxt: Op) -> Admit:
-    """Admission that joins nothing: every operation runs as its own run, in arrival order."""
-    return Admit.END
 
 
 async def _forward_pass(handle: NemoRLHandle, batched_data: Any) -> Any:
