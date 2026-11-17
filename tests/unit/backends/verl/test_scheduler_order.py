@@ -125,6 +125,31 @@ def test_a_sample_cancelled_during_its_wake_leaves_no_sample_counted(backend, ev
     asyncio.run(scenario())
 
 
+def test_a_sample_cancelled_while_queued_wakes_nothing(backend, events):
+    """A sample cancelled while it waited behind another model's pass still woke and synced the
+    sampler for no one, and its caller heard of the cancel only after that pass."""
+    async def scenario():
+        a, b, c = _model("a", events), _model("b", events), _model("c", events)
+        _with_sampler(backend, a, events, awake=False)
+        b.worker_group.hold.clear()
+        run_b = asyncio.ensure_future(_run_pass(backend, b, "forward"))
+        await asyncio.sleep(SETTLE_S)
+        sample = asyncio.ensure_future(_sample(backend, a))
+        await asyncio.sleep(SETTLE_S)
+        sample.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(sample, timeout=WAIT_S)
+        assert events == [("workers called", "b")], "the cancel waited for the pass ahead of it"
+        b.worker_group.hold.set()
+        await run_b
+        await asyncio.wait_for(_run_pass(backend, c, "forward"), timeout=WAIT_S)
+        assert a._active_samplers == 0
+        assert events == [("workers called", "b"), ("workers returned", "b"),
+                          ("workers called", "c"), ("workers returned", "c")]
+
+    asyncio.run(scenario())
+
+
 def _requests(backend: VerlBackend, handle: VerlHandle, root: Path) -> dict:
     return {
         "forward": lambda: _run_pass(backend, handle, "forward"),

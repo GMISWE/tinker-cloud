@@ -84,7 +84,7 @@ class VerlHandle(BackendHandle):
     lora_rank: int = 0
     # "<operation>: <the workers' error>" once a pass failed in the workers; the model then serves delete only
     failed: Optional[str] = None
-    deleted: bool = False             # delete_model removed the model; it then serves nothing
+    deleted: bool = False             # delete_model removed the model; it then serves only a sampler save
     # Sample concurrency: generates run outside the scheduler so vLLM batches them;
     # a pass of any model and this model's other operations drain them first (_quiesce_samplers).
     _active_samplers: int = 0
@@ -159,7 +159,7 @@ class VerlBackend(TrainingBackend[VerlHandle]):
     The server runs one operation of any model at a time, in arrival order; a sample's generate
     runs beside it. A model whose pass failed in its workers is stopped: its later passes,
     samples, saves and loads are refused, and its delete removes it. A deleted model refuses
-    everything."""
+    everything but an ephemeral sampler save."""
     config: VerlConfig
 
     SUPPORTED_LOSS_FNS = frozenset({"cross_entropy", "importance_sampling", "ppo"})  # losses.LOSS_FNS
@@ -548,18 +548,8 @@ class VerlBackend(TrainingBackend[VerlHandle]):
             raise BackendError(str(e), backend="verl", operation="sample", original_error=e) from e
 
     async def prepare_for_generation(self, handle: VerlHandle) -> None:
-        await self._shared_scheduler().submit_barrier(lambda: self._prepare(handle), key=handle.model_id)
-
-    async def _prepare(self, handle: VerlHandle) -> None:
-        self._refuse_stopped(handle, "prepare_for_generation")
-        try:
-            await self._awake_sampler(handle)
-        except BackendError:
-            raise
-        except Exception as e:
-            raise BackendError(
-                str(e), backend="verl", operation="prepare_for_generation", original_error=e,
-            ) from e
+        await self._shared_scheduler().submit_barrier(
+            lambda: self._awake_sampler(handle, "prepare_for_generation"), key=handle.model_id)
 
     # -------------------------------------------------------------- helpers
 
@@ -670,8 +660,7 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         return [await self._forward_backward(p.handle, p.data, key.loss_fn) for p in payloads]
 
     async def close(self) -> None:
-        if self._scheduler is not None:   # a server that ran no operation built none
-            await self._scheduler.close("server shutdown")
+        await self._shared_scheduler().close("server shutdown")
 
     @contextlib.asynccontextmanager
     async def _pass(self, h: VerlHandle, operation: str):
@@ -692,30 +681,32 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         yield
 
     async def _register_sample(self, h: VerlHandle) -> None:
-        """Wake `h`'s sampler on the scheduler and count one sample in flight. The wake of a
-        cancelled sample still runs, as every cancelled request on the scheduler does, and the
-        sample gives its count back once the wake ends: a count with no sample behind it would
-        keep every later pass waiting."""
+        """Wake `h`'s sampler on the scheduler and count one sample in flight. A sample cancelled
+        before its wake starts wakes nothing; one cancelled during its wake gives its count back
+        once the wake ends: a count with no sample behind it would keep every later pass waiting."""
+        gave_up = asyncio.Event()
         registration = asyncio.ensure_future(
-            self._shared_scheduler().submit_barrier(lambda: self._wake_for_sample(h), key=h.model_id))
+            self._shared_scheduler().submit_barrier(lambda: self._wake_for_sample(h, gave_up), key=h.model_id))
         try:
             await asyncio.shield(registration)
         except asyncio.CancelledError:
-            await asyncio.wait([registration])
-            if not registration.cancelled() and registration.exception() is None:
-                self._uncount_sample(h)
+            gave_up.set()
+            registration.add_done_callback(lambda done: self._uncount_if_counted(h, done))
             raise
 
-    async def _wake_for_sample(self, h: VerlHandle) -> None:
-        self._refuse_stopped(h, "sample")
-        try:
-            await self._awake_sampler(h)
-        except BackendError:
-            raise
-        except Exception as e:
-            raise BackendError(str(e), backend="verl", operation="sample", original_error=e) from e
+    async def _wake_for_sample(self, h: VerlHandle, gave_up: asyncio.Event) -> bool:
+        """Whether the sample was counted in flight."""
+        if gave_up.is_set():
+            return False
+        await self._awake_sampler(h, "sample")
         h._active_samplers += 1
         h._samplers_drained.clear()
+        return True
+
+    def _uncount_if_counted(self, h: VerlHandle, registration: asyncio.Future) -> None:
+        # a failed wake counted nothing; its error went to a submitter that is gone
+        if not registration.cancelled() and registration.exception() is None and registration.result():
+            self._uncount_sample(h)
 
     @staticmethod
     def _uncount_sample(h: VerlHandle) -> None:
@@ -723,27 +714,34 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         if h._active_samplers == 0:
             h._samplers_drained.set()
 
-    async def _awake_sampler(self, h: VerlHandle) -> None:
-        """Wake `h`'s sampler at its current weights. Call on the scheduler: no pass runs
-        until the operation that woke it ends.
+    async def _awake_sampler(self, h: VerlHandle, operation: str) -> None:
+        """Wake `h`'s sampler at its current weights, for `operation`. Call on the scheduler: no
+        pass runs until the operation that woke it ends.
 
         Raises:
+            BackendError: `h` is stopped (`_refuse_stopped`); or the wake failed.
             SampleRequestError: another model holds the server's one sampler
                 (it does until it is deleted); nothing is built for `h`.
         """
+        self._refuse_stopped(h, operation)
         if self._sampler_owner is not None and self._sampler_owner is not h:
             raise SampleRequestError(
                 f"the verl backend serves one sampling model per server and {self._sampler_owner.model_id} holds "
                 f"the sampler; {h.model_id} serves forward and training only", backend="verl")
         self._sampler_owner = h
+        build = asyncio.ensure_future(asyncio.to_thread(self._ensure_rollout_ready, h))
         try:
-            await asyncio.to_thread(self._ensure_rollout_ready, h)
-        except BaseException:
+            await asyncio.shield(build)
+        except BaseException as e:   # a cancelled worker too, at shutdown: re-raised below
+            # cancellation does not stop the build thread: judge the sampler after it returns
+            await asyncio.wait([build])
             if h.llm_manager is None:
                 # a failed build can leave server actors behind (verl names them, then launches);
                 # the claim goes only after they do
                 await asyncio.to_thread(_kill_named_actors, VLLM_SERVER_NAME_PREFIX)
                 self._sampler_owner = None
+            if isinstance(e, Exception) and not isinstance(e, BackendError):
+                raise BackendError(str(e), backend="verl", operation=operation, original_error=e) from e
             raise
 
     @staticmethod
