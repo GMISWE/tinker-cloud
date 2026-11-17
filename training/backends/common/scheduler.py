@@ -97,6 +97,11 @@ def same_key(run: Run, nxt: Op) -> Admit:
     return Admit.JOIN if isinstance(nxt, Pass) and nxt.key == run.passes[0].key else Admit.END
 
 
+def one_at_a_time(run: Run, nxt: Op) -> Admit:
+    """Admission that joins nothing: every operation runs as its own run, in arrival order."""
+    return Admit.END
+
+
 class GroupScheduler(Generic[K, P, R]):
     """`run_pass(key, payloads)` executes one coalesced pass, under its head's key, and returns one
     result per payload, in order."""

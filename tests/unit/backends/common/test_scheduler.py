@@ -4,7 +4,7 @@ import asyncio
 import pytest
 
 from tinkercloud.training.backends.base import BackendError
-from tinkercloud.training.backends.common.scheduler import GroupScheduler, pass_key, same_key
+from tinkercloud.training.backends.common.scheduler import GroupScheduler, one_at_a_time, pass_key, same_key
 
 FB = "forward_backward"
 
@@ -174,6 +174,23 @@ def test_close_fails_queued_ops_and_refuses_new_ones():
         await closing
         with pytest.raises(BackendError, match="is closed: last tenant deleted"):
             await s.submit_pass(key(), 2)
+    run(main())
+
+
+def test_one_at_a_time_runs_each_pass_alone():
+    """The admission of a backend that coalesces nothing: passes of one key, queued together, run one each."""
+    async def main():
+        e = Engine()
+        s = GroupScheduler("g", one_at_a_time, e.run_pass, "test")
+        e.gate.clear()
+        first = asyncio.ensure_future(s.submit_pass(key(), 1))
+        await started(e, 1)
+        rest = [asyncio.ensure_future(s.submit_pass(key(), i)) for i in (2, 3)]
+        await asyncio.sleep(0)
+        e.gate.set()
+        assert await asyncio.gather(first, *rest) == ["a:1", "a:2", "a:3"]
+        assert [r[3] for r in e.runs] == [(1,), (2,), (3,)]
+        await s.close("test done")
     run(main())
 
 

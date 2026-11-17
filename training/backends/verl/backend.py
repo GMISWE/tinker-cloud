@@ -21,9 +21,10 @@ never pay for it.
 
 GPUs: the server's models share one placement group of whole GPUs
 (_SharedGpus), verl's own colocation; a worker takes 1/models_per_gpu of its
-GPU, so several models are resident on the same devices. One pass runs at a
-time (VerlBackend._pass), and a pass whose workers fail ends its model
-(VerlBackend._worker_calls).
+GPU, so several models are resident on the same devices. Every operation of
+every model runs on one shared scheduler, one at a time in arrival order, and
+a sample's generate runs beside it (VerlBackend.sample). A pass whose workers
+fail ends its model (VerlBackend._worker_calls).
 """
 import asyncio
 import contextlib
@@ -38,6 +39,7 @@ from typing import Any, Dict, List, Optional, Tuple, cast
 import torch
 
 from ..common import gpu_memory
+from ..common.scheduler import GroupScheduler, PassKey, one_at_a_time, pass_key
 from ..base import BackendError, BackendHandle, SampleRequestError, TrainingBackend, UnsupportedFeatureError
 from ...utils.model_config import read_raw_hf_config
 from ..objectives import classification_spec
@@ -82,11 +84,18 @@ class VerlHandle(BackendHandle):
     lora_rank: int = 0
     # "<operation>: <the workers' error>" once a pass failed in the workers; the model then serves delete only
     failed: Optional[str] = None
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # FIFO per handle
-    # Sample concurrency: generates run OUTSIDE _lock so vLLM batches them;
+    deleted: bool = False             # delete_model removed the model; it then serves nothing
+    # Sample concurrency: generates run outside the scheduler so vLLM batches them;
     # a pass of any model and this model's other operations drain them first (_quiesce_samplers).
     _active_samplers: int = 0
     _samplers_drained: asyncio.Event = field(default_factory=_set_event)
+
+
+@dataclass(frozen=True)
+class _PassInput:
+    """One pass request on the scheduler: the model and its datums; the pass key carries the loss."""
+    handle: VerlHandle
+    data: List[Datum]
 
 
 class _SharedGpus:
@@ -147,8 +156,10 @@ class VerlBackend(TrainingBackend[VerlHandle]):
     """Full or LoRA models on verl's FSDP engine. Models share the server's GPUs
     (`models_per_gpu`); a model builds its vLLM sampler at its first sample, and
     one model per server holds a sampler. The sampler sleeps while any model runs a pass.
-    The server runs one pass at a time; a model whose pass failed in its workers is stopped:
-    its later passes, samples, saves and loads are refused, and its delete removes it."""
+    The server runs one operation of any model at a time, in arrival order; a sample's generate
+    runs beside it. A model whose pass failed in its workers is stopped: its later passes,
+    samples, saves and loads are refused, and its delete removes it. A deleted model refuses
+    everything."""
     config: VerlConfig
 
     SUPPORTED_LOSS_FNS = frozenset({"cross_entropy", "importance_sampling", "ppo"})  # losses.LOSS_FNS
@@ -169,13 +180,9 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         # vLLM server actors are Ray-named by replica rank alone, so one model per Ray
         # cluster can own a sampler: the first to sample or to be prepared for it, until deleted.
         self._sampler_owner: Optional[VerlHandle] = None
-        # A pass (forward, forward_backward, optimizer step) of any model runs with the sampler asleep.
-        # _sampler_gate serializes a sleep and a wake; a sample wakes the sampler only while no pass runs
-        # or waits. _pass_turn gives the passes the GPUs one at a time, in the order they arrive.
-        self._sampler_gate = asyncio.Lock()
-        self._pass_turn = asyncio.Lock()
-        self._passes_pending = 0
-        self._no_pass_pending = _set_event()
+        # The models share the GPUs: every operation of every model runs on one scheduler, in arrival
+        # order, one at a time (_shared_scheduler); a pass of any model runs with the sampler asleep.
+        self._scheduler: Optional[GroupScheduler] = None
 
     @property
     def converter(self):
@@ -268,7 +275,11 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         loss_fn: str,
         loss_fn_config: Optional[Dict[str, float]] = None,
     ) -> Dict[str, Any]:
-        async with handle._lock, self._pass(handle, "forward_backward"):
+        return await self._shared_scheduler().submit_pass(
+            pass_key(handle.model_id, "forward_backward", loss_fn, loss_fn_config), _PassInput(handle, data))
+
+    async def _forward_backward(self, handle: VerlHandle, data: List[Datum], loss_fn: str) -> Dict[str, Any]:
+        async with self._pass(handle, "forward_backward"):
             try:
                 td = await asyncio.to_thread(self._to_tensordict, handle, data, loss_fn)
                 async with self._worker_calls(handle, "forward_backward"):
@@ -295,7 +306,11 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         optim_params: OptimParams,
     ) -> Dict[str, Any]:
         adam = cast(AdamParams, optim_params)   # the only family this backend declares
-        async with handle._lock, self._pass(handle, "apply_optimizer_step"):
+        return await self._shared_scheduler().submit_barrier(
+            lambda: self._optimizer_step(handle, adam), key=handle.model_id)
+
+    async def _optimizer_step(self, handle: VerlHandle, adam: AdamParams) -> Dict[str, Any]:
+        async with self._pass(handle, "apply_optimizer_step"):
             try:
                 params: Dict[str, Any] = {
                     "lr": float(adam.learning_rate),
@@ -340,7 +355,11 @@ class VerlBackend(TrainingBackend[VerlHandle]):
 
     async def _score(self, handle: VerlHandle, data: List[Datum]) -> Tuple[List[Any], Dict[str, int]]:
         """One forward-only pass: the logprobs of `data` and the pass's GPU memory (`_pass_memory`)."""
-        async with handle._lock, self._pass(handle, "get_logprobs"):
+        return await self._shared_scheduler().submit_pass(
+            pass_key(handle.model_id, "forward", "cross_entropy", None), _PassInput(handle, data))
+
+    async def _forward_only(self, handle: VerlHandle, data: List[Datum]) -> Tuple[List[Any], Dict[str, int]]:
+        async with self._pass(handle, "get_logprobs"):
             try:
                 td = await asyncio.to_thread(self._to_tensordict, handle, data, "cross_entropy", True)
                 async with self._worker_calls(handle, "get_logprobs"):
@@ -377,60 +396,71 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         step: Optional[int] = None,
         persist: bool = True,
     ) -> None:
-        self._refuse_failed(handle, "save_checkpoint")
         if not persist:
-            return  # ephemeral sampler save: the engines already hold the weights
-        async with handle._lock:
-            self._refuse_failed(handle, "save_checkpoint")   # the pass this waited behind may have failed
-            try:
-                await self._quiesce_samplers(handle)
-                local_path = str(root)
-                await asyncio.to_thread(
-                    handle.worker_group.save_checkpoint, local_path, None, step or handle.weight_version,
+            # ephemeral sampler save: the engines already hold the weights. It writes nothing and
+            # does not wait on the scheduler, so a deleted model's answers too; its samples are refused.
+            self._refuse_failed(handle, "save_checkpoint")
+            return
+        await self._shared_scheduler().submit_barrier(lambda: self._save(handle, root, step), key=handle.model_id)
+
+    async def _save(self, handle: VerlHandle, root: Path, step: Optional[int]) -> None:
+        self._refuse_stopped(handle, "save_checkpoint")   # an operation ahead of this one may have stopped it
+        try:
+            await self._quiesce_samplers(handle)
+            local_path = str(root)
+            await asyncio.to_thread(
+                handle.worker_group.save_checkpoint, local_path, None, step or handle.weight_version,
+            )
+            if handle.lora_rank > 0:
+                # verl writes FSDP-sharded .pt only; no PEFT export path
+                # yet — say so rather than leaving a silently unmigratable
+                # checkpoint behind.
+                logger.warning(
+                    "verl checkpoint %s has no %s/ (verl PEFT export unimplemented): "
+                    "usable for verl resume, not for cross-backend migration",
+                    local_path, HF_ADAPTER_DIRNAME,
                 )
-                if handle.lora_rank > 0:
-                    # verl writes FSDP-sharded .pt only; no PEFT export path
-                    # yet (specs/007 §3.5) — say so rather than leaving a
-                    # silently unmigratable checkpoint behind.
-                    logger.warning(
-                        "verl checkpoint %s has no %s/ (verl PEFT export unimplemented): "
-                        "usable for verl resume, not for cross-backend migration",
-                        local_path, HF_ADAPTER_DIRNAME,
-                    )
-            except Exception as e:
-                raise BackendError(str(e), backend="verl", operation="save_checkpoint", original_error=e) from e
+        except Exception as e:
+            raise BackendError(str(e), backend="verl", operation="save_checkpoint", original_error=e) from e
 
     async def load_checkpoint(self, handle: VerlHandle, root: Path,
                               optimizer: bool = False) -> None:
         if optimizer:
             raise BackendError("verl restores weights only; optimizer state is not restored",
                                backend="verl", operation="load_checkpoint")
-        async with handle._lock:
-            self._refuse_failed(handle, "load_checkpoint")
-            try:
-                await self._quiesce_samplers(handle)
-                local_path = str(root)
-                if find_hf_adapter(local_path):
-                    # PeftModel.from_pretrained wraps pre-FSDP: only create_model
-                    # can attach an interchange adapter.
-                    raise BackendError(
-                        "verl imports an interchange adapter at create_model "
-                        "(lora_adapter_path), not via load_checkpoint",
-                        backend="verl", operation="load_checkpoint",
-                    )
-                await asyncio.to_thread(handle.worker_group.load_checkpoint, local_path)
-            except Exception as e:
-                raise BackendError(str(e), backend="verl", operation="load_checkpoint", original_error=e) from e
+        await self._shared_scheduler().submit_barrier(lambda: self._load(handle, root), key=handle.model_id)
+
+    async def _load(self, handle: VerlHandle, root: Path) -> None:
+        self._refuse_stopped(handle, "load_checkpoint")
+        try:
+            await self._quiesce_samplers(handle)
+            local_path = str(root)
+            if find_hf_adapter(local_path):
+                # PeftModel.from_pretrained wraps pre-FSDP: only create_model
+                # can attach an interchange adapter.
+                raise BackendError(
+                    "verl imports an interchange adapter at create_model "
+                    "(lora_adapter_path), not via load_checkpoint",
+                    backend="verl", operation="load_checkpoint",
+                )
+            await asyncio.to_thread(handle.worker_group.load_checkpoint, local_path)
+        except Exception as e:
+            raise BackendError(str(e), backend="verl", operation="load_checkpoint", original_error=e) from e
 
     async def delete_model(self, handle: VerlHandle) -> None:
-        # under the lock: a first sample may be building the sampler, and its actors must exist to be killed
-        async with handle._lock:
-            try:
-                await self._quiesce_samplers(handle)
-                await self._stop_actors(handle)   # for a model a failed pass ended: only what that stop left alive
-                await asyncio.to_thread(self._gpus.release, handle.model_id)
-            except Exception as e:
-                raise BackendError(str(e), backend="verl", operation="delete_model", original_error=e) from e
+        # on the scheduler: a first sample may be building the sampler, and its actors must exist to be killed
+        await self._shared_scheduler().submit_barrier(lambda: self._delete(handle), key=handle.model_id)
+
+    async def _delete(self, handle: VerlHandle) -> None:
+        if handle.deleted:   # a stopped model's delete runs; a deleted one's is refused
+            self._refuse_stopped(handle, "delete_model")
+        try:
+            await self._quiesce_samplers(handle)
+            await self._stop_actors(handle)   # for a model a failed pass ended: only what that stop left alive
+            await asyncio.to_thread(self._gpus.release, handle.model_id)
+        except Exception as e:
+            raise BackendError(str(e), backend="verl", operation="delete_model", original_error=e) from e
+        handle.deleted = True
 
     async def sample(
         self,
@@ -452,35 +482,24 @@ class VerlBackend(TrainingBackend[VerlHandle]):
                 raise SampleRequestError(
                     "topk_sample_logprobs needs temperature > 0 on the verl backend", backend="verl")
             vllm_sp["topk_log_probs"] = topk_sample_logprobs
-        # Hybrid timeshare: generation must not overlap a pass of any model. Register as an
-        # active sampler under the FIFO lock (which serializes the wake/weight-sync), then
-        # generate WITHOUT the lock so concurrent sample requests batch inside vLLM; a pass
-        # drains the active samplers first (_pass).
-        async with handle._lock:
-            self._refuse_failed(handle, "sample")
-            try:
-                async with self._awake_sampler(handle):
-                    handle._active_samplers += 1
-                    handle._samplers_drained.clear()
-
-                if pinned_version is not None and pinned_version != handle.weight_version:
-                    # vLLM serves the live (base+adapter) route; a pinned
-                    # nonzero version is not honorable — BUG-015 aliasing
-                    # class, logged loudly rather than silently aliased.
-                    logger.warning(
-                        "[%s] pinned_version=%s not honored for %s (verl serves "
-                        "the live engine, v%d) — BUG-015 aliasing risk",
-                        request_id, pinned_version, handle.model_id, handle.weight_version,
-                    )
-                if prompt_logprobs:
-                    logger.warning(
-                        "[%s] prompt_logprobs unsupported on verl sample path "
-                        "(use forward/get_logprobs); returning None", request_id,
-                    )
-            except (BackendError, UnsupportedFeatureError):
-                raise
-            except Exception as e:
-                raise BackendError(str(e), backend="verl", operation="sample", original_error=e) from e
+        # Hybrid timeshare: generation must not overlap a pass of any model. The wake runs on the
+        # scheduler and counts the sample in flight; the generate runs outside it, so concurrent
+        # samples batch inside vLLM, and a pass drains the samples in flight first (_pass).
+        await self._register_sample(handle)
+        if pinned_version is not None and pinned_version != handle.weight_version:
+            # vLLM serves the live (base+adapter) route; a pinned
+            # nonzero version cannot be honoured, so the live one answers
+            # for it: logged loudly rather than silently aliased.
+            logger.warning(
+                "[%s] pinned_version=%s not honored for %s (verl serves "
+                "the live engine, v%d): the live version answers for it",
+                request_id, pinned_version, handle.model_id, handle.weight_version,
+            )
+        if prompt_logprobs:
+            logger.warning(
+                "[%s] prompt_logprobs unsupported on verl sample path "
+                "(use forward/get_logprobs); returning None", request_id,
+            )
         try:
             try:
                 max_tokens = vllm_sp.get("max_tokens")
@@ -501,9 +520,7 @@ class VerlBackend(TrainingBackend[VerlHandle]):
 
                 outs = await asyncio.gather(*[_one(i) for i in range(num_samples)])
             finally:
-                handle._active_samplers -= 1
-                if handle._active_samplers == 0:
-                    handle._samplers_drained.set()
+                self._uncount_sample(handle)
             sequences = []
             for out in outs:
                 if out.stop_reason == "aborted":
@@ -531,17 +548,18 @@ class VerlBackend(TrainingBackend[VerlHandle]):
             raise BackendError(str(e), backend="verl", operation="sample", original_error=e) from e
 
     async def prepare_for_generation(self, handle: VerlHandle) -> None:
-        async with handle._lock:
-            self._refuse_failed(handle, "prepare_for_generation")
-            try:
-                async with self._awake_sampler(handle):
-                    pass
-            except BackendError:
-                raise
-            except Exception as e:
-                raise BackendError(
-                    str(e), backend="verl", operation="prepare_for_generation", original_error=e,
-                ) from e
+        await self._shared_scheduler().submit_barrier(lambda: self._prepare(handle), key=handle.model_id)
+
+    async def _prepare(self, handle: VerlHandle) -> None:
+        self._refuse_stopped(handle, "prepare_for_generation")
+        try:
+            await self._awake_sampler(handle)
+        except BackendError:
+            raise
+        except Exception as e:
+            raise BackendError(
+                str(e), backend="verl", operation="prepare_for_generation", original_error=e,
+            ) from e
 
     # -------------------------------------------------------------- helpers
 
@@ -572,14 +590,27 @@ class VerlBackend(TrainingBackend[VerlHandle]):
 
     @staticmethod
     async def _quiesce_samplers(h: VerlHandle) -> None:
-        """Drain in-flight generates. Call with h._lock HELD: new samplers
-        queue behind the lock; active ones finish without needing it."""
+        """Drain in-flight generates. Call on the scheduler: no sample registers meanwhile,
+        and the ones in flight finish without it."""
         while h._active_samplers:
             await h._samplers_drained.wait()
 
     @staticmethod
+    def _refuse_stopped(h: VerlHandle, operation: str) -> None:
+        """Call on the scheduler, as the operation starts: a request that waited behind the
+        operation that stopped the model is refused too.
+
+        Raises:
+            BackendError: `h` was deleted; or a pass of `h` failed in its workers, and the model
+                serves its delete only.
+        """
+        if h.deleted:
+            raise BackendError(f"model {h.model_id} is stopped: it was deleted", backend="verl", operation=operation)
+        VerlBackend._refuse_failed(h, operation)
+
+    @staticmethod
     def _refuse_failed(h: VerlHandle, operation: str) -> None:
-        """Call with h._lock HELD: a request that waited behind the failing pass is refused too.
+        """Refuse a model a failed pass stopped; a deleted model is `_refuse_stopped`'s.
 
         Raises:
             BackendError: a pass of `h` failed in its workers; the model serves its delete only.
@@ -591,12 +622,11 @@ class VerlBackend(TrainingBackend[VerlHandle]):
 
     async def _stop_actors(self, h: VerlHandle) -> None:
         """Kill `h`'s workers, and the sampler's actors when `h` holds the sampler; their GPU
-        memory is freed. `h` keeps its share of the GPUs. Call with h._lock HELD."""
+        memory is freed. `h` keeps its share of the GPUs. Call on the scheduler."""
         if self._sampler_owner is h:
-            async with self._sampler_gate:   # a pass of another model may be putting the sampler to sleep
-                # rollout server actors first (they hold engine refs into workers)
-                await asyncio.to_thread(_kill_named_actors, VLLM_SERVER_NAME_PREFIX)
-                self._sampler_owner = None
+            # rollout server actors first (they hold engine refs into workers)
+            await asyncio.to_thread(_kill_named_actors, VLLM_SERVER_NAME_PREFIX)
+            self._sampler_owner = None
         h.llm_manager = None
         h.llm_client = None
         h.ckpt_manager = None
@@ -625,79 +655,95 @@ class VerlBackend(TrainingBackend[VerlHandle]):
                     backend="verl", operation=operation, original_error=e) from stop_error
             raise
 
+    def _shared_scheduler(self) -> GroupScheduler:
+        """The server's one FIFO over the shared GPUs. Built at the first operation: its worker
+        is a task of the running event loop."""
+        if self._scheduler is None:
+            self._scheduler = GroupScheduler("verl", one_at_a_time, self._run_pass, "verl")
+        return self._scheduler
+
+    async def _run_pass(self, key: PassKey, payloads: List[_PassInput]) -> List[Any]:
+        """The scheduler's run_pass. `one_at_a_time` joins nothing, so a run holds one request."""
+        if key.kind == "forward":
+            return [await self._forward_only(p.handle, p.data) for p in payloads]
+        return [await self._forward_backward(p.handle, p.data, key.loss_fn) for p in payloads]
+
+    async def close(self) -> None:
+        if self._scheduler is not None:   # a server that ran no operation built none
+            await self._scheduler.close("server shutdown")
+
     @contextlib.asynccontextmanager
     async def _pass(self, h: VerlHandle, operation: str):
-        """Run a pass of `h` alone on the GPUs, with the server's sampler asleep. The models
-        share the GPUs: a pass waits for its turn behind the passes that arrived before it,
-        the sampler's in-flight samples finish first, and no sample wakes the sampler until
-        every pass that runs or waits has returned. Call with h._lock HELD.
+        """Run a pass of `h` with the server's sampler asleep, after its in-flight samples. Runs
+        on the scheduler, so no other operation of any model runs meanwhile.
 
         Raises:
-            BackendError: an earlier pass of `h` failed in its workers (`_refuse_failed`).
+            BackendError: `h` is stopped (`_refuse_stopped`).
         """
-        self._refuse_failed(h, operation)
-        self._passes_pending += 1
-        self._no_pass_pending.clear()
-        try:
-            async with self._pass_turn:
-                async with self._sampler_gate:
-                    owner = self._sampler_owner
-                    if owner is not None:
-                        await self._quiesce_samplers(owner)
-                        try:
-                            await asyncio.to_thread(self._ensure_training_ready, owner)
-                        except Exception as e:
-                            raise BackendError(
-                                str(e), backend="verl", operation="sleep_sampler", original_error=e) from e
-                yield
-        finally:
-            self._passes_pending -= 1
-            if self._passes_pending == 0:
-                self._no_pass_pending.set()
+        self._refuse_stopped(h, operation)
+        owner = self._sampler_owner
+        if owner is not None:
+            await self._quiesce_samplers(owner)
+            try:
+                await asyncio.to_thread(self._ensure_training_ready, owner)
+            except Exception as e:
+                raise BackendError(str(e), backend="verl", operation="sleep_sampler", original_error=e) from e
+        yield
 
-    @contextlib.asynccontextmanager
-    async def _awake_sampler(self, h: VerlHandle):
-        """Wake `h`'s sampler at its current weights, once no pass of any model runs. Inside
-        the block the sampler is awake and no pass can start: a sample counts itself in
-        flight there. Call with h._lock HELD.
+    async def _register_sample(self, h: VerlHandle) -> None:
+        """Wake `h`'s sampler on the scheduler and count one sample in flight. The wake of a
+        cancelled sample still runs, as every cancelled request on the scheduler does, and the
+        sample gives its count back once the wake ends: a count with no sample behind it would
+        keep every later pass waiting."""
+        registration = asyncio.ensure_future(
+            self._shared_scheduler().submit_barrier(lambda: self._wake_for_sample(h), key=h.model_id))
+        try:
+            await asyncio.shield(registration)
+        except asyncio.CancelledError:
+            await asyncio.wait([registration])
+            if not registration.cancelled() and registration.exception() is None:
+                self._uncount_sample(h)
+            raise
+
+    async def _wake_for_sample(self, h: VerlHandle) -> None:
+        self._refuse_stopped(h, "sample")
+        try:
+            await self._awake_sampler(h)
+        except BackendError:
+            raise
+        except Exception as e:
+            raise BackendError(str(e), backend="verl", operation="sample", original_error=e) from e
+        h._active_samplers += 1
+        h._samplers_drained.clear()
+
+    @staticmethod
+    def _uncount_sample(h: VerlHandle) -> None:
+        h._active_samplers -= 1
+        if h._active_samplers == 0:
+            h._samplers_drained.set()
+
+    async def _awake_sampler(self, h: VerlHandle) -> None:
+        """Wake `h`'s sampler at its current weights. Call on the scheduler: no pass runs
+        until the operation that woke it ends.
 
         Raises:
             SampleRequestError: another model holds the server's one sampler
                 (it does until it is deleted); nothing is built for `h`.
         """
-        # no await between the check and the claim
         if self._sampler_owner is not None and self._sampler_owner is not h:
             raise SampleRequestError(
                 f"the verl backend serves one sampling model per server and {self._sampler_owner.model_id} holds "
                 f"the sampler; {h.model_id} serves forward and training only", backend="verl")
         self._sampler_owner = h
         try:
-            while True:
-                await self._no_pass_pending.wait()
-                await self._sampler_gate.acquire()
-                if not self._passes_pending:
-                    break
-                self._sampler_gate.release()   # a pass started while this waited for the gate
-        except BaseException:   # cancelled while it waited: a claim with no sampler behind it goes
+            await asyncio.to_thread(self._ensure_rollout_ready, h)
+        except BaseException:
             if h.llm_manager is None:
+                # a failed build can leave server actors behind (verl names them, then launches);
+                # the claim goes only after they do
+                await asyncio.to_thread(_kill_named_actors, VLLM_SERVER_NAME_PREFIX)
                 self._sampler_owner = None
             raise
-        try:
-            build = asyncio.ensure_future(asyncio.to_thread(self._ensure_rollout_ready, h))
-            try:
-                await asyncio.shield(build)
-            except BaseException:   # a cancelled sample too: re-raised below
-                # cancellation does not stop the build thread: judge the sampler after it returns
-                await asyncio.wait([build])
-                if h.llm_manager is None:
-                    # a failed build can leave server actors behind (verl names them, then launches);
-                    # the claim goes only after they do
-                    await asyncio.to_thread(_kill_named_actors, VLLM_SERVER_NAME_PREFIX)
-                    self._sampler_owner = None
-                raise
-            yield
-        finally:
-            self._sampler_gate.release()
 
     @staticmethod
     def _ensure_training_ready(h: VerlHandle) -> None:

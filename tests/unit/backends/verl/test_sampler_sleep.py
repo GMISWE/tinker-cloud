@@ -1,5 +1,6 @@
 """The verl backend's one sampler and the passes of the server's models: a pass of any model runs
-with the sampler asleep, after its in-flight samples, and a sample wakes it only when no pass runs.
+with the sampler asleep, after its in-flight samples, and a sample wakes it once the operations
+ahead of it on the server's one scheduler returned.
 
 The workers and the sampler are stand-ins that record the order of their calls; a stand-in can hold a
 call open until the test releases it."""
@@ -185,7 +186,7 @@ def test_a_sample_during_another_models_pass_wakes_the_sampler_after_the_pass(ba
 
 
 def test_a_sample_under_two_passes_wakes_the_sampler_after_the_last(backend, events):
-    """The first pass to return must not wake the sampler under the second: the passes are counted."""
+    """The first pass to return must not wake the sampler under the second: the sample waits behind both."""
     async def scenario():
         a, b, c = _model("a", events), _model("b", events), _model("c", events)
         _with_sampler(backend, a, events, awake=True)
