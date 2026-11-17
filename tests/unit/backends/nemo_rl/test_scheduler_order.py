@@ -123,10 +123,10 @@ async def started(policy, name):
 async def queued(backend, handle, n):
     """Wait until `n` operations wait in the model's scheduler behind the running one."""
     for _ in range(1000):
-        if backend._scheduler(handle).queued() == n:
+        if handle.scheduler.queued() == n:
             return
         await asyncio.sleep(0.005)
-    raise AssertionError(f"{backend._scheduler(handle).queued()} queued, expected {n}")
+    raise AssertionError(f"{handle.scheduler.queued()} queued, expected {n}")
 
 
 def assert_closed(error):
@@ -298,6 +298,19 @@ def test_a_deleted_model_is_not_held_by_its_scheduler(rig):
     del handle
     gc.collect()
     assert gone() is None
-    with pytest.raises(BackendError) as e:   # the closed scheduler still answers for the model
-        asyncio.run(backend.forward_backward(make_handle(policy), data(1), "cross_entropy"))
-    assert_closed(e.value)
+
+
+def test_a_request_on_a_deleted_handle_never_reaches_a_model_recreated_under_its_id(rig):
+    """Regression guarded: a request still holding a deleted model's handle queued on, and run by, a new
+    model created under the same id (ids repeat across a resend)."""
+    async def body(backend, handle, policy):
+        await backend.delete_model(handle)
+        again = make_handle(Policy())
+        backend._open_scheduler(again)
+        with pytest.raises(BackendError) as e:
+            await backend.forward_backward(handle, data(1), "cross_entropy")
+        assert_closed(e.value)
+        await backend.forward_backward(again, data(2), "cross_entropy")
+        assert [b.tags for b in again.data_buffer] == [["fb2"]]
+
+    run(rig, body)
