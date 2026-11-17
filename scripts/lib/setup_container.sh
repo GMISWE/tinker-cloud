@@ -26,6 +26,10 @@ mkdir -p /app /work /data/metadata /data/trajectories /data/.cache/huggingface
 # (the default ~/.cache lives in the container's own filesystem)
 export PIP_CACHE_DIR=/data/.cache/pip UV_CACHE_DIR=/data/.cache/uv
 
+# Tools the deploy's own pod-side checks call (lib/cluster.sh reads listening ports with ss).
+# An image without one stops the deploy at the Ray head, after setup has passed.
+command -v ss >/dev/null || { apt-get update -qq && apt-get install -y -qq iproute2 >/dev/null; }
+
 # TinkerCloud server -> /app (run via PYTHONPATH=/app python3 -m training)
 rm -rf /app/training /app/tests /app/gates /app/scripts /work/tinker_gmi /work/tinker-cookbook
 mv /tmp/tinker-cloud/training /app/training
