@@ -167,7 +167,7 @@ def test_close_fails_queued_ops_and_refuses_new_ones():
         await asyncio.sleep(0)
         closing = asyncio.ensure_future(s.close("last tenant deleted"))
         await asyncio.sleep(0)
-        with pytest.raises(BackendError, match="last tenant deleted"):
+        with pytest.raises(BackendError, match="is closed: last tenant deleted"):
             await queued
         e.gate.set()
         assert await running == "a:0"            # the op in progress finishes

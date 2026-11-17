@@ -110,6 +110,7 @@ class GroupScheduler(Generic[K, P, R]):
         self._waiting: Deque[Op] = deque()
         self._wakeup = asyncio.Event()
         self._closed: Optional[str] = None
+        self._in_progress: Tuple[Op, ...] = ()   # what the worker awaits; a worker that dies fails it too
         self._worker = asyncio.create_task(self._loop(), name=f"scheduler:{name}")
         self._worker.add_done_callback(self._on_worker_exit)
 
@@ -123,10 +124,13 @@ class GroupScheduler(Generic[K, P, R]):
         return len(self._waiting) + len(self._queue)
 
     def abandon(self, reason: str) -> None:
-        """Fail every queued op with `reason` and refuse new ones, at once;
-        the op in progress finishes. Callable from inside that op."""
+        """Close the group at once: every queued op and every later submission
+        fail with the closed error, which carries `reason`; the op in progress
+        finishes. Callable from inside that op."""
         self._closed = reason
-        self._fail_queued(reason)
+        for ops in (self._waiting, self._queue):
+            while ops:
+                self._fail(ops.popleft().future, self._closed_error())
         self._wakeup.set()
 
     async def close(self, reason: str) -> None:
@@ -139,9 +143,13 @@ class GroupScheduler(Generic[K, P, R]):
 
     def _new_future(self) -> asyncio.Future:
         if self._closed is not None:
-            raise BackendError(f"training group {self.name} is closed: {self._closed}",
-                               backend=self.backend, operation="schedule")
+            raise self._closed_error()
         return asyncio.get_running_loop().create_future()
+
+    def _closed_error(self) -> BackendError:
+        """One message for a closed group: what the close failed and what is submitted after it."""
+        return BackendError(f"training group {self.name} is closed: {self._closed}",
+                            backend=self.backend, operation="schedule")
 
     async def _enqueue(self, op: Op) -> Any:
         self._queue.append(op)
@@ -160,6 +168,7 @@ class GroupScheduler(Generic[K, P, R]):
                     await self._run_barrier(head)
                 else:
                     await self._run_passes(head)
+                self._in_progress = ()
             if self._closed is not None:
                 return
 
@@ -190,6 +199,7 @@ class GroupScheduler(Generic[K, P, R]):
                 logger.info("[%s] deferred %d op(s) past a run of %d", self.name, deferred, len(run))
             if len(run) > 1:
                 logger.info("[%s] coalesced %d passes under %r", self.name, len(run), head.key)
+            self._in_progress = tuple(run)
             results = await self._run_pass(head.key, [op.payload for op in run])
             if len(results) != len(run):
                 raise BackendError(f"run_pass returned {len(results)} results for {len(run)} requests",
@@ -203,6 +213,7 @@ class GroupScheduler(Generic[K, P, R]):
                 op.future.set_result(result)
 
     async def _run_barrier(self, op: Barrier[K]) -> None:
+        self._in_progress = (op,)
         try:
             result = await op.fn()
         except Exception as e:  # the barrier's own failure, delivered to its submitter  # noqa: BLE001  (#191)
@@ -213,7 +224,8 @@ class GroupScheduler(Generic[K, P, R]):
 
     def _on_worker_exit(self, task: asyncio.Task) -> None:
         """A worker that dies (a bug, or cancellation at shutdown) must not
-        leave submitters waiting: close the group and fail what is queued."""
+        leave submitters waiting: close the group and fail what is queued and
+        what was in progress."""
         if task.cancelled():
             reason = "scheduler cancelled"
         elif task.exception() is not None:
@@ -221,19 +233,14 @@ class GroupScheduler(Generic[K, P, R]):
             logger.error("[%s] %s", self.name, reason)
         else:
             return
-        self._closed = reason
-        self._fail_queued(reason)
+        self.abandon(reason)
+        for op in self._in_progress:
+            self._fail(op.future, self._closed_error())
+        self._in_progress = ()
 
-    def _fail_queued(self, reason: str) -> None:
-        for ops in (self._waiting, self._queue):
-            while ops:
-                self._fail(ops.popleft().future, reason)
-
-    def _fail(self, future: asyncio.Future, cause: Union[str, Exception]) -> None:
+    def _fail(self, future: asyncio.Future, cause: Exception) -> None:
         if future.done():
             return
-        if isinstance(cause, str):
-            cause = BackendError(cause, backend=self.backend, operation="schedule")
         future.set_exception(cause)
 
 
