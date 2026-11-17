@@ -69,7 +69,7 @@ def test_a_save_load_and_delete_wait_for_another_models_pass(backend, events, tm
         b.worker_group.hold.clear()
         run_b = asyncio.ensure_future(_run_pass(backend, b, "forward"))
         await asyncio.sleep(SETTLE_S)
-        later = [asyncio.ensure_future(backend.save_checkpoint(a, tmp_path)),
+        later = [asyncio.ensure_future(backend.save_checkpoint(a, tmp_path, step=1)),
                  asyncio.ensure_future(backend.load_checkpoint(a, tmp_path)),
                  asyncio.ensure_future(backend.delete_model(a))]
         await asyncio.sleep(SETTLE_S)
@@ -156,7 +156,7 @@ def _requests(backend: VerlBackend, handle: VerlHandle, root: Path) -> dict:
         "forward_backward": lambda: _run_pass(backend, handle, "forward_backward"),
         "optim_step": lambda: backend.apply_optimizer_step(handle, ADAM),
         "sample": lambda: _sample(backend, handle),
-        "save_checkpoint": lambda: backend.save_checkpoint(handle, root),
+        "save_checkpoint": lambda: backend.save_checkpoint(handle, root, step=1),
         "load_checkpoint": lambda: backend.load_checkpoint(handle, root),
         "prepare_for_generation": lambda: backend.prepare_for_generation(handle),
         "delete_model": lambda: backend.delete_model(handle),

@@ -56,6 +56,9 @@ logger = logging.getLogger(__name__)
 
 # vLLM's max_logprobs: the top-k it computes per position (handle.max_topk_logprobs).
 VLLM_MAX_LOGPROBS = 20
+# The loss a forward-only pass installs and runs, whatever loss forward() names: the engine's
+# logits hook, which [N, K] targets need, is the installed loss function.
+FORWARD_LOSS_FN = "cross_entropy"
 
 
 def _set_event() -> asyncio.Event:
@@ -356,16 +359,14 @@ class VerlBackend(TrainingBackend[VerlHandle]):
     async def _score(self, handle: VerlHandle, data: List[Datum]) -> Tuple[List[Any], Dict[str, int]]:
         """One forward-only pass: the logprobs of `data` and the pass's GPU memory (`_pass_memory`)."""
         return await self._shared_scheduler().submit_pass(
-            pass_key(handle.model_id, "forward", "cross_entropy", None), _PassInput(handle, data))
+            pass_key(handle.model_id, "forward", FORWARD_LOSS_FN, None), _PassInput(handle, data))
 
     async def _forward_only(self, handle: VerlHandle, data: List[Datum]) -> Tuple[List[Any], Dict[str, int]]:
         async with self._pass(handle, "get_logprobs"):
             try:
-                td = await asyncio.to_thread(self._to_tensordict, handle, data, "cross_entropy", True)
+                td = await asyncio.to_thread(self._to_tensordict, handle, data, FORWARD_LOSS_FN, True)
                 async with self._worker_calls(handle, "get_logprobs"):
-                    # the infer path runs the loss too: the engine's logits hook, which
-                    # [N, K] targets need, is the installed loss function
-                    await asyncio.to_thread(self._ensure_loss_fn, handle, "cross_entropy")
+                    await asyncio.to_thread(self._ensure_loss_fn, handle, FORWARD_LOSS_FN)
                     out = await asyncio.to_thread(_wg_call, handle.worker_group.compute_log_prob, td)
                     memory = await asyncio.to_thread(_pass_memory, handle.worker_group)
                     # a forward-only model would otherwise hold its pass's memory while another trains
@@ -409,7 +410,7 @@ class VerlBackend(TrainingBackend[VerlHandle]):
             await self._quiesce_samplers(handle)
             local_path = str(root)
             await asyncio.to_thread(
-                handle.worker_group.save_checkpoint, local_path, None, step or handle.weight_version,
+                handle.worker_group.save_checkpoint, local_path, None, step,
             )
             if handle.lora_rank > 0:
                 # verl writes FSDP-sharded .pt only; no PEFT export path
