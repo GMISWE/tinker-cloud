@@ -39,7 +39,9 @@ def random_sdk_rl_datum(types, g):
 def test_pipelined_steps_train_their_own_data_and_a_saved_sampler_samples(live_sdk):
     """Regression guarded: a forward_backward sent before the previous step returned landing in that step.
     All six calls of three steps (2, 3 and 4 datums) are sent before any result is read; each forward_backward
-    is the deferred result and each optim_step returns one output per datum of its own step."""
+    is the deferred result and each optim_step returns one output per datum of its own step. Second
+    regression: a sampler save sent behind those steps never serving, because the save waits on the
+    model's scheduler or reaches vLLM before the last step's refit; its sampler must return tokens."""
     import tinker
     from tinker import types
 
