@@ -747,10 +747,17 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         """Tear down NeMo RL Policy and release GPU resources. The model's scheduler
         closes with the delete, failed or not: what is queued behind it, and what
         is submitted after it, gets the scheduler's closed error."""
+        ran = False
+
+        async def delete() -> None:
+            nonlocal ran
+            ran = True
+            await self._delete_model(handle)
+
         try:
-            await handle.scheduler.submit_barrier(lambda: self._delete_model(handle))
-        except BackendError as e:
-            if e.operation != "schedule" or handle.torn_down:
+            await handle.scheduler.submit_barrier(delete)
+        except BackendError:
+            if ran or handle.torn_down:   # the teardown's own fault, or a model already gone: the caller hears it
                 raise
             # The scheduler closed before this delete ran: an earlier delete failed half-way (the
             # service keeps such a model, so its retry lands here) or the worker died. Nothing runs
@@ -1002,9 +1009,10 @@ async def _forward_pass(handle: NemoRLHandle, batched_data: Any) -> Any:
     # the sampling path's wake and refit off the workers mid-pass.
     async with handle._training_lock:
         await _take_engine_for_training(handle)
-        # prepare_for_training(), not prepare_for_lp_inference(): the latter moves the
-        # optimizer and grads to CPU (the Megatron worker's prepare_for_lp_inference), a round
-        # trip the next step pays back. train vs eval mode gives identical logprobs (no dropout).
+        # prepare_for_training(), not prepare_for_lp_inference(): the latter moves the Megatron
+        # worker's grad buffers to CPU (and its optimizer under offload_optimizer_for_logprob, which
+        # the builder turns off), a round trip the next step pays back. train vs eval mode gives
+        # identical logprobs (no dropout).
         if not handle.training_resident:
             await asyncio.to_thread(handle.policy.prepare_for_training)
             handle.training_resident = True
