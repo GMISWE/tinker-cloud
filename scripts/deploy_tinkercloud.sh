@@ -325,7 +325,9 @@ spec:
   containers:
   - name: tinkercloud
     image: $IMAGE
-    command: [sleep, infinity]
+    # PID 1 adopts every process whose parent died (Ray workers, engine workers). bash reaps them;
+    # `sleep` as PID 1 never does, and each one stays as a zombie for the pod's life.
+    command: [bash, -c, "sleep infinity & wait"]
     # py-spy dump / ray stack attach to non-child processes (Ray workers);
     # the runtime's default capability set omits it and the host's Yama
     # ptrace_scope=1 then refuses the attach (observed: py-spy dump on a Ray
@@ -387,7 +389,7 @@ EOF
       -e ALLOW_PARTIAL_BATCHES=true -e HF_HOME=/data/.cache/huggingface \
       -e CUDA_DEVICE_MAX_CONNECTIONS=1 -e NCCL_NVLS_ENABLE=0 \
       -e NCCL_IGNORE_DISABLED_P2P=1 \
-      "$IMAGE" sleep infinity
+      "$IMAGE" bash -c "sleep infinity & wait"   # bash as PID 1 reaps orphans; sleep does not
   fi
 else
   echo "==> [1/6] --code-only: restarting server on existing $TARGET target"
