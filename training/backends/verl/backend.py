@@ -646,10 +646,9 @@ class VerlBackend(TrainingBackend[VerlHandle]):
             raise
 
     def _shared_scheduler(self) -> GroupScheduler:
-        """The server's one FIFO over the shared GPUs. Built at the first operation: its worker
-        is a task of the running event loop."""
+        """The server's one FIFO over the shared GPUs."""
         if self._scheduler is None:
-            # no operation ran yet: built here, in the running loop, since its worker is a task
+            # built at the first call (an operation or close()): its worker is a task of the running loop
             self._scheduler = GroupScheduler("verl", one_at_a_time, self._run_pass, "verl")
         return self._scheduler
 
@@ -688,6 +687,8 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         registration = asyncio.ensure_future(
             self._shared_scheduler().submit_barrier(lambda: self._wake_for_sample(h, gave_up), key=h.model_id))
         try:
+            # the shield keeps the cancel from the scheduler, so a running wake can report its count;
+            # gave_up stands in for the scheduler's own skip of a cancelled operation
             await asyncio.shield(registration)
         except asyncio.CancelledError:
             gave_up.set()
@@ -731,18 +732,21 @@ class VerlBackend(TrainingBackend[VerlHandle]):
         self._sampler_owner = h
         build = asyncio.ensure_future(asyncio.to_thread(self._ensure_rollout_ready, h))
         try:
-            await asyncio.shield(build)
-        except BaseException as e:   # a cancelled worker too, at shutdown: re-raised below
-            # cancellation does not stop the build thread: judge the sampler after it returns
-            await asyncio.wait([build])
-            if h.llm_manager is None:
-                # a failed build can leave server actors behind (verl names them, then launches);
-                # the claim goes only after they do
-                await asyncio.to_thread(_kill_named_actors, VLLM_SERVER_NAME_PREFIX)
-                self._sampler_owner = None
-            if isinstance(e, Exception) and not isinstance(e, BackendError):
-                raise BackendError(str(e), backend="verl", operation=operation, original_error=e) from e
+            try:
+                await asyncio.shield(build)
+            except BaseException:   # a cancelled worker too, at shutdown: re-raised below
+                # cancellation does not stop the build thread: judge the sampler after it returns
+                await asyncio.wait([build])
+                if h.llm_manager is None:
+                    # a failed build can leave server actors behind (verl names them, then launches);
+                    # the claim goes only after they do
+                    await asyncio.to_thread(_kill_named_actors, VLLM_SERVER_NAME_PREFIX)
+                    self._sampler_owner = None
+                raise
+        except BackendError:
             raise
+        except Exception as e:
+            raise BackendError(str(e), backend="verl", operation=operation, original_error=e) from e
 
     @staticmethod
     def _ensure_training_ready(h: VerlHandle) -> None:
