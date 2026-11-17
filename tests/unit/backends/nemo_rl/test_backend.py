@@ -285,71 +285,83 @@ class TestNemoRLBackendBuffering:
         from tinkercloud.training.backends.nemo_rl.backend import NemoRLHandle
         return NemoRLHandle(model_id="test", backend_type="nemo_rl", config={})
 
-    def test_forward_backward_returns_deferred(self, backend, handle):
+    @pytest.fixture
+    def run(self, backend, handle):
+        """One event loop per test: the model's scheduler is a task on the loop it was opened on."""
+        loop = asyncio.new_event_loop()
+
+        async def opened():
+            backend._open_scheduler(handle)
+        loop.run_until_complete(opened())
+        yield loop.run_until_complete
+        loop.run_until_complete(backend.close())
+        loop.close()
+
+    def test_forward_backward_returns_deferred(self, backend, handle, run):
         """forward_backward() should return deferred=True."""
         data = make_synthetic_batch(batch_size=2)
-        result = asyncio.run(
+        result = run(
             backend.forward_backward(handle, data, "importance_sampling")
         )
         assert result["deferred"] is True
         assert result["metrics"] == {}
         assert len(handle.data_buffer) == 1
 
-    def test_forward_backward_accumulates_buffer(self, backend, handle):
+    def test_forward_backward_accumulates_buffer(self, backend, handle, run):
         """Multiple forward_backward() calls accumulate in buffer."""
         for _ in range(3):
-            asyncio.run(
+            run(
                 backend.forward_backward(handle, make_synthetic_batch(2), "importance_sampling")
             )
         assert len(handle.data_buffer) == 3
 
-    def test_forward_backward_empty_data_is_noop(self, backend, handle):
+    def test_forward_backward_empty_data_is_noop(self, backend, handle, run):
         """Empty data (GRPO all-zero advantages) is a deferred no-op, not an error."""
-        result = asyncio.run(backend.forward_backward(handle, [], "importance_sampling"))
+        result = run(backend.forward_backward(handle, [], "importance_sampling"))
         assert result == {
             "loss_fn_output_type": "importance_sampling",
             "metrics": {}, "deferred": True, "loss_fn_outputs": [],
         }
         assert len(handle.data_buffer) == 0
 
-    def test_apply_optimizer_step_empty_buffer_is_noop(self, backend, handle):
+    def test_apply_optimizer_step_empty_buffer_is_noop(self, backend, handle, run):
         """An empty buffer steps nothing and reports success with grad_norm 0."""
-        result = asyncio.run(backend.apply_optimizer_step(handle, AdamParams(learning_rate=1e-4)))
+        result = run(backend.apply_optimizer_step(handle, AdamParams(learning_rate=1e-4)))
         assert result["success"] is True
         assert result["grad_norm"] == 0.0
         assert result["loss_fn_outputs"] == []
 
-    def test_buffer_overflow_raises(self, backend, handle):
+    def test_buffer_overflow_raises(self, backend, handle, run):
         """forward_backward() should raise when buffer exceeds max_buffer_size (CHK006)."""
         handle.max_buffer_size = 3
         for _ in range(3):
-            asyncio.run(
+            run(
                 backend.forward_backward(handle, make_synthetic_batch(2), "importance_sampling")
             )
         assert len(handle.data_buffer) == 3
         with pytest.raises(BackendError, match="Buffer full"):
-            asyncio.run(
+            run(
                 backend.forward_backward(handle, make_synthetic_batch(2), "importance_sampling")
             )
 
-    def test_delete_model_clears_buffer(self, backend, handle):
+    def test_delete_model_clears_buffer(self, backend, handle, run):
         """delete_model() should warn and clear pending buffer (CHK007)."""
-        asyncio.run(
+        run(
             backend.forward_backward(handle, make_synthetic_batch(2), "importance_sampling")
         )
         assert len(handle.data_buffer) == 1
         # delete_model will fail on policy shutdown (no real policy), but
         # the buffer should be cleared before that error
         try:
-            asyncio.run(backend.delete_model(handle))
+            run(backend.delete_model(handle))
         except BackendError:
             pass  # Expected — no real policy
         assert len(handle.data_buffer) == 0
 
-    def test_deferred_result_format(self, backend, handle):
+    def test_deferred_result_format(self, backend, handle, run):
         """forward_backward() deferred result must have exact contract fields (CHK010)."""
         data = make_synthetic_batch(batch_size=2)
-        result = asyncio.run(
+        result = run(
             backend.forward_backward(handle, data, "importance_sampling")
         )
         assert result == {
@@ -357,8 +369,8 @@ class TestNemoRLBackendBuffering:
             "metrics": {}, "deferred": True, "loss_fn_outputs": [],
         }
 
-    def test_concurrent_forward_backward_thread_safe(self, backend, handle):
-        """Concurrent forward_backward() calls should be serialized by lock (CHK018)."""
+    def test_concurrent_forward_backward_thread_safe(self, backend, handle, run):
+        """Concurrent forward_backward() calls all reach the buffer, one at a time on the model's scheduler (CHK018)."""
         async def run_concurrent():
             tasks = [
                 backend.forward_backward(handle, make_synthetic_batch(2), "importance_sampling")
@@ -367,7 +379,7 @@ class TestNemoRLBackendBuffering:
             results = await asyncio.gather(*tasks)
             return results
 
-        results = asyncio.run(run_concurrent())
+        results = run(run_concurrent())
         assert len(handle.data_buffer) == 5
         assert all(r["deferred"] is True for r in results)
 

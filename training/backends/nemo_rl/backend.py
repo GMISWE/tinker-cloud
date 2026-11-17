@@ -13,6 +13,7 @@ forward + backward + optimizer.step() in a single call.
 """
 import asyncio
 import logging
+import weakref
 from contextlib import asynccontextmanager
 from pathlib import Path
 import time
@@ -23,6 +24,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from ..base import BackendError, BackendHandle, SampleRequestError, TrainingBackend
+from ..common.scheduler import Admit, GroupScheduler, Op, PassKey, Run, pass_key
 from ...utils.model_config import read_raw_hf_config, remote_code_trusted
 from ..objectives import classification_spec
 from ..http_pool import HttpClientPool
@@ -61,7 +63,6 @@ class NemoRLHandle(BackendHandle):
     loss_fn: Any = None              # TinkerSumPGLoss instance (RL)
     data_buffer: List = field(default_factory=list)  # R9 buffering
     max_buffer_size: int = DEFAULT_MAX_BUFFER_SIZE  # CHK006: bound buffer growth
-    _buffer_lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # CHK018: thread safety
     image_preprocessor: Any = None   # ImagePreprocessor (VLM only)
     colocated_inference: bool = True
     refit_memory_ratio: float = 0.3      # share of free GPU memory for the IPC refit buffer
@@ -75,7 +76,7 @@ class NemoRLHandle(BackendHandle):
     in_flight_samples: int = 0           # samples admitted to the engine and not yet returned
     next_leader: int = 0                 # round-robin cursor over the DP-leader HTTP servers
     _samples_drained: asyncio.Event = field(default_factory=lambda: _set_event())  # set while in_flight_samples == 0
-    _training_lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # Serialize optim_step GPU lifecycle
+    _training_lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # training ops vs the sampling path on the workers
     ref_logprob_accumulator: Any = None  # Lazy _RefLogprobAccumulator (BUG-015)
     staleness_k: int = 0                 # Declared max sampler staleness (A4, specs/012)
     generation_synced_version: int = 0   # ver(S): weight version the inference engine holds
@@ -104,6 +105,12 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         self.config, self.overrides = NemoRLConfig.split_overrides(overrides)
         self._converter = None
         self._builder = None
+        # One scheduler per model, opened at create_model and kept closed after its delete:
+        # the model's training operations run one at a time, in arrival order.
+        self._schedulers: Dict[str, GroupScheduler] = {}
+        # Models whose delete failed half-way: their scheduler is closed, and the service keeps
+        # them registered, so a retried delete tears down directly. A delete that succeeds erases it.
+        self._failed_deletes: set[str] = set()
         # One persistent connection pool per vLLM worker server this process
         # samples from. Keep-alive expiry sits under uvicorn's 5 s so a reused
         # connection is never one the worker already closed; no read timeout,
@@ -237,6 +244,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             except Exception as e:  # noqa: BLE001  (#190)
                 logger.debug("[%s] VLM detection skipped: %s", request_id, e)
 
+            self._open_scheduler(handle)
             logger.info("[%s] NeMo RL model %s created successfully", request_id, model_id)
             return handle
 
@@ -269,23 +277,8 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                 _maybe_pad_batch, batched_data, dp_size, mbs, handle.image_preprocessor,
             )
 
-            # Take the engine away from sampling (drain, then sleep the colocated
-            # vLLM to free GPU memory). Left training_ready so a later sample
-            # wakes the engine first (weights still in sync: that wake needs no
-            # refit). Under _training_lock: a concurrent optim_step or wake must
-            # not touch the same GPU workers mid-pass.
-            async with handle._training_lock:
-                await _take_engine_for_training(handle)
-
-                # Use prepare_for_training(), not prepare_for_lp_inference(): the latter
-                # offloads the optimizer, deadlocking a concurrent apply_optimizer_step
-                # in pipelined SFT. train vs eval mode gives identical logprobs (no dropout).
-                if not handle.training_resident:
-                    await asyncio.to_thread(handle.policy.prepare_for_training)
-                    handle.training_resident = True
-
-                _ensure_dyn_mb_budget(handle, batched_data)
-                result = await asyncio.to_thread(handle.policy.get_logprobs, batched_data)
+            result = await self._scheduler(handle).submit_pass(
+                pass_key(handle.model_id, "forward", loss_fn, loss_fn_config), batched_data)
 
             # No refit after forward(): read-only pass, inference weights already in
             # sync. Refitting here crashes (stale DTensor sharding after CPU→CUDA →
@@ -318,8 +311,9 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         Deferred contract: Returns {"metrics": {}, "deferred": True,
         "loss_fn_outputs": []}. Real metrics at optim_step time.
 
-        Thread safety: Buffer access is protected by asyncio.Lock.
-        Concurrent forward_backward calls are serialized at the buffer.
+        Ordering: the append runs on the model's scheduler, so concurrent
+        forward_backward calls reach the buffer one at a time, in arrival order,
+        and one submitted during an optimizer step lands in the next step's buffer.
 
         Constraints:
         - Buffer bounded by max_buffer_size (default 64, raises on overflow)
@@ -334,6 +328,8 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                     "forward_backward: empty data for %s — no-op (all advantages likely zero)",
                     handle.model_id,
                 )
+                # through the scheduler all the same: a deleted model refuses it with the closed error
+                await self._scheduler(handle).submit_barrier(_nothing)
                 return {
                     "loss_fn_output_type": loss_fn,
                     "metrics": {},
@@ -341,7 +337,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                     "loss_fn_outputs": [],
                 }
 
-            # Convert data to NeMo RL BatchedDataDict (outside lock — CPU-bound)
+            # Convert before submitting: CPU-bound, so it overlaps a running step
             _t_conv = time.time()
             batched_data = self.converter.forward_backward_to_backend(
                 data, loss_fn, handle.config,
@@ -349,43 +345,8 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             )
             _dt_conv = time.time() - _t_conv
 
-            # CHK018: Acquire lock for buffer access (concurrent requests)
-            async with handle._buffer_lock:
-                # CHK006: Enforce maximum buffer size to prevent unbounded memory growth
-                if len(handle.data_buffer) >= handle.max_buffer_size:
-                    raise BackendError(
-                        f"Buffer full: {len(handle.data_buffer)} microbatches buffered "
-                        f"(max_buffer_size={handle.max_buffer_size}). "
-                        f"Call apply_optimizer_step() to flush the buffer.",
-                        backend="nemo_rl",
-                        operation="forward_backward",
-                    )
-
-                # CHK016: Validate field compatibility with existing buffer
-                if handle.data_buffer:
-                    existing_keys = set(handle.data_buffer[0].keys())
-                    new_keys = set(batched_data.keys())
-                    if existing_keys != new_keys:
-                        raise BackendError(
-                            f"Microbatch field mismatch: buffered has {sorted(existing_keys)}, "
-                            f"new batch has {sorted(new_keys)}",
-                            backend="nemo_rl",
-                            operation="forward_backward",
-                        )
-
-                # One loss configuration per optimizer step: the buffer trains as
-                # a single policy.train() call, so a differing config cannot be honoured.
-                if handle.data_buffer and (handle.loss_fn_name, handle.loss_fn_config or {}) != (loss_fn, loss_fn_config or {}):
-                    raise BackendError(
-                        f"loss mismatch within one optimizer step: buffered "
-                        f"{handle.loss_fn_name!r} {handle.loss_fn_config or {}}, new {loss_fn!r} {loss_fn_config or {}}",
-                        backend="nemo_rl", operation="forward_backward",
-                    )
-                handle.data_buffer.append(batched_data)
-                buffer_len = len(handle.data_buffer)
-                # Store loss_fn name + config for apply_optimizer_step()
-                handle.loss_fn_name = loss_fn
-                handle.loss_fn_config = dict(loss_fn_config) if loss_fn_config else None
+            buffer_len = await self._scheduler(handle).submit_pass(
+                pass_key(handle.model_id, "forward_backward", loss_fn, loss_fn_config), batched_data)
 
             logger.info(
                 "Buffered microbatch %d for model %s (%d samples)",
@@ -429,7 +390,10 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                 str(e), backend="nemo_rl", operation="forward_backward", original_error=e,
             ) from e
 
-    async def apply_optimizer_step(
+    async def apply_optimizer_step(self, handle: NemoRLHandle, optim_params: OptimParams) -> Dict[str, Any]:
+        return await self._scheduler(handle).submit_barrier(lambda: self._apply_optimizer_step(handle, optim_params))
+
+    async def _apply_optimizer_step(
         self,
         handle: NemoRLHandle,
         optim_params: OptimParams,
@@ -437,7 +401,7 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         """
         Execute single policy.train() call with all buffered data.
 
-        1. Acquire buffer lock and drain buffer (concatenate + clear)
+        1. Take the buffer (concatenate + clear)
         2. Pad partial batch if needed (dp_size alignment)
         3. Set the request's learning rate
         4. Call policy.train(all_data, loss_fn)
@@ -453,36 +417,30 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         the client must re-send all forward_backward() data.
         """
         try:
-            # CHK018: Acquire lock to drain buffer atomically.
-            # Snapshot and clear under the lock; concatenate outside it.
-            async with handle._buffer_lock:
-                if not handle.data_buffer:
-                    # Empty buffer is normal when forward_backward received
-                    # empty data (GRPO all-zero advantages). No-op — no GPU work.
-                    logger.warning(
-                        "apply_optimizer_step: empty buffer for %s — no-op",
-                        handle.model_id,
-                    )
-                    return {
-                        "success": True,
-                        "grad_norm": 0.0,
-                        "learning_rates": [],
-                        "model_id": handle.model_id,
-                        "metrics": {},
-                        "loss_fn_outputs": [],
-                    }
+            if not handle.data_buffer:
+                # Empty buffer is normal when forward_backward received
+                # empty data (GRPO all-zero advantages). No-op — no GPU work.
+                logger.warning(
+                    "apply_optimizer_step: empty buffer for %s — no-op",
+                    handle.model_id,
+                )
+                return {
+                    "success": True,
+                    "grad_norm": 0.0,
+                    "learning_rates": [],
+                    "model_id": handle.model_id,
+                    "metrics": {},
+                    "loss_fn_outputs": [],
+                }
 
-                # Atomic swap: take ownership of buffer, give handle a fresh one.
-                # This ensures the buffer is cleared even if concatenation fails (CHK024).
-                buffered_batches = handle.data_buffer
-                handle.data_buffer = []
-                num_buffered = len(buffered_batches)
-                # The config that governed this buffer; a pipelined fb(N+1) may
-                # overwrite h.loss_fn_config before we reach policy.train().
-                step_loss_config = handle.loss_fn_config
-                handle.loss_fn_config = None
+            # Take the buffer and its loss config, leaving both empty for the next
+            # step, so a failed concatenation or train still clears them.
+            buffered_batches = handle.data_buffer
+            handle.data_buffer = []
+            num_buffered = len(buffered_batches)
+            step_loss_config = handle.loss_fn_config
+            handle.loss_fn_config = None
 
-            # Concatenate outside the lock (CPU-bound, no contention needed)
             phases: Dict[str, float] = {}  # Q3-R2 per-step cost decomposition
             _t = time.time()
             all_data = await asyncio.to_thread(_concatenate_batches, buffered_batches)
@@ -516,11 +474,9 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             # different values.
             _warn_on_adam_mismatch(handle, optim_params.model_dump())
 
-            # Serialize GPU lifecycle: sleep vLLM → train → refit.
-            # Pipelined SFT loops fire multiple optim_step calls concurrently;
-            # without this lock they race on the same Ray actors/GPU memory,
-            # causing "No backend type associated with device type cpu" during refit.
-            # The lock only gates GPU work — buffer drain + padding above run freely.
+            # The scheduler runs this step alone among the model's training operations;
+            # _training_lock keeps the sampling path (wake, refit) and the frozen-reference
+            # pass off the workers while it sleeps vLLM, trains and refits.
             async with handle._training_lock:
                 # Transition to training state — generation requests after this
                 # point wait on _training_lock in _ensure_generation_ready() —
@@ -655,6 +611,9 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             ) from e
 
     async def update_inference_weights(self, handle: NemoRLHandle) -> None:
+        return await self._scheduler(handle).submit_barrier(lambda: self._update_inference_weights(handle))
+
+    async def _update_inference_weights(self, handle: NemoRLHandle) -> None:
         """Sync weights between training policy and inference engine."""
         try:
             if handle.policy_generation is not None:
@@ -676,11 +635,15 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         handle: NemoRLHandle,
         root: Path,
         step: Optional[int] = None,
-        persist: bool = True,
+        persist: bool = True,   # the TrainingBackend signature
     ) -> None:
         """Save model checkpoint via policy.save_checkpoint()."""
         if not persist:
-            return  # ephemeral sampler save: the refit already delivered the weights
+            # ephemeral sampler save: the refit already delivered the weights, so it waits for no step
+            return
+        await self._scheduler(handle).submit_barrier(lambda: self._save_checkpoint(handle, root, step))
+
+    async def _save_checkpoint(self, handle: NemoRLHandle, root: Path, step: Optional[int]) -> None:
         try:
             local_path = str(root)
 
@@ -725,10 +688,13 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
         self,
         handle: NemoRLHandle,
         root: Path,
-        optimizer: bool = False,
+        optimizer: bool = False,   # the TrainingBackend signature
     ) -> None:
         """Load checkpoint weights (and, on request, optimizer state) into the
         policy workers, then sync to the inference engine."""
+        await self._scheduler(handle).submit_barrier(lambda: self._load_checkpoint(handle, root, optimizer))
+
+    async def _load_checkpoint(self, handle: NemoRLHandle, root: Path, optimizer: bool) -> None:
         import os
 
         try:
@@ -778,18 +744,36 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             ) from e
 
     async def delete_model(self, handle: NemoRLHandle) -> None:
-        """Tear down NeMo RL Policy and release GPU resources."""
+        """Tear down NeMo RL Policy and release GPU resources. The model's scheduler
+        closes with the delete, failed or not: what is queued behind it, and what
+        is submitted after it, gets the scheduler's closed error."""
+        if handle.model_id in self._failed_deletes:
+            await self._tear_down(handle)   # nothing else runs on a closed scheduler
+            self._failed_deletes.discard(handle.model_id)
+            return
+        await self._scheduler(handle).submit_barrier(lambda: self._delete_model(handle))
+
+    async def _delete_model(self, handle: NemoRLHandle) -> None:
         try:
-            # CHK007: Warn and discard pending buffered data on deletion.
-            # CHK018: Acquire lock to prevent race with concurrent forward_backward.
-            async with handle._buffer_lock:
-                if handle.data_buffer:
-                    logger.warning(
-                        "Deleting model %s with %d buffered microbatches "
-                        "(data will be discarded without training)",
-                        handle.model_id, len(handle.data_buffer),
-                    )
-                    handle.data_buffer.clear()
+            await self._tear_down(handle)
+        except BaseException:   # re-raised: the mark lets the service's retry reach the teardown
+            self._failed_deletes.add(handle.model_id)
+            raise
+        finally:
+            # a teardown that failed half-way leaves no policy fit to train on
+            # the reason is the whole message of what was queued, so it says the group closed
+            self._schedulers[handle.model_id].abandon("model deleted, training group closed")
+
+    async def _tear_down(self, handle: NemoRLHandle) -> None:
+        try:
+            # Warn and discard pending buffered data on deletion.
+            if handle.data_buffer:
+                logger.warning(
+                    "Deleting model %s with %d buffered microbatches "
+                    "(data will be discarded without training)",
+                    handle.model_id, len(handle.data_buffer),
+                )
+                handle.data_buffer.clear()
 
             # No sample may be mid-flight on an engine being torn down.
             async with handle._training_lock:
@@ -972,7 +956,28 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             results.append([None] + [float(v) for v in vals])
         return results
 
+    def _open_scheduler(self, handle: NemoRLHandle) -> None:
+        # The scheduler outlives its model's delete, closed; a weak reference lets the deleted
+        # handle (policy, clusters, tokenizer) go. A run holds the handle its caller passed.
+        ref = weakref.ref(handle)
+        self._schedulers[handle.model_id] = GroupScheduler(
+            handle.model_id, _one_at_a_time, lambda key, payloads: self._run_pass(_alive(ref), key, payloads),
+            "nemo_rl")
+
+    def _scheduler(self, handle: NemoRLHandle) -> GroupScheduler:
+        return self._schedulers[handle.model_id]   # opened by create_model, the only source of handles
+
+    async def _run_pass(self, handle: NemoRLHandle, key: PassKey, payloads: List[Any]) -> List[Any]:
+        """The scheduler's run_pass. `_one_at_a_time` joins nothing, so a run holds one request and a
+        refusal fails that request alone. The buffer's refusals (full, other fields, other loss) run
+        here, not before the submit: they read the buffer, which only the scheduler's worker touches."""
+        if key.kind == "forward":
+            return [await _forward_pass(handle, p) for p in payloads]
+        return [_buffer(handle, key, p) for p in payloads]
+
     async def close(self) -> None:
+        for scheduler in self._schedulers.values():
+            await scheduler.close("server shutdown")
         await self._http_pool.aclose()
 
     async def prepare_for_generation(self, handle: NemoRLHandle) -> None:
@@ -983,6 +988,82 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                 backend="nemo_rl", operation="prepare_for_generation",
             )
         await _ensure_generation_ready(handle)
+
+
+async def _nothing() -> None:
+    pass
+
+
+def _alive(ref: "weakref.ReferenceType[NemoRLHandle]") -> NemoRLHandle:
+    handle = ref()
+    if handle is None:
+        raise BackendError("a run outlived its model's handle", backend="nemo_rl", operation="schedule")
+    return handle
+
+
+def _one_at_a_time(run: Run, nxt: Op) -> Admit:
+    """Admission that joins nothing: every operation runs as its own run, in arrival order."""
+    return Admit.END
+
+
+async def _forward_pass(handle: NemoRLHandle, batched_data: Any) -> Any:
+    # Take the engine away from sampling (drain, then sleep the colocated vLLM to
+    # free GPU memory). Left training_ready so a later sample wakes the engine
+    # first (weights still in sync: that wake needs no refit). _training_lock keeps
+    # the sampling path's wake and refit off the workers mid-pass.
+    async with handle._training_lock:
+        await _take_engine_for_training(handle)
+        # prepare_for_training(), not prepare_for_lp_inference(): the latter offloads
+        # the optimizer, which the next step then lacks. train vs eval mode gives
+        # identical logprobs (no dropout).
+        if not handle.training_resident:
+            await asyncio.to_thread(handle.policy.prepare_for_training)
+            handle.training_resident = True
+        _ensure_dyn_mb_budget(handle, batched_data)
+        return await asyncio.to_thread(handle.policy.get_logprobs, batched_data)
+
+
+def _buffer(handle: NemoRLHandle, key: PassKey, batched_data: Any) -> int:
+    """Append one forward_backward's batch to the deferred buffer; the buffer's length after it."""
+    loss_fn = key.loss_fn
+    loss_fn_config = dict(key.loss_fn_config)
+    # Bound the buffer: unbounded growth would hold every batch until a step
+    if len(handle.data_buffer) >= handle.max_buffer_size:
+        raise BackendError(
+            f"Buffer full: {len(handle.data_buffer)} microbatches buffered "
+            f"(max_buffer_size={handle.max_buffer_size}). "
+            f"Call apply_optimizer_step() to flush the buffer.",
+            backend="nemo_rl",
+            operation="forward_backward",
+        )
+
+    # Every buffered batch carries the same fields: the step concatenates them
+    if handle.data_buffer:
+        existing_keys = set(handle.data_buffer[0].keys())
+        new_keys = set(batched_data.keys())
+        if existing_keys != new_keys:
+            raise BackendError(
+                f"Microbatch field mismatch: buffered has {sorted(existing_keys)}, "
+                f"new batch has {sorted(new_keys)}",
+                backend="nemo_rl",
+                operation="forward_backward",
+            )
+
+    # One loss configuration per optimizer step: the buffer trains as
+    # a single policy.train() call, so a differing config cannot be honoured.
+    if handle.data_buffer and (handle.loss_fn_name, handle.loss_fn_config or {}) != (loss_fn, loss_fn_config):
+        raise BackendError(
+            f"loss mismatch within one optimizer step: buffered "
+            f"{handle.loss_fn_name!r} {handle.loss_fn_config or {}}, new {loss_fn!r} {loss_fn_config}",
+            backend="nemo_rl", operation="forward_backward",
+        )
+    handle.data_buffer.append(batched_data)
+    buffer_len = len(handle.data_buffer)
+    # Store loss_fn name + config for apply_optimizer_step()
+    handle.loss_fn_name = loss_fn
+    handle.loss_fn_config = dict(loss_fn_config) if loss_fn_config else None
+
+    return buffer_len
 
 
 def _step_loss_fn(h: NemoRLHandle, step_loss_config: Optional[Dict[str, float]]):
