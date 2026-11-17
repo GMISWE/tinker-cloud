@@ -13,18 +13,24 @@
 #   automodel  check both vendor envs; editable-install server+SDK+cookbook and
 #            the pure-Python deps into the training env /opt/venv. /opt/vllm-env
 #            (the vLLM env) stays as the image ships it.
+#   verl     build the verl tree's venv (vllm and fsdp extras) from the image's own
+#            uv cache; the server, SDK, cookbook and deps install into it.
 set -euo pipefail
 PROFILE="${PROFILE:-nemo_rl}"
 # The automodel image puts /opt/venv/bin/python3 on PATH but its `pip` is the
 # system interpreter's, so installs go through the interpreter.
 PIP=pip
 [ "$PROFILE" = automodel ] && PIP="python3 -m pip"
+# The verl image sets VIRTUAL_ENV to its venv, first on PATH; uv installs into it
+[ "$PROFILE" = verl ] && PIP="uv pip"
 
 cd /tmp && tar xzf code.tar.gz
 mkdir -p /app /work /data/metadata /data/trajectories /data/.cache/huggingface
 # Download caches on /data: a recreated container keeps the wheels it fetched
-# (the default ~/.cache lives in the container's own filesystem)
-export PIP_CACHE_DIR=/data/.cache/pip UV_CACHE_DIR=/data/.cache/uv
+# (the default ~/.cache lives in the container's own filesystem). The verl image
+# bakes its wheels into its own UV_CACHE_DIR, which uv must keep reading.
+export PIP_CACHE_DIR=/data/.cache/pip
+[ "$PROFILE" = verl ] || export UV_CACHE_DIR=/data/.cache/uv
 
 # Tools the deploy's own pod-side checks call (lib/cluster.sh reads listening ports with ss).
 # An image without one stops the deploy at the Ray head, after setup has passed.
@@ -125,6 +131,15 @@ elif [ "$PROFILE" = miles ]; then
     cp -r /tmp/miles_src/miles "$MPKG"
   fi
   python3 -c 'import miles; print("miles fork overlaid OK ('"$MILES_REF"')")'
+elif [ "$PROFILE" = verl ]; then
+  # verl itself is the image's tree, unchanged; --frozen keeps the image's lock, and
+  # --inexact keeps what an earlier setup installed beside it (the server, SDK, deps)
+  ( cd /workspace/verl && git log -1 --format='verl tree %h %ad %s' --date=short \
+    && uv sync -q --frozen --inexact --all-packages --extra vllm --extra fsdp )
+  [ "$(command -v python3)" = "$VIRTUAL_ENV/bin/python3" ] \
+    || { echo "ERROR: python3 is $(command -v python3), not $VIRTUAL_ENV's"; exit 1; }
+  python3 -c 'import verl.workers.engine_workers_tinker' \
+    || { echo "ERROR: the image's verl does not import verl.workers.engine_workers_tinker, which the backend binds to"; exit 1; }
 fi
 
 # server editable install: Ray workers import training.* by module path
@@ -193,7 +208,7 @@ if [ "$PROFILE" = nemo_rl ]; then
   done
 fi
 
-case "$PROFILE" in miles) RUNTIME=miles ;; automodel) RUNTIME=nemo_automodel ;; *) RUNTIME=nemo_rl ;; esac
+case "$PROFILE" in miles) RUNTIME=miles ;; automodel) RUNTIME=nemo_automodel ;; verl) RUNTIME=verl ;; *) RUNTIME=nemo_rl ;; esac
 python3 -c "import tinker, tinker_cookbook, $RUNTIME; print('imports OK')"
 PYTHONPATH=/app python3 -c 'import training; print("training OK")'
 echo SETUP_DONE

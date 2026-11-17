@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-key deploy of a TinkerCloud dev environment (k8s pod or docker container).
 #
-#   deploy_tinkercloud.sh [--profile nemo_rl|bionemo|megatron_bridge|miles|automodel] \
+#   deploy_tinkercloud.sh [--profile nemo_rl|bionemo|megatron_bridge|miles|automodel|verl] \
 #                         [--source dev|git] [--target k8s|docker] [--code-only]
 #
 # Profiles (cased by BASE IMAGE — the images ship incompatible stacks)
@@ -31,6 +31,10 @@
 #            The backend's required knobs default here and are overridable:
 #            AUTOMODEL_TRAIN_GPUS=2 AUTOMODEL_MAX_LORAS=4 AUTOMODEL_MAX_LORA_RANK=64
 #            AUTOMODEL_MAX_CPU_LORAS=8 AUTOMODEL_MICRO_BATCH_ROWS=4 AUTOMODEL_ACTIVATION_CHECKPOINTING=0.
+#   verl     verl backend. Image: upstream verl's uv image (docker/Dockerfile.uv.cu130), the verl tree
+#            at /workspace/verl and its wheels as a uv cache. Setup builds /workspace/verl/.venv, first
+#            on the image's PATH, so the Ray head, its workers and the server run from it. Starts Ray
+#            head + `python3 -m training` (TINKERCLOUD_BACKEND=verl), health-checks API_PORT. GPUS=4.
 #   Per-profile defaults (IMAGE, GPUS, NODE, BACKEND) are overridable by env vars;
 #   KUBECONFIG, NS and the node come from scripts/lib/cluster.sh.
 #   See specs/004-bionemo-classification/P5-TINKER-BACKEND.md.
@@ -143,7 +147,15 @@ case "$PROFILE" in
       "AUTOMODEL_MICRO_BATCH_ROWS=${AUTOMODEL_MICRO_BATCH_ROWS:-4}"
       "AUTOMODEL_ACTIVATION_CHECKPOINTING=${AUTOMODEL_ACTIVATION_CHECKPOINTING:-0}")
     RUN_SERVER=1 ;;   # Ray head + `python3 -m training` (TINKERCLOUD_BACKEND=automodel)
-  *) echo "unknown --profile $PROFILE (want: nemo_rl | bionemo | megatron_bridge | miles | automodel)"; exit 1 ;;
+  verl)
+    IMAGE="${IMAGE:-verlai/verl:uv.cu130.dev5}"
+    BACKEND="${BACKEND:-verl}"
+    GPUS="${GPUS:-4}"
+    NODE="${NODE:-$DEFAULT_NODE}"
+    POD="${POD:-tinkercloud-verl}"
+    CONTAINER="${CONTAINER:-tinkercloud-verl}"
+    RUN_SERVER=1 ;;   # Ray head + `python3 -m training` (TINKERCLOUD_BACKEND=verl)
+  *) echo "unknown --profile $PROFILE (the header of $0 lists the profiles)"; exit 1 ;;
 esac
 
 # --- shared config (IMAGE/GPUS/NODE/POD/CONTAINER/BACKEND set per-profile) --
