@@ -1,43 +1,43 @@
 """
-A scheduler for the operations that share one set of GPU workers: one FIFO,
-run by one worker task. A backend makes one per group of workers and submits
-two kinds of operation, each with a key the backend chooses:
+One FIFO of operations for one group of GPU workers, run by one worker task.
 
-- a pass. The head pass opens a run; the backend's `admit(run, next)` rules on
-  each operation queued behind it, in order: JOIN (a pass enters the run), END
-  (the run is complete) or DEFER (`next` waits, and the ruling goes on with the
-  operation behind it). `run_pass` receives the run's payloads as one coalesced
-  pass.
-- a barrier runs alone. It may carry a key, so `admit` can tell whose it is.
+A backend makes one `GroupScheduler` per group and submits two kinds of operation:
 
-The operations a run deferred and the one that ended it wait, in arrival
-order, and each runs before the queue is read for a new head. A waiting
-operation is not offered to `admit` again: a barrier runs alone, and a pass
-heads its own run, which may take operations from the queue ahead of what
-still waits behind it.
-`same_key` is the admission of a backend that only coalesces equal keys and
-keeps strict arrival order. An `admit` that raises fails the run and the
-operation it was ruling on, as a failed pass does.
+- a pass, `submit_pass(key, payload)`. Passes coalesce into a run, and the backend's
+  `run_pass(key, payloads)` executes the run as one pass.
+- a barrier, `submit_barrier(fn, key)`. It runs alone. Its optional key tells `admit` whose it is.
 
-The service's per-model ordering (services/ordering.py) delivers a model's
-passes concurrently and in program order, and a barrier only after its earlier
-passes completed; with `same_key` this queue keeps that order. A backend whose
-`admit` defers answers for the order it gives up.
+Forming a run. The first pass taken from the queue heads a run. The backend's `admit(run, next)`
+then rules on each operation behind it, in queue order:
 
-There is no batching window: whatever queued while the previous operation ran
-is the next run. A failure inside a run fails every request in it (one pass,
-one fault), so a backend refuses a bad request before it submits it.
+- JOIN: `next` is a pass and enters the run.
+- DEFER: `next` waits; the ruling goes on with the operation behind it.
+- END: `next` waits; the run is complete.
 
-The backend answers for what coalescing computes: `run_pass` over several
-payloads must return what the separate passes would. Errors raised here carry
-the backend's name, given at construction.
+A waiting operation is not offered to `admit` again. The waiting operations run in arrival order
+before the queue is read for a new head. A waiting pass that becomes a head heads its own run, which
+may take passes from the queue ahead of the operations that still wait.
+
+`same_key` coalesces equal keys only and keeps strict arrival order; `one_at_a_time` coalesces nothing.
+
+Order. The service's per-model ordering (services/ordering.py) delivers a model's passes concurrently
+and in program order, and a barrier only after its earlier passes complete. With `same_key` this
+queue keeps that order. A backend whose `admit` defers answers for the order it gives up.
+
+Failure. One run, one fault: a `run_pass` that raises fails every request in the run. An `admit` that
+raises fails the run and the operation it was ruling on. So a backend refuses a bad request before it
+submits it. Errors raised here carry the backend's name, given at construction.
+
+Contract on the backend. `run_pass` over several payloads returns what the separate passes would.
+
+There is no batching window: whatever queued while the previous operation ran forms the next run.
 """
 import asyncio
 import enum
 import logging
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Deque, Generic, Hashable, List, Optional, Tuple, TypeVar, Union
+from typing import Any, Awaitable, Callable, Deque, Generic, Hashable, List, Optional, Tuple, TypeVar, Union, cast
 
 from ..base import BackendError
 
@@ -48,11 +48,7 @@ P = TypeVar("P")  # one request's pass payload
 R = TypeVar("R")  # one request's pass result
 
 
-class Admit(enum.Enum):
-    JOIN = "join"
-    END = "end"
-    DEFER = "defer"
-
+# --- Operations -------------------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class PassKey:
@@ -61,6 +57,10 @@ class PassKey:
     kind: str                                   # "forward" | "forward_backward"
     loss_fn: str
     loss_fn_config: Tuple[Tuple[str, float], ...]
+
+
+def pass_key(model_id: str, kind: str, loss_fn: str, loss_fn_config: Optional[dict]) -> PassKey:
+    return PassKey(model_id, kind, loss_fn, tuple(sorted((loss_fn_config or {}).items())))
 
 
 @dataclass
@@ -78,6 +78,14 @@ class Barrier(Generic[K]):
 
 
 Op = Union[Pass[K, P], Barrier[K]]
+
+
+# --- Admission --------------------------------------------------------------------------------------
+
+class Admit(enum.Enum):
+    JOIN = "join"
+    END = "end"
+    DEFER = "defer"
 
 
 @dataclass(frozen=True)
@@ -102,22 +110,26 @@ def one_at_a_time(run: Run, nxt: Op) -> Admit:
     return Admit.END
 
 
+# --- Scheduler --------------------------------------------------------------------------------------
+
 class GroupScheduler(Generic[K, P, R]):
-    """`run_pass(key, payloads)` executes one coalesced pass, under its head's key, and returns one
-    result per payload, in order."""
+    """The FIFO of one group of workers (module docstring). `run_pass(key, payloads)` executes one
+    coalesced pass under its head's key and returns one result per payload, in order."""
 
     def __init__(self, name: str, admit: AdmitFn, run_pass: RunPass, backend: str):
         self.name = name
         self.backend = backend
         self._admit = admit
         self._run_pass = run_pass
-        self._queue: Deque[Op] = deque()
-        self._waiting: Deque[Op] = deque()
+        self._queue: Deque[Op] = deque()     # submitted, not yet ruled on
+        self._waiting: Deque[Op] = deque()   # ruled on (DEFER or END), not run; runs before `_queue`
         self._wakeup = asyncio.Event()
-        self._closed: Optional[str] = None
+        self._closed: Optional[str] = None   # the close reason
         self._in_progress: Tuple[Op, ...] = ()   # what the worker awaits; a worker that dies fails it too
         self._worker = asyncio.create_task(self._loop(), name=f"scheduler:{name}")
         self._worker.add_done_callback(self._on_worker_exit)
+
+    # Submission and close.
 
     async def submit_pass(self, key: K, payload: P) -> R:
         return await self._enqueue(Pass(key, payload, self._new_future()))
@@ -161,6 +173,8 @@ class GroupScheduler(Generic[K, P, R]):
         self._wakeup.set()
         return await op.future
 
+    # The worker.
+
     async def _loop(self) -> None:
         while True:
             await self._wakeup.wait()
@@ -173,49 +187,59 @@ class GroupScheduler(Generic[K, P, R]):
                     await self._run_barrier(head)
                 else:
                     await self._run_passes(head)
+                # Cleared here, not in a `finally`: a worker that dies inside an op leaves it set
+                # for `_on_worker_exit` to fail.
                 self._in_progress = ()
             if self._closed is not None:
                 return
 
     async def _run_passes(self, head: Pass[K, P]) -> None:
-        run: List[Pass[K, P]] = [head]
-        ruled_on: Optional[Op] = None   # left the queue and waits nowhere while `admit` rules on it
-        deferred = 0
+        passes: List[Pass[K, P]] = [head]
         try:
-            while self._queue:
-                nxt = self._queue.popleft()
-                if nxt.future.cancelled():
-                    continue
-                ruled_on = nxt
-                verdict = self._admit(Run(tuple(run), tuple(self._waiting)), nxt)
-                if verdict is Admit.JOIN:
-                    if not isinstance(nxt, Pass):
-                        raise BackendError(f"admit joined a barrier to a pass ({nxt.key!r})",
-                                           backend=self.backend, operation="schedule")
-                    run.append(nxt)
-                    ruled_on = None
-                    continue
-                ruled_on = None
-                self._waiting.append(nxt)   # behind what waits already: arrival order holds among them
-                if verdict is Admit.END:
-                    break
-                deferred += 1
-            if deferred:
-                logger.info("[%s] deferred %d op(s) past a run of %d", self.name, deferred, len(run))
-            if len(run) > 1:
-                logger.info("[%s] coalesced %d passes under %r", self.name, len(run), head.key)
-            self._in_progress = tuple(run)
-            results = await self._run_pass(head.key, [op.payload for op in run])
-            if len(results) != len(run):
-                raise BackendError(f"run_pass returned {len(results)} results for {len(run)} requests",
+            passes = self._form_run(head)
+            if len(passes) > 1:
+                logger.info("[%s] coalesced %d passes under %r", self.name, len(passes), head.key)
+            self._in_progress = tuple(passes)
+            results = await self._run_pass(head.key, [op.payload for op in passes])
+            if len(results) != len(passes):
+                raise BackendError(f"run_pass returned {len(results)} results for {len(passes)} requests",
                                    backend=self.backend, operation="schedule")
         except Exception as e:  # one pass, one fault: every request in it fails with the cause  # noqa: BLE001  (#191)
-            for op in run if ruled_on is None else [*run, ruled_on]:
+            for op in passes:   # an `admit` failure: `_form_run` already failed its run, and `passes` is [head]
                 self._fail(op.future, e)
             return
-        for op, result in zip(run, results):
-            if not op.future.done():
-                op.future.set_result(result)
+        for op, result in zip(passes, results):
+            self._resolve(op.future, result)
+
+    def _form_run(self, head: Pass[K, P]) -> List[Pass[K, P]]:
+        """Rule on the queue behind `head`, in order, and return the run: a JOIN enters it; DEFER and
+        END move the op to `_waiting`; END stops. An `admit` that raises fails the run so far and the
+        op it was ruling on, then re-raises."""
+        passes: List[Pass[K, P]] = [head]
+        deferred = 0
+        while self._queue:
+            nxt = self._queue.popleft()
+            if nxt.future.cancelled():
+                continue
+            try:
+                verdict = self._admit(Run(tuple(passes), tuple(self._waiting)), nxt)
+                if verdict is Admit.JOIN and not isinstance(nxt, Pass):
+                    raise BackendError(f"admit joined a barrier to a pass ({nxt.key!r})",
+                                       backend=self.backend, operation="schedule")
+            except Exception as e:   # `nxt` left the queue and waits nowhere: it fails with the run
+                for op in (*passes, nxt):
+                    self._fail(op.future, e)
+                raise
+            if verdict is Admit.JOIN:
+                passes.append(cast(Pass[K, P], nxt))   # a barrier's JOIN raised above
+                continue
+            self._waiting.append(nxt)   # behind what waits already: arrival order holds among them
+            if verdict is Admit.END:
+                break
+            deferred += 1
+        if deferred:
+            logger.info("[%s] deferred %d op(s) past a run of %d", self.name, deferred, len(passes))
+        return passes
 
     async def _run_barrier(self, op: Barrier[K]) -> None:
         self._in_progress = (op,)
@@ -224,8 +248,7 @@ class GroupScheduler(Generic[K, P, R]):
         except Exception as e:  # the barrier's own failure, delivered to its submitter  # noqa: BLE001  (#191)
             self._fail(op.future, e)
             return
-        if not op.future.done():
-            op.future.set_result(result)
+        self._resolve(op.future, result)
 
     def _on_worker_exit(self, task: asyncio.Task) -> None:
         """A worker that dies (a bug, or cancellation at shutdown) must not
@@ -243,11 +266,12 @@ class GroupScheduler(Generic[K, P, R]):
             self._fail(op.future, self._closed_error())
         self._in_progress = ()
 
+    # Delivery: a future its submitter cancelled, or one already failed, keeps its outcome.
+
+    def _resolve(self, future: asyncio.Future, result: Any) -> None:
+        if not future.done():
+            future.set_result(result)
+
     def _fail(self, future: asyncio.Future, cause: Exception) -> None:
-        if future.done():
-            return
-        future.set_exception(cause)
-
-
-def pass_key(model_id: str, kind: str, loss_fn: str, loss_fn_config: Optional[dict]) -> PassKey:
-    return PassKey(model_id, kind, loss_fn, tuple(sorted((loss_fn_config or {}).items())))
+        if not future.done():
+            future.set_exception(cause)
