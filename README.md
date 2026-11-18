@@ -108,7 +108,7 @@ Validated end-to-end against this server with each recipe's README hyperparamete
 | sl_basic | SFT | Llama-3.2-1B | **Pass** — 13+ steps, loss decreasing, grad_norm stable |
 | sl_loop | SFT (sync) | Qwen2.5-0.5B | **Pass** — 27+ steps, checkpointing OK |
 | chat_sl (no_robots) | SFT (async) | Qwen3-8B-Base | **Pass** — test/nll 1.871 → 1.800 by step 20 (recipe ref: 1.788 @ 140) |
-| chat_sl (tulu3) | SFT (async) | gpt-oss-120b | **Pass** — final test/nll 0.5033 after 781 steps on 8×H100 (Tinker's published final: 0.5032). One run, with token-sum loss weights, the form the cookbook used when Tinker ran its sweep. [W&B report](https://wandb.ai/zhuguoliangcs-gmi-cloud/TinkerCloud-GMICloud-GavinZhu/reports/gpt-oss-120b-on-TinkerCloud:-test-NLL-vs-Tinker--VmlldzoxODMyNzIyOQ==) |
+| [chat_sl](https://github.com/thinking-machines-lab/tinker-cookbook/tree/main/tinker_cookbook/recipes/chat_sl) (tulu3) | SFT (async) | gpt-oss-120b | **Pass** — final test/nll 0.5033 after 781 steps on 8×H100 (Tinker's published final: [0.5032](https://github.com/thinking-machines-lab/tinker-cookbook/blob/main/tinker_cookbook/recipes/chat_sl/results/sft_sweep.md#openaigpt-oss-120b)). One run, with token-sum loss weights, the form the cookbook used when Tinker ran its sweep. [W&B report](https://wandb.ai/zhuguoliangcs-gmi-cloud/TinkerCloud-GMICloud-GavinZhu/reports/gpt-oss-120b-on-TinkerCloud:-test-NLL-vs-Tinker--VmlldzoxODMyNzIyOQ==) |
 | preference/dpo | DPO | Llama-3.2-1B | **Pass** (mechanics) — 34 steps error-free, gradients flowing; loss ~ln(2) flat in 34 steps at documented lr=1e-5, longer run needed for convergence verdict |
 
 
