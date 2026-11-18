@@ -167,6 +167,46 @@ the refit-elision bound (`NEMORL_STALENESS_K`), the sequence length
 head comes from the model's own `config.json` (`architectures` plus an explicit
 `num_labels` or `id2label`).
 
+## Find experiment checkpoints
+
+SDK 0.39's experimental `RestClient.search_checkpoints()` finds saved checkpoints by exact
+`user_metadata`, checkpoint type and base model. It returns the same checkpoint shape as the lists,
+including the stored base model. Set `TINKER_BASE_URL` and `TINKER_API_KEY` to your server first:
+
+```python
+import os
+import tinker
+from tinker.types import CheckpointSearchRequest
+
+rest = tinker.RestClient(
+    base_url=os.environ["TINKER_BASE_URL"],
+    api_key=os.environ["TINKER_API_KEY"],
+)
+query = CheckpointSearchRequest(
+    user_metadata={"experiment": "nightly"},
+    checkpoint_type="training",
+    limit=50,
+)
+while True:
+    page = rest.search_checkpoints(query).result()
+    for checkpoint in page.checkpoints:
+        print(checkpoint.tinker_path, checkpoint.base_model)
+    if page.next_cursor is None:
+        break
+    query = query.model_copy(update={"cursor": page.next_cursor})
+```
+
+Every metadata pair must match. `base_models=["org/model-a", "org/model-b"]` matches either model;
+an empty list matches none. Types are `training`, `sampler` and `external`. Page sizes are 1 to 200,
+default 50. Results are newest first and a cursor breaks ties across runs and checkpoint kinds;
+pass `next_cursor` back unchanged. This is keyset paging, not a snapshot: a newer checkpoint
+inserted between pages does not repeat checkpoints already seen.
+
+Search uses the same persistent-record set as the lists. A checkpoint's `status` still reports
+pending, completed or failed and loads still enforce completion and expiry. Owners/projects have
+the same single-owner policy as session search (`urn:tinkercloud:owner:local`, project `default`).
+An unknown project is rejected by name. Sizes are computed only for the selected page.
+
 ## Tests
 
 CPU-only suites run against the `fake` backend; see `tests/README.md`

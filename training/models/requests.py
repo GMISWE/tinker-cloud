@@ -14,6 +14,9 @@ from ..core.tensor_values import is_array, list_or_array
 # as text (the SDK's loss_fn_config_v2 carries both).
 LossFnConfig = Dict[str, Union[float, str]]
 
+# The SDK's CheckpointType, shared by search requests and checkpoint responses.
+CheckpointType = Literal["training", "sampler", "external"]
+
 
 class LoraConfig(BaseModel):
     """LoRA (Low-Rank Adaptation) configuration."""
@@ -618,6 +621,23 @@ class SessionSearchRequest(BaseModel):
     statuses: Optional[List[SessionStatusQuery]] = Field(default=None, min_length=1)
     limit: int = Field(default=50, ge=1, le=200)
     cursor: Optional[SessionSearchCursor] = None
+
+
+class CheckpointSearchCursor(BaseModel):
+    last_created_at: AwareDatetime
+    last_checkpoint_uuid: str
+
+
+class CheckpointSearchRequest(BaseModel):
+    """SDK checkpoint search: every metadata pair exact, type exact and base models any-of."""
+    model_config = ConfigDict(extra="forbid")
+    project_ids: Optional[List[str]] = None
+    user_metadata: Dict[str, str] = Field(default_factory=dict)
+    checkpoint_type: Optional[CheckpointType] = None
+    owner: SearchOwner = Field(default_factory=SearchOwner)
+    base_models: Optional[List[str]] = None
+    limit: int = Field(default=50, ge=1, le=200)
+    cursor: Optional[CheckpointSearchCursor] = None
 
 
 class SessionHeartbeatRequest(BaseModel):

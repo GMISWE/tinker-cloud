@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from ..checkpoints import CheckpointStatus
 from ..core.tensor_values import DEFAULT_TENSOR_DTYPE, batched_layout, is_array, list_or_array
+from .requests import CheckpointSearchCursor, CheckpointType
 
 
 class AsyncOperationResponse(BaseModel):
@@ -354,9 +355,6 @@ class UnloadModelResponse(_Result):
 
 # ============= Training Run Responses =============
 
-# The SDK's CheckpointType (types/checkpoint.py)
-CheckpointType = Literal["training", "sampler", "external"]
-
 class Checkpoint(BaseModel):
     """A checkpoint in the SDK's Checkpoint shape, plus `status` (an extension: the SDK
     ignores it). Every route that reports a checkpoint returns this model. Nothing is
@@ -370,6 +368,7 @@ class Checkpoint(BaseModel):
     expires_at: Optional[str] = Field(..., description="Expiry (None = never expires)")
     public: Literal[False] = Field(default=False, description="Whether the checkpoint is public (never, here)")
     user_metadata: Optional[Dict[str, str]] = Field(default=None, description="User-provided checkpoint metadata")
+    base_model: Optional[str] = Field(default=None, description="The checkpoint's stored training-run base model")
 
 
 class TrainingRunResponse(BaseModel):
@@ -402,6 +401,12 @@ class CheckpointsListResponse(BaseModel):
     """GET .../checkpoints (SDK CheckpointsListResponse); a run's own list is unpaginated (cursor None)."""
     checkpoints: List[Checkpoint] = Field(..., description="Newest first")
     cursor: Optional[Cursor] = Field(..., description="Pagination, or None for one run's full list")
+
+
+class CheckpointSearchResponse(BaseModel):
+    """One SDK checkpoint-search page with its next cursor (None once exhausted)."""
+    checkpoints: List[Checkpoint]
+    next_cursor: Optional[CheckpointSearchCursor] = None
 
 
 # ============= Sampling Responses =============
