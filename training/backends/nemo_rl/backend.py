@@ -751,7 +751,8 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
                 raise
             # The scheduler closed before this delete ran: an earlier delete failed half-way (the
             # service keeps such a model, so its retry lands here) or the worker died. Nothing runs
-            # on a closed scheduler, so the teardown runs here, or the placement groups stay held.
+            # on a closed scheduler, so the teardown runs here, or the policy and generation workers
+            # an earlier failure left stay up.
             await self._tear_down(handle)
 
     async def _delete_model(self, handle: NemoRLHandle) -> None:
@@ -776,22 +777,23 @@ class NemoRLBackend(TrainingBackend[NemoRLHandle]):
             async with handle._training_lock:
                 await _drain_samples(handle)
 
-            if handle.policy is not None:
-                await asyncio.to_thread(handle.policy.shutdown)
-                logger.info("NeMo RL policy shut down for %s", handle.model_id)
+            try:
+                if handle.policy is not None:
+                    await asyncio.to_thread(handle.policy.shutdown)
+                    logger.info("NeMo RL policy shut down for %s", handle.model_id)
 
-            if handle.policy_generation is not None and handle.policy_generation is not handle.policy:
-                # VllmGeneration.shutdown catches its own failures and reports False.
-                if await asyncio.to_thread(handle.policy_generation.shutdown):
-                    logger.info("NeMo RL generation shut down for %s", handle.model_id)
-                else:
-                    logger.warning("delete_model: generation shutdown failed for %s", handle.model_id)
-
-            # Release the placement groups now; a named group left to the
-            # garbage collector blocks the next create_model (BUG-014).
-            for cluster in (handle.inference_cluster, handle.cluster):
-                if cluster is not None:
-                    await asyncio.to_thread(cluster.shutdown)
+                if handle.policy_generation is not None and handle.policy_generation is not handle.policy:
+                    # VllmGeneration.shutdown catches its own failures and reports False.
+                    if await asyncio.to_thread(handle.policy_generation.shutdown):
+                        logger.info("NeMo RL generation shut down for %s", handle.model_id)
+                    else:
+                        logger.warning("delete_model: generation shutdown failed for %s", handle.model_id)
+            finally:
+                # Release the placement groups even when a shutdown above raised; a named group
+                # left to the garbage collector blocks the next create_model (BUG-014).
+                for cluster in (handle.inference_cluster, handle.cluster):
+                    if cluster is not None:
+                        await asyncio.to_thread(cluster.shutdown)
 
             handle.torn_down = True
             logger.info("NeMo RL model %s deleted", handle.model_id)

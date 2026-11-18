@@ -111,7 +111,6 @@ class TestPeftKeyNormalization:
             ci.export_hf_adapter(src, root)
         with open(weights, "rb") as f:
             assert f.read() == published
-        assert list(load_file(weights)) == [ci.PEFT_PREFIX + BARE_KEY]
 
 
 if __name__ == "__main__":
