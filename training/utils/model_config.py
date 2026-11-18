@@ -188,7 +188,7 @@ def declared_mtp_layers(raw: Dict[str, Any]) -> int:
 
 def is_vlm_config(raw: Dict[str, Any]) -> bool:
     """A raw config with a vision tower (`vision_config`) belongs to a vision-language
-    model. Decided from config.json alone: no transformers import, no second hub read."""
+    model."""
     return "vision_config" in raw
 
 

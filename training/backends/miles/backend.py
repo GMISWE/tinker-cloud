@@ -123,13 +123,51 @@ def _engine_context_length(hf_path: str) -> Optional[int]:
         return None
 
 
-async def _stop_controller(controller: Any) -> None:
-    """Stop and kill a multi-LoRA controller. Only a failed Ray call falls back to killing it."""
+async def _tear_down_group(controller: Any, train_group: Any, rollout_manager: Any,
+                           placement_group: Optional[Dict[str, Any]]) -> List[str]:
+    """Stop and kill the multi-LoRA controller (if any), then free the group's workers; return what
+    was freed. A failed remote stop is logged. Any other error, or a cancellation, propagates after
+    everything is freed: a delete that leaves the GPUs held blocks the next create."""
+    freed: List[str] = []
     try:
-        await controller.stop.remote()
-    except RayError:
-        logger.warning("Multi-LoRA controller stop failed; killing", exc_info=True)
-    ray.kill(controller, no_restart=True)
+        if controller is not None:
+            try:
+                await controller.stop.remote()
+            except RayError:
+                logger.warning("Multi-LoRA controller stop failed; killing", exc_info=True)
+    finally:
+        if controller is not None:
+            ray.kill(controller, no_restart=True)
+            freed.append("multi_lora_controller")
+        freed += _free_workers(train_group, rollout_manager, placement_group)
+    return freed
+
+
+def _free_workers(train_group: Any, rollout_manager: Any,
+                  placement_group: Optional[Dict[str, Any]]) -> List[str]:
+    """Kill the train actors and the rollout manager and remove the placement groups."""
+    freed: List[str] = []
+    for actor in train_group._actor_handles:
+        ray.kill(actor, no_restart=True)
+        freed.append("actor")
+    if rollout_manager is not None:
+        ray.kill(rollout_manager, no_restart=True)
+        freed.append("rollout_manager")
+    for pg in _distinct_placement_groups(placement_group):
+        ray.util.remove_placement_group(pg)
+        freed.append("placement_group")
+    return freed
+
+
+def _distinct_placement_groups(pgs: Optional[Dict[str, Any]]) -> List[Any]:
+    """The placement groups of a create_placement_groups() dict of (pg, bundle_indices, gpu_ids)
+    tuples, once each: colocated roles share a pg, and debug_train_only leaves the rollout entry None."""
+    distinct: List[Any] = []
+    for pg_tuple in (pgs or {}).values():   # None: a pool tenant's handle holds no pgs (the pool owns them)
+        pg = pg_tuple[0] if isinstance(pg_tuple, tuple) else pg_tuple
+        if pg is not None and all(pg is not d for d in distinct):
+            distinct.append(pg)
+    return distinct
 
 
 @dataclass
@@ -711,15 +749,11 @@ class MilesBackend(TrainingBackend[MilesHandle]):
                     ray.kill(actor, no_restart=True)
                 except Exception:  # noqa: BLE001  (#189)
                     logger.warning("teardown: %s not killed", key, exc_info=True)
-        seen = set()
-        for pg_tuple in (cleanup.get("pgs") or {}).values():
-            pg_obj = pg_tuple[0] if isinstance(pg_tuple, tuple) else pg_tuple
-            if pg_obj is not None and id(pg_obj) not in seen:
-                seen.add(id(pg_obj))
-                try:
-                    ray.util.remove_placement_group(pg_obj)
-                except Exception:  # noqa: BLE001  (#189)
-                    logger.warning("teardown: placement group %r not removed", pg_obj, exc_info=True)
+        for pg_obj in _distinct_placement_groups(cleanup.get("pgs")):   # absent: create failed before the pgs
+            try:
+                ray.util.remove_placement_group(pg_obj)
+            except Exception:  # noqa: BLE001  (#189)
+                logger.warning("teardown: placement group %r not removed", pg_obj, exc_info=True)
         if cleanup:
             logger.info("create_model failure teardown: released %s", sorted(cleanup))
 
@@ -1238,34 +1272,10 @@ class MilesBackend(TrainingBackend[MilesHandle]):
         # fb/step (delete-during-optim_step crash class).
         await handle.lock.acquire()
         try:
-            resources_freed = []
-            # Fallback for a pool handle that outlived its pool record:
-            # kill the named controller so the next create_model can
-            # register a fresh one.
-            if handle.controller is not None:
-                await _stop_controller(handle.controller)
-                resources_freed.append("multi_lora_controller")
-
-            for actor in handle.train_group._actor_handles:
-                ray.kill(actor, no_restart=True)
-                resources_freed.append("actor")
-
-            if handle.rollout_manager is not None:
-                ray.kill(handle.rollout_manager, no_restart=True)
-                resources_freed.append("rollout_manager")
-
-            # placement_group holds the create_placement_groups() dict of
-            # (pg, bundle_indices, gpu_ids) tuples; pgs may be shared between
-            # roles (colocate), so dedupe before removal.
-            if handle.placement_group:
-                seen = set()
-                for pg_tuple in handle.placement_group.values():
-                    pg_obj = pg_tuple[0] if isinstance(pg_tuple, tuple) else pg_tuple
-                    # debug_train_only leaves the rollout entry as None
-                    if pg_obj is not None and id(pg_obj) not in seen:
-                        seen.add(id(pg_obj))
-                        ray.util.remove_placement_group(pg_obj)
-                        resources_freed.append("placement_group")
+            # A pool handle that outlived its pool record still carries the named controller;
+            # killing it lets the next create_model register a fresh one.
+            resources_freed = await _tear_down_group(
+                handle.controller, handle.train_group, handle.rollout_manager, handle.placement_group)
 
             logger.info("Miles model %s deleted, freed %d resources", handle.model_id, len(resources_freed))
 
@@ -1313,22 +1323,8 @@ class MilesBackend(TrainingBackend[MilesHandle]):
                     await self._pool_stop(pool)
                 except BackendError:
                     pass  # the queue is closed already — proceed to kills
-                resources_freed = []
-                await _stop_controller(pool.controller)
-                resources_freed.append("multi_lora_controller")
-                for actor in pool.train_group._actor_handles:
-                    ray.kill(actor, no_restart=True)
-                    resources_freed.append("actor")
-                if pool.rollout_manager is not None:
-                    ray.kill(pool.rollout_manager, no_restart=True)
-                    resources_freed.append("rollout_manager")
-                seen = set()
-                for pg_tuple in (pool.placement_group or {}).values():
-                    pg_obj = pg_tuple[0] if isinstance(pg_tuple, tuple) else pg_tuple
-                    if pg_obj is not None and id(pg_obj) not in seen:
-                        seen.add(id(pg_obj))
-                        ray.util.remove_placement_group(pg_obj)
-                        resources_freed.append("placement_group")
+                resources_freed = await _tear_down_group(
+                    pool.controller, pool.train_group, pool.rollout_manager, pool.placement_group)
             except Exception as e:
                 raise BackendError(
                     str(e), backend="miles", operation="delete_model", original_error=e,

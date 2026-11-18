@@ -269,7 +269,7 @@ def test_close_closes_every_model(rig):
 
 def test_a_retried_delete_after_a_failure_tears_down(rig):
     """Regression guarded: a delete that failed half-way can never be retried, since its scheduler is closed,
-    and the placement groups it had not released stay held. The retry reaches the policy's shutdown again."""
+    and the workers it had not shut down stay up. The retry reaches the policy's shutdown again."""
     async def body(backend, handle, policy):
         policy.shutdown_error = RuntimeError("actor died")
         with pytest.raises(BackendError, match="actor died"):

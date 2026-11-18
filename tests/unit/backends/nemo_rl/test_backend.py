@@ -119,7 +119,8 @@ def test_delete_model_warns_and_releases_the_cluster_when_generation_reports_fai
 
 
 def test_delete_model_raises_when_generation_shutdown_raises():
-    """An unexpected generation shutdown error reaches the caller instead of a warning."""
+    """An unexpected generation shutdown error reaches the caller instead of a warning, after the
+    cluster is released."""
     calls = []
 
     class Policy:
@@ -145,12 +146,13 @@ def test_delete_model_raises_when_generation_shutdown_raises():
         await backend.close()
 
     asyncio.run(run())
-    assert calls == ["policy"]
+    assert calls == ["policy", "cluster"]
 
 
 @pytest.mark.parametrize("error", [RuntimeError("reference worker died"), KeyError("reference_logprobs")])
-def test_reference_logprob_failure_reaches_every_waiter(error, caplog):
-    """A failed reference logprob batch is logged and reaches every waiter as a BackendError."""
+def test_a_failed_reference_logprob_batch_is_logged(error, caplog):
+    """A failed reference logprob batch is logged; every waiter still gets it as a BackendError. The
+    KeyError case keeps the handler from narrowing to one exception type."""
     class Backend:
         async def _run_reference_logprobs(self, handle, prompts):
             raise error

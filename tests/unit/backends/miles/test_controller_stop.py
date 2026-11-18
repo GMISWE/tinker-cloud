@@ -1,4 +1,5 @@
-"""Controller teardown distinguishes failed Ray calls from local bugs, on both delete paths."""
+"""Controller teardown distinguishes failed Ray calls from local bugs, on both delete paths, and
+frees the workers either way."""
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -35,6 +36,15 @@ def deletion(monkeypatch):
     return backend, handle, pool, stop, calls
 
 
+def _everything_freed(pool):
+    return [
+        ("kill", pool.controller, {"no_restart": True}),
+        *(("kill", actor, {"no_restart": True}) for actor in pool.train_group._actor_handles),
+        ("kill", pool.rollout_manager, {"no_restart": True}),
+        ("placement", next(iter(pool.placement_group.values()))[0]),
+    ]
+
+
 def _delete(deletion, last_tenant):
     backend, handle, pool, _, _ = deletion
     if last_tenant:
@@ -51,12 +61,7 @@ def test_a_successful_or_failed_remote_stop_still_kills_the_controller(deletion,
     _delete(deletion, last_tenant)
 
     stop.assert_awaited_once_with()
-    assert calls == [
-        ("kill", pool.controller, {"no_restart": True}),
-        *(("kill", actor, {"no_restart": True}) for actor in pool.train_group._actor_handles),
-        ("kill", pool.rollout_manager, {"no_restart": True}),
-        ("placement", next(iter(pool.placement_group.values()))[0]),
-    ]
+    assert calls == _everything_freed(pool)
     assert ("controller stop failed" in caplog.text) is (remote_error is not None)
     assert not handle.lock.locked() and not backend._pool_admin.locked()
     assert backend._pool is None
@@ -69,7 +74,9 @@ def test_a_successful_or_failed_remote_stop_still_kills_the_controller(deletion,
 @pytest.mark.parametrize("last_tenant", [True, False])
 @pytest.mark.parametrize("error_type", [ValueError, TypeError, AssertionError])
 def test_an_unexpected_local_stop_error_is_not_reported_as_a_success(deletion, last_tenant, error_type):
-    backend, handle, _, stop, calls = deletion
+    """A local stop error is not reported as a success, and the controller, actors, rollout manager
+    and placement group are still freed before it propagates."""
+    backend, handle, pool, stop, calls = deletion
     error = error_type("local stop bug")
     stop.side_effect = error
     with pytest.raises(BackendError, match="local stop bug") as raised:
@@ -79,13 +86,15 @@ def test_an_unexpected_local_stop_error_is_not_reported_as_a_success(deletion, l
     assert raised.value.__cause__ is error
     assert raised.value.operation == "delete_model" and raised.value.backend == "miles"
     stop.assert_awaited_once_with()
-    assert calls == []
+    assert calls == _everything_freed(pool)
     assert not handle.lock.locked() and not backend._pool_admin.locked()
     assert backend._pool is None
 
 
 @pytest.mark.parametrize("last_tenant", [True, False])
 def test_a_failed_kill_propagates_and_releases_the_delete_locks(deletion, monkeypatch, last_tenant):
+    """A kill that raises inside the shared teardown reaches the caller as a BackendError, and the
+    delete still releases its locks and the pool record."""
     backend, handle, _, stop, _ = deletion
     error = RayActorError(error_msg="controller kill failed")
 
@@ -103,10 +112,12 @@ def test_a_failed_kill_propagates_and_releases_the_delete_locks(deletion, monkey
 
 @pytest.mark.parametrize("last_tenant", [True, False])
 def test_cancelling_a_controller_stop_propagates_and_releases_the_delete_locks(deletion, last_tenant):
-    backend, handle, _, stop, calls = deletion
+    """A cancelled delete still frees the GPUs: the last-tenant path drops the pool record either way,
+    so nothing would free them later."""
+    backend, handle, pool, stop, calls = deletion
     stop.side_effect = asyncio.CancelledError()
     with pytest.raises(asyncio.CancelledError):
         _delete(deletion, last_tenant)
-    assert calls == []
+    assert calls == _everything_freed(pool)
     assert not handle.lock.locked() and not backend._pool_admin.locked()
     assert backend._pool is None
