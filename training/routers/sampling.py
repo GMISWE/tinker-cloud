@@ -187,8 +187,10 @@ async def asample(
     """
     request_id = generate_request_id()
 
-    # Extract prompt tokens
-    prompt_tokens = request.prompt.get_tokens()
+    try:
+        prompt_tokens = request.prompt.get_tokens()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     check_sample_extensions(request, len(prompt_tokens))
 
     # BUG-015: resolve the sampler's pinned weight version (snapshot samplers,
