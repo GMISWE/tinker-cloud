@@ -209,6 +209,8 @@ class SamplingParams(BaseModel):
         This handles the common case where clients pass token IDs to the stop field.
         """
         stop = values.get("stop")
+        if isinstance(stop, str):   # the SDK's SamplingParams.stop also takes one string
+            values["stop"] = stop = [stop]
         if stop is not None and stop and isinstance(stop[0], int):
             # Move integers from stop to stop_token_ids
             existing_stop_token_ids = values.get("stop_token_ids", [])
