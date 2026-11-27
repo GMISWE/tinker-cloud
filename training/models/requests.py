@@ -12,7 +12,8 @@ from ..core.tensor_values import is_array, list_or_array
 
 # loss_fn_config values: numbers, or text on the keys core.loss_registry declares
 # as text (the SDK's loss_fn_config_v2 carries both).
-LossFnConfig = Dict[str, Union[float, str]]
+# Preserve booleans so the registry can reject them instead of seeing 0.0/1.0.
+LossFnConfig = Dict[str, Union[float, str, bool]]
 
 
 class LoraConfig(BaseModel):
