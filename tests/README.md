@@ -19,6 +19,10 @@ loss registry, sampler routing, sampling params, checkpoints, sessions,
 per-model ordering, the proto wire). It runs against `--backend fake` today;
 the same assertions are the contract every backend must meet.
 
+`conformance/test_checkpoint_search.py` uses SDK 0.39's experimental checkpoint-search API. It
+saves tagged checkpoints through the SDK and searches them in both single and split server modes.
+The checkpoint router's unit cases run with only the server's CPU dependencies.
+
 ## Running
 
 The tests import the server as the `tinkercloud` package: the checkout must be
