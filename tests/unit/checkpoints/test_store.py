@@ -64,15 +64,22 @@ class TestRef:
         with pytest.raises(InvalidCheckpointPath):
             CheckpointRef.make("m", W, "a/b")
 
-    def test_make_refuses_names_that_exceed_255_bytes(self):
+    @pytest.mark.parametrize("kind, limit", [
+        (W, 241), (S, 233), (CheckpointKind.EXTERNAL_WEIGHTS, 232),
+    ])
+    @pytest.mark.parametrize("prefix", ["", "é" * 100])
+    def test_make_refuses_names_that_exceed_255_bytes(self, store, kind, limit, prefix):
+        """The record filename includes both the kind prefix and the .json suffix."""
         # Name alone is too long.
         with pytest.raises(InvalidCheckpointPath, match="exceeds 255 UTF-8 bytes"):
-            CheckpointRef.make("m", W, "x" * 256)
-        # Name fits alone but the record key (kind--name) does not.
-        just_under = "x" * (255 - len("weights--"))
-        CheckpointRef.make("m", W, just_under)  # longest name that fits a weights record key
-        with pytest.raises(InvalidCheckpointPath, match="record key"):
-            CheckpointRef.make("m", W, just_under + "x")
+            CheckpointRef.make("m", kind, "x" * 256)
+        name = prefix + "x" * (limit - len(prefix.encode("utf-8")))
+        t = store.begin_save("m", kind, name, options=SAVE_OPTIONS, optimizer_config=ADAMW)
+        store.complete(t.ref)
+        with pytest.raises(InvalidCheckpointPath, match="record filename"):
+            store.begin_save("m", kind, name + "x", options=SAVE_OPTIONS, optimizer_config=ADAMW)
+        assert store.require(t.ref) == t.root
+        assert list(t.root.parent.iterdir()) == [t.root]
 
     def test_long_name_does_not_remove_existing_checkpoint(self, store):
         # The bug: begin_save removed the old directory before the write failed.
@@ -88,8 +95,10 @@ class TestRef:
         # 130 two-byte characters == 260 bytes, refused because the name alone is too long.
         with pytest.raises(InvalidCheckpointPath, match="exceeds 255 UTF-8 bytes"):
             CheckpointRef.make("m", W, "é" * 130)
-        # 123 two-byte characters == 246 bytes, the longest that fits a weights record key.
-        CheckpointRef.make("m", W, "é" * 123)
+        # 120 two-byte characters == 240 bytes; one more exceeds the record filename limit.
+        CheckpointRef.make("m", W, "é" * 120)
+        with pytest.raises(InvalidCheckpointPath, match="record filename"):
+            CheckpointRef.make("m", W, "é" * 121)
 
 
 class TestLayout:
