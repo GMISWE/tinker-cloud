@@ -26,4 +26,5 @@ def verify(key: str, model_id: str, name: str, relpath: str, exp: int, sig: str,
     """True only for an untampered signature whose expiry is still ahead."""
     if (time.time() if now is None else now) >= exp:
         return False
-    return hmac.compare_digest(sign(key, model_id, name, relpath, exp), sig)
+    # bytes, not str: compare_digest raises TypeError on a non-ASCII str, and the query string is the caller's
+    return hmac.compare_digest(sign(key, model_id, name, relpath, exp).encode(), sig.encode())
