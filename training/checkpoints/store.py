@@ -134,7 +134,7 @@ class CheckpointRef:
         except ValueError:
             raise InvalidCheckpointPath(
                 f"checkpoint kind must be one of {KINDS_HELP}, got {kind!r} in {uri!r}") from None
-        return cls(_segment(model_id, "model_id"), kind_v, _segment(name, "checkpoint name"))
+        return cls.make(model_id, kind_v, name)
 
     @classmethod
     def make(cls, model_id: str, kind: CheckpointKind, name: str) -> "CheckpointRef":

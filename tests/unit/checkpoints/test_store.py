@@ -91,6 +91,13 @@ class TestRef:
             store.begin_save("m", W, "x" * 256, options=SAVE_OPTIONS, optimizer_config=ADAMW)
         assert store.require(ok).is_dir()  # old checkpoint still there
 
+    @pytest.mark.parametrize("name, message", [("x" * 256, "exceeds 255 UTF-8 bytes"), ("x" * 242, "record filename")])
+    def test_parse_refuses_names_that_make_refuses(self, store, name, message):
+        """A read names a checkpoint by URI; a name no save could have taken is malformed (400), not a
+        filesystem error (500) when the store looks for its record."""
+        with pytest.raises(InvalidCheckpointPath, match=message):
+            store.require(CheckpointRef.parse(f"tinker://m/weights/{name}"))
+
     def test_make_refuses_name_measured_in_bytes_not_characters(self):
         # 130 two-byte characters == 260 bytes, refused because the name alone is too long.
         with pytest.raises(InvalidCheckpointPath, match="exceeds 255 UTF-8 bytes"):
