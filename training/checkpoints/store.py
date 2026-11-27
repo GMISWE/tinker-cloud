@@ -142,9 +142,10 @@ class CheckpointRef:
         if len(name.encode("utf-8")) > MAX_RECORD_NAME_BYTES:
             raise InvalidCheckpointPath(
                 f"checkpoint name {name!r} exceeds {MAX_RECORD_NAME_BYTES} UTF-8 bytes")
-        if len(ref.record_key.encode("utf-8")) > MAX_RECORD_NAME_BYTES:
+        record_name = f"{ref.record_key}.json"
+        if len(record_name.encode("utf-8")) > MAX_RECORD_NAME_BYTES:
             raise InvalidCheckpointPath(
-                f"checkpoint name {name!r} would make record key {ref.record_key!r} exceed "
+                f"checkpoint name {name!r} would make record filename {record_name!r} exceed "
                 f"{MAX_RECORD_NAME_BYTES} UTF-8 bytes")
         return ref
 
