@@ -37,6 +37,26 @@ def test_session_lifecycle_is_the_gateways(tmp_path):
     run(main())
 
 
+def test_a_session_page_outside_the_bounds_is_422(tmp_path):
+    """SQLite reads a negative LIMIT or OFFSET as none, so -1 listed every session; past 2**63 it was a 500."""
+    async def main():
+        h = Harness(str(tmp_path))
+        try:
+            async with serve_uds(h.engine, h.engine_socket):
+                await h.register()
+                sids = [await h.create_session() for _ in range(3)]
+                for query in ("limit=-1", "limit=0", "limit=1001", f"limit={2**63}", "offset=-1", f"offset={2**63}"):
+                    r = await h.get(f"/api/v1/sessions?{query}")
+                    assert r.status_code == 422, (query, r.status_code, r.text)
+                r = await h.get("/api/v1/sessions?limit=1&offset=1")
+                assert r.status_code == 200 and len(r.json()["sessions"]) == 1 and r.json()["sessions"][0] in sids
+                r = await h.get(f"/api/v1/sessions?offset={2**63 - 1}")
+                assert r.status_code == 200 and r.json()["sessions"] == []
+        finally:
+            await h.close()
+    run(main())
+
+
 def test_samplers_are_minted_joined_and_read_at_the_gateway(tmp_path):
     async def main():
         h = Harness(str(tmp_path))
