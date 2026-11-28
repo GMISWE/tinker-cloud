@@ -572,7 +572,7 @@ LOCAL_OWNER = "urn:tinkercloud:owner:local"
 DEFAULT_PROJECT = "default"
 
 
-# The largest page the offset-paged list routes (training runs, checkpoints) return: the
+# The largest page the offset-paged list routes (training runs, checkpoints, sessions) return: the
 # SDK CLI's `checkpoint list` asks for pages of 1000 (tinker cli/commands/checkpoint.py).
 MAX_PAGE_LIMIT = 1000
 

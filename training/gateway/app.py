@@ -14,7 +14,7 @@ import uuid
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import orjson
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from starlette.requests import ClientDisconnect
 
@@ -26,6 +26,7 @@ from ..models.requests import (
     JoinSamplingSessionRequest,
     LOCAL_OWNER,
     DEFAULT_PROJECT,
+    MAX_PAGE_LIMIT,
     SessionHeartbeatRequest,
     SessionSearchRequest,
     UnknownProject,
@@ -327,7 +328,9 @@ def sdk_face(gateway: Gateway, engines) -> FastAPI:
                                      finished_at=session.finished_at)
 
     @app.get("/api/v1/sessions", response_model=ListSessionsResponse)
-    async def list_sessions(limit: int = 20, offset: int = 0, _: None = Depends(require_key)):
+    async def list_sessions(limit: int = Query(20, ge=1, le=MAX_PAGE_LIMIT),
+                            offset: int = Query(0, ge=0, le=2**63 - 1),   # SQLite's largest integer
+                            _: None = Depends(require_key)):
         return ListSessionsResponse(sessions=store.list_sessions(limit, offset))
 
     @app.get("/api/v1/sessions/{session_id}", response_model=GetSessionResponse)
