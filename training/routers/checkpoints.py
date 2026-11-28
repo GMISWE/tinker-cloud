@@ -18,6 +18,7 @@ import logging
 import time
 from datetime import datetime, timezone
 from typing import Dict, Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse
@@ -523,8 +524,10 @@ async def external_weights_urls(
     exp = int(time.time()) + config.external_weights.url_ttl_s
     key = config.external_weights.url_signing_key
     base = _public_base(request, config)
+    # a checkpoint name may hold any character but "/": escaped, the URL opens in any client
+    # and the route decodes it back to the names the signature covers
     urls = {
-        relpath: f"{base}/api/v1/external_weights/{model_id}/{name}/{relpath}"
+        relpath: f"{base}/api/v1/external_weights/{quote(model_id, safe='')}/{quote(name, safe='')}/{quote(relpath)}"
                  f"?exp={exp}&sig={signed_urls.sign(key, model_id, name, relpath, exp)}"
         for relpath in files
     }
